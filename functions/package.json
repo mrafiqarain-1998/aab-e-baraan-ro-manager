@@ -1,0 +1,16 @@
+{
+  "name": "aab-e-baraan-functions",
+  "description": "Fresh Cloud Functions backend for Aab-e-Baraan RO Plant Management (aab-e-baraan-ro-manager)",
+  "version": "1.0.0",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^5.1.1"
+  }
+}

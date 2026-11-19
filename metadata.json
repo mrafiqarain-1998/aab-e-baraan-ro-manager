@@ -1,0 +1,6 @@
+{
+  "name": "Aab-e-Baraan",
+  "description": "Smart RO water plant and water delivery operation management system with deliveries, bottle tracking, customer ledgers, inventory, cash closing, and cost analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

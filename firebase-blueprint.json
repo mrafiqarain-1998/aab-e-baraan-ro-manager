@@ -1,0 +1,534 @@
+{
+  "entities": {
+    "Plant": {
+      "title": "Plant",
+      "description": "Centralized plant/branch workspace definition shared by all authorized staff.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantName": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "branches": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "plantName", "ownerUid"]
+    },
+    "StaffUser": {
+      "title": "StaffUser",
+      "description": "Centralized staff authorization profile (no password fields stored). Enforced by Firestore rules and Cloud Functions.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "googleEmail": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "INCHARGE", "VIEW_ONLY"] },
+        "isSuperAdmin": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "permissions": { "type": "object" },
+        "assignedBranchIds": { "type": "array" },
+        "defaultBranchId": { "type": "string" },
+        "plantId": { "type": "string" },
+        "createdAt": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "id", "username", "name", "role", "active", "plantId"]
+    },
+    "StaffCredential": {
+      "title": "StaffCredential",
+      "description": "Server-only salted scrypt password credentials accessed strictly by Firebase Admin SDK inside Cloud Functions.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "salt": { "type": "string" },
+        "passwordHash": { "type": "string" },
+        "hashAlgo": { "type": "string" },
+        "active": { "type": "boolean" },
+        "plantId": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "salt", "passwordHash", "active", "plantId"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable activity and change history record across all modules.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorUsername": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actorRole": { "type": "string" },
+        "action": { "type": "string" },
+        "module": { "type": "string" },
+        "recordId": { "type": "string" },
+        "recordLabel": { "type": "string" },
+        "previousValue": { "type": "string" },
+        "updatedValue": { "type": "string" },
+        "timestampMillis": { "type": "integer" },
+        "dateTimeDisplay": { "type": "string" },
+        "deviceInfo": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "plantId", "actorUid", "action", "module", "timestampMillis"]
+    },
+    "PlantWorkspace": {
+      "title": "PlantWorkspace",
+      "description": "Legacy root workspace metadata retained for backward-compatible migration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantName": { "type": "string" },
+        "plantId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "memberUids"]
+    },
+    "PasswordResetRequest": {
+      "title": "PasswordResetRequest",
+      "description": "Staff password reset request awaiting Admin approval.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "username": { "type": "string" },
+        "fullName": { "type": "string" },
+        "role": { "type": "string" },
+        "requestTime": { "type": "string" },
+        "reason": { "type": "string" },
+        "isResolved": { "type": "boolean" },
+        "resolvedAt": { "type": "string" },
+        "resolvedBy": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "username", "isResolved", "ownerId", "memberUids"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Shared water plant customer profile, balance, and held bottles.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "customerCode": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "whatsapp": { "type": "string" },
+        "address": { "type": "string" },
+        "area": { "type": "string" },
+        "type": { "type": "string" },
+        "paymentCycle": { "type": "string" },
+        "currentBalance": { "type": "number" },
+        "emptyBottlesOwed": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "active", "ownerId", "memberUids"]
+    },
+    "Delivery": {
+      "title": "Delivery",
+      "description": "Shared customer bottle delivery record and billing summary.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "deliveryNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "date": { "type": "string" },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "paymentCollected": { "type": "number" },
+        "status": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "date", "ownerId", "memberUids"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Shared customer payment collection voucher.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "receiptNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "date": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "amount", "ownerId", "memberUids"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "Shared customer billing invoice linked to deliveries.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "balanceDue": { "type": "number" },
+        "status": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "totalAmount", "ownerId", "memberUids"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Shared plant OPEX/CAPEX expense voucher.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "voucherNumber": { "type": "string" },
+        "date": { "type": "string" },
+        "expenseType": { "type": "string" },
+        "categoryName": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "date", "amount", "ownerId", "memberUids"]
+    },
+    "ExpenseCategory": {
+      "title": "ExpenseCategory",
+      "description": "Configured expense category definition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId", "memberUids"]
+    },
+    "BottleSize": {
+      "title": "BottleSize",
+      "description": "Registered bottle SKU and pricing configuration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "name": { "type": "string" },
+        "capacityLitres": { "type": "number" },
+        "defaultRefillPrice": { "type": "number" },
+        "active": { "type": "boolean" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId", "memberUids"]
+    },
+    "BottleInventory": {
+      "title": "BottleInventory",
+      "description": "Live stock buckets per bottle size.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "bottleSizeId": { "type": "string" },
+        "sizeName": { "type": "string" },
+        "atPlantFull": { "type": "integer" },
+        "atPlantEmpty": { "type": "integer" },
+        "inUse": { "type": "integer" },
+        "withCustomers": { "type": "integer" },
+        "damaged": { "type": "integer" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "bottleSizeId", "sizeName", "ownerId", "memberUids"]
+    },
+    "BottleTransaction": {
+      "title": "BottleTransaction",
+      "description": "Purchase, refill, issue/sale, or movement record for bottle stock.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "bottleSizeId": { "type": "string" },
+        "date": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "bottleSizeId", "ownerId", "memberUids"]
+    },
+    "CustomerRate": {
+      "title": "CustomerRate",
+      "description": "Per-customer custom bottle pricing and effective date history.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "bottleSizeId": { "type": "string" },
+        "customPrice": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "bottleSizeId", "ownerId", "memberUids"]
+    },
+    "CustomerBottleAllocation": {
+      "title": "CustomerBottleAllocation",
+      "description": "Bottles issued, held, returned, and damaged per customer and size.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "bottleSizeId": { "type": "string" },
+        "emptyHeld": { "type": "integer" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "bottleSizeId", "ownerId", "memberUids"]
+    },
+    "SecurityDepositTransaction": {
+      "title": "SecurityDepositTransaction",
+      "description": "Customer bottle security deposit ledger transaction.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "amount", "ownerId", "memberUids"]
+    },
+    "MaterialRecord": {
+      "title": "MaterialRecord",
+      "description": "RO plant material, factory material, or material transaction.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "memberUids"]
+    },
+    "CostingOrClosingRecord": {
+      "title": "CostingOrClosingRecord",
+      "description": "Bottle costing, monthly recurring cost, or daily cash closing record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plantId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "memberUids"]
+    },
+    "AppSetting": {
+      "title": "AppSetting",
+      "description": "Workspace-scoped application settings.",
+      "type": "object",
+      "properties": {
+        "plantId": { "type": "string" },
+        "isDarkMode": { "type": "boolean" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["isDarkMode", "ownerId", "memberUids"]
+    },
+    "CloudBackup": {
+      "title": "CloudBackup",
+      "description": "Full plant backup snapshot stored in Cloud Firestore (passwords excluded).",
+      "type": "object",
+      "properties": {
+        "backupId": { "type": "string" },
+        "plantId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "timestampMs": { "type": "integer" },
+        "totalRecords": { "type": "integer" },
+        "jsonPayload": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "memberEmails": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["backupId", "totalRecords", "jsonPayload", "ownerId", "memberUids"]
+    }
+  },
+  "firestore": {
+    "/plants/{plantId}": {
+      "schema": { "$ref": "#/entities/Plant" },
+      "description": "Centralized plant & branch registry"
+    },
+    "/staffUsers/{uid}": {
+      "schema": { "$ref": "#/entities/StaffUser" },
+      "description": "Staff authorization directory & granular permission matrix (zero plaintext passwords)"
+    },
+    "/staffByEmail/{email}": {
+      "schema": { "$ref": "#/entities/StaffUser" },
+      "description": "Gmail-keyed staff authorization lookup for Google Sign-In multi-device sync without custom claims"
+    },
+    "/staffCredentials/{uid}": {
+      "schema": { "$ref": "#/entities/StaffCredential" },
+      "description": "Server-only salted scrypt password hashes (client access denied)"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable chronological audit & activity trail"
+    },
+    "/plantWorkspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/PlantWorkspace" },
+      "description": "Workspace membership and cross-device plant sync scope"
+    },
+    "/passwordResetRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/PasswordResetRequest" },
+      "description": "Staff password reset requests"
+    },
+    "/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Centralized customer directory and ledger balances"
+    },
+    "/deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/Delivery" },
+      "description": "Centralized water bottle delivery records"
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Centralized customer payment receipts"
+    },
+    "/invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/Invoice" },
+      "description": "Centralized customer invoices"
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Centralized plant expenses"
+    },
+    "/expenseCategories/{categoryId}": {
+      "schema": { "$ref": "#/entities/ExpenseCategory" },
+      "description": "Centralized expense categories"
+    },
+    "/bottleSizes/{sizeId}": {
+      "schema": { "$ref": "#/entities/BottleSize" },
+      "description": "Registered bottle sizes and default rates"
+    },
+    "/bottleInventory/{inventoryId}": {
+      "schema": { "$ref": "#/entities/BottleInventory" },
+      "description": "Live bottle inventory counts"
+    },
+    "/bottlePurchases/{purchaseId}": {
+      "schema": { "$ref": "#/entities/BottleTransaction" },
+      "description": "Bottle stock purchase records"
+    },
+    "/bottleRefills/{refillId}": {
+      "schema": { "$ref": "#/entities/BottleTransaction" },
+      "description": "Bottle refill and packet conversion records"
+    },
+    "/bottleIssueSales/{recordId}": {
+      "schema": { "$ref": "#/entities/BottleTransaction" },
+      "description": "Bottle issue and packaged sale logs"
+    },
+    "/bottleMovements/{movementId}": {
+      "schema": { "$ref": "#/entities/BottleTransaction" },
+      "description": "Bottle movement and loss/damage audit log"
+    },
+    "/customerRates/{rateId}": {
+      "schema": { "$ref": "#/entities/CustomerRate" },
+      "description": "Customer-specific bottle pricing"
+    },
+    "/customerBottleAllocations/{allocId}": {
+      "schema": { "$ref": "#/entities/CustomerBottleAllocation" },
+      "description": "Customer bottle allocations and holdings"
+    },
+    "/securityDeposits/{depositId}": {
+      "schema": { "$ref": "#/entities/SecurityDepositTransaction" },
+      "description": "Customer security deposit transactions"
+    },
+    "/roPlantItems/{itemId}": {
+      "schema": { "$ref": "#/entities/MaterialRecord" },
+      "description": "RO plant spare parts and items"
+    },
+    "/roItemTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/MaterialRecord" },
+      "description": "RO plant item transactions"
+    },
+    "/factoryMaterials/{materialId}": {
+      "schema": { "$ref": "#/entities/MaterialRecord" },
+      "description": "Other factory consumables and materials"
+    },
+    "/materialTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/MaterialRecord" },
+      "description": "Factory material stock movements"
+    },
+    "/bottleCostings/{costingId}": {
+      "schema": { "$ref": "#/entities/CostingOrClosingRecord" },
+      "description": "Bottle unit costing breakdowns"
+    },
+    "/monthlyRecurringExpenses/{expId}": {
+      "schema": { "$ref": "#/entities/CostingOrClosingRecord" },
+      "description": "Monthly recurring fixed plant expenses"
+    },
+    "/cashClosings/{closingId}": {
+      "schema": { "$ref": "#/entities/CostingOrClosingRecord" },
+      "description": "Daily cash closing reconciliations"
+    },
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSetting" },
+      "description": "Workspace UI settings"
+    },
+    "/backups/{backupId}": {
+      "schema": { "$ref": "#/entities/CloudBackup" },
+      "description": "Full plant backup snapshots"
+    }
+  }
+}

@@ -1,0 +1,984 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Default Deny Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Identity, Plant Isolation & Module RBAC Helpers
+    // All staff-lookup helpers bind `let staff = getStaff();` ONCE per evaluation
+    // so Firestore never hits the 1,000-expression evaluation limit.
+    function isValidId(id) {
+      return id is string &&
+             id.size() >= 1 &&
+             id.size() <= 128 &&
+             id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasVerifiedEmail() {
+      return isSignedIn() &&
+             ('email' in request.auth.token) &&
+             request.auth.token.email is string &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email_verified == true;
+    }
+
+    // Only mrafiqarain1998@gmail.com (or verified backend Super Admin claim) is Super Admin.
+    function isSuperAdminClaimOrEmail() {
+      return isSignedIn() && (
+        (hasVerifiedEmail() && request.auth.token.email.lower() == 'mrafiqarain1998@gmail.com') ||
+        (('isSuperAdmin' in request.auth.token) && request.auth.token.isSuperAdmin == true)
+      );
+    }
+
+    // Spark Quota Optimization:
+    // Google-signed-in staff live in staffByEmail/{email}; checking it FIRST avoids a wasted
+    // billed exists() read on non-existent staffUsers/{uid} on every request (50-66% fewer rule reads).
+    // Custom-token staff (no verified email) short-circuit hasVerifiedEmail() with 0 reads and go
+    // straight to staffUsers/{uid}. Super Admin short-circuits before getStaff() with 0 reads.
+    function getStaff() {
+      return (hasVerifiedEmail() && exists(/databases/$(database)/documents/staffByEmail/$(request.auth.token.email.lower())))
+        ? get(/databases/$(database)/documents/staffByEmail/$(request.auth.token.email.lower())).data
+        : (exists(/databases/$(database)/documents/staffUsers/$(request.auth.uid))
+            ? get(/databases/$(database)/documents/staffUsers/$(request.auth.uid)).data
+            : null);
+    }
+
+    function docPlantId(data) {
+      return ('plantId' in data && data.plantId is string && data.plantId.size() > 0)
+        ? data.plantId
+        : 'aab_e_baraan_plant_01';
+    }
+
+    function isStaffAdmin(staff) {
+      return staff.get('isSuperAdmin', false) == true || staff.get('role', '') == 'ADMIN';
+    }
+
+    function hasPlant(staff, plantId) {
+      let branches = staff.get('assignedBranchIds', []);
+      return branches.size() == 0 ||
+             plantId in branches ||
+             staff.get('defaultBranchId', '') == plantId ||
+             staff.get('plantId', '') == plantId;
+    }
+
+    function hasPerm(staff, mod, actions) {
+      return ('permissions' in staff) &&
+             (mod in staff.permissions) &&
+             staff.permissions[mod].hasAny(actions);
+    }
+
+    function isSuperAdmin() {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkStaffIsSuperAdmin());
+    }
+
+    function checkStaffIsSuperAdmin() {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             staff.get('isSuperAdmin', false) == true;
+    }
+
+    function isActivePlantMember(plantId) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkActivePlantMember(plantId));
+    }
+
+    function checkActivePlantMember(plantId) {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             hasPlant(staff, plantId);
+    }
+
+    function isTargetSuperAdmin(data) {
+      return data.get('isSuperAdmin', false) == true ||
+             data.get('id', '') == 'user_admin_01';
+    }
+
+    function isOwnStaffDoc(docUid, data) {
+      return docUid == request.auth.uid ||
+             data.get('uid', '') == request.auth.uid ||
+             (hasVerifiedEmail() && data.get('googleEmail', '').lower() == request.auth.token.email.lower());
+    }
+
+    function privilegeFieldsUnchanged(oldData, newData) {
+      return newData.role == oldData.role &&
+             newData.active == oldData.active &&
+             newData.get('isSuperAdmin', false) == oldData.get('isSuperAdmin', false) &&
+             newData.get('permissions', {}) == oldData.get('permissions', {}) &&
+             newData.get('assignedBranchIds', []) == oldData.get('assignedBranchIds', []) &&
+             newData.get('defaultBranchId', '') == oldData.get('defaultBranchId', '') &&
+             newData.get('plantId', '') == oldData.get('plantId', '');
+    }
+
+    function canReadStaffDoc(isNullDoc, data) {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             (isStaffAdmin(staff) || hasPerm(staff, 'STAFF_MANAGEMENT', ['VIEW'])) &&
+             (isNullDoc || staff.get('isSuperAdmin', false) == true || hasPlant(staff, docPlantId(data)));
+    }
+
+    function canCreateManagedStaff(newData) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkCreateStaff(newData));
+    }
+
+    function checkCreateStaff(newData) {
+      let staff = getStaff();
+      let branches = staff != null ? staff.get('assignedBranchIds', []) : [];
+      return staff != null &&
+             staff.active == true &&
+             (isStaffAdmin(staff) || hasPerm(staff, 'STAFF_MANAGEMENT', ['MANAGE'])) &&
+             !isTargetSuperAdmin(newData) &&
+             hasPlant(staff, docPlantId(newData)) &&
+             (branches.size() == 0 ||
+              (('assignedBranchIds' in newData) &&
+               newData.assignedBranchIds is list &&
+               newData.assignedBranchIds.size() > 0 &&
+               newData.assignedBranchIds.hasOnly(branches))) &&
+             (newData.role != 'ADMIN' || staff.get('role', '') == 'ADMIN');
+    }
+
+    function canUpdateManagedStaff(docUid, oldData, newData) {
+      return isSuperAdminClaimOrEmail()
+        ? (
+            !isTargetSuperAdmin(oldData) ||
+            (newData.get('isSuperAdmin', false) == true &&
+             newData.role == 'ADMIN' &&
+             newData.active == true)
+          )
+        : (isSignedIn() && checkUpdateStaff(docUid, oldData, newData));
+    }
+
+    function checkUpdateStaff(docUid, oldData, newData) {
+      let staff = getStaff();
+      let branches = staff != null ? staff.get('assignedBranchIds', []) : [];
+      return staff != null &&
+             staff.active == true &&
+             (isStaffAdmin(staff) || hasPerm(staff, 'STAFF_MANAGEMENT', ['MANAGE'])) &&
+             !isTargetSuperAdmin(oldData) &&
+             !isTargetSuperAdmin(newData) &&
+             hasPlant(staff, docPlantId(oldData)) &&
+             hasPlant(staff, docPlantId(newData)) &&
+             (branches.size() == 0 ||
+              (('assignedBranchIds' in newData) &&
+               newData.assignedBranchIds is list &&
+               newData.assignedBranchIds.size() > 0 &&
+               newData.assignedBranchIds.hasOnly(branches))) &&
+             (newData.role != 'ADMIN' || staff.get('role', '') == 'ADMIN') &&
+             (!isOwnStaffDoc(docUid, oldData) || privilegeFieldsUnchanged(oldData, newData));
+    }
+
+    function canDeleteManagedStaff(docUid, oldData) {
+      return !isTargetSuperAdmin(oldData) && (
+        isSuperAdminClaimOrEmail() || (isSignedIn() && checkDeleteStaff(docUid, oldData))
+      );
+    }
+
+    function checkDeleteStaff(docUid, oldData) {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             (isStaffAdmin(staff) || hasPerm(staff, 'STAFF_MANAGEMENT', ['MANAGE'])) &&
+             !isOwnStaffDoc(docUid, oldData) &&
+             hasPlant(staff, docPlantId(oldData));
+    }
+
+    // Single-lookup Read Helpers
+    function canRead1(data, mod1) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkRead1(data, mod1));
+    }
+
+    function checkRead1(data, mod1) {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             hasPlant(staff, docPlantId(data)) &&
+             (isStaffAdmin(staff) || hasPerm(staff, mod1, ['VIEW']));
+    }
+
+    function canRead2(data, mod1, mod2) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkRead2(data, mod1, mod2));
+    }
+
+    function checkRead2(data, mod1, mod2) {
+      let staff = getStaff();
+      return staff != null &&
+             staff.active == true &&
+             hasPlant(staff, docPlantId(data)) &&
+             (isStaffAdmin(staff) || hasPerm(staff, mod1, ['VIEW']) || hasPerm(staff, mod2, ['VIEW']));
+    }
+
+    // Ultra-Low-Expression Direct Write Helpers (no 18-branch switch evaluation, <= 7 args!)
+    // Each collection evaluates ONLY its own 1-5 module checks (~25-55 expressions total).
+    function hasPair(s, p) {
+      return hasPerm(s, p[0], p[1]);
+    }
+
+    function canCreate1(newData, p1) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkCreate1(newData, p1));
+    }
+    function checkCreate1(newData, p1) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1));
+    }
+
+    function canCreate2(newData, p1, p2) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkCreate2(newData, p1, p2));
+    }
+    function checkCreate2(newData, p1, p2) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2));
+    }
+
+    function canCreate3(newData, p1, p2, p3) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkCreate3(newData, p1, p2, p3));
+    }
+    function checkCreate3(newData, p1, p2, p3) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2) || hasPair(s, p3));
+    }
+
+    function canCreate5(newData, p1, p2, p3, p4, p5) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkCreate5(newData, p1, p2, p3, p4, p5));
+    }
+    function checkCreate5(newData, p1, p2, p3, p4, p5) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2) || hasPair(s, p3) || hasPair(s, p4) || hasPair(s, p5));
+    }
+
+    function canUpdate1(oldData, newData, p1) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkUpdate1(oldData, newData, p1));
+    }
+    function checkUpdate1(oldData, newData, p1) {
+      let s = getStaff();
+      return s != null && s.active == true &&
+             hasPlant(s, docPlantId(oldData)) && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1));
+    }
+
+    function canUpdate2(oldData, newData, p1, p2) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkUpdate2(oldData, newData, p1, p2));
+    }
+    function checkUpdate2(oldData, newData, p1, p2) {
+      let s = getStaff();
+      return s != null && s.active == true &&
+             hasPlant(s, docPlantId(oldData)) && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2));
+    }
+
+    function canUpdate3(oldData, newData, p1, p2, p3) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkUpdate3(oldData, newData, p1, p2, p3));
+    }
+    function checkUpdate3(oldData, newData, p1, p2, p3) {
+      let s = getStaff();
+      return s != null && s.active == true &&
+             hasPlant(s, docPlantId(oldData)) && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2) || hasPair(s, p3));
+    }
+
+    function canUpdate4(oldData, newData, p1, p2, p3, p4) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkUpdate4(oldData, newData, p1, p2, p3, p4));
+    }
+    function checkUpdate4(oldData, newData, p1, p2, p3, p4) {
+      let s = getStaff();
+      return s != null && s.active == true &&
+             hasPlant(s, docPlantId(oldData)) && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2) || hasPair(s, p3) || hasPair(s, p4));
+    }
+
+    function canUpdate5(oldData, newData, p1, p2, p3, p4, p5) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkUpdate5(oldData, newData, p1, p2, p3, p4, p5));
+    }
+    function checkUpdate5(oldData, newData, p1, p2, p3, p4, p5) {
+      let s = getStaff();
+      return s != null && s.active == true &&
+             hasPlant(s, docPlantId(oldData)) && hasPlant(s, docPlantId(newData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2) || hasPair(s, p3) || hasPair(s, p4) || hasPair(s, p5));
+    }
+
+    function canDelete1(oldData, p1) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkDelete1(oldData, p1));
+    }
+    function checkDelete1(oldData, p1) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(oldData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1));
+    }
+
+    function canDelete2(oldData, p1, p2) {
+      return isSuperAdminClaimOrEmail() || (isSignedIn() && checkDelete2(oldData, p1, p2));
+    }
+    function checkDelete2(oldData, p1, p2) {
+      let s = getStaff();
+      return s != null && s.active == true && hasPlant(s, docPlantId(oldData)) &&
+             (isStaffAdmin(s) || hasPair(s, p1) || hasPair(s, p2));
+    }
+
+    // 3. Common Field & Metadata Validators
+    function hasAccessMetadata(data) {
+      return (!('ownerId' in data) || (data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128)) &&
+             (!('memberUids' in data) || (
+               data.memberUids is list &&
+               data.memberUids.size() <= 50 &&
+               (data.memberUids.size() == 0 || data.memberUids[0] is string)
+             )) &&
+             (!('memberEmails' in data) || (
+               data.memberEmails is list &&
+               data.memberEmails.size() <= 50 &&
+               (data.memberEmails.size() == 0 || data.memberEmails[0] is string)
+             )) &&
+             (!('plantId' in data) || (data.plantId is string && data.plantId.size() >= 1 && data.plantId.size() <= 128)) &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function optStr(data, key, maxLen) {
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function optNum(data, key) {
+      return !(key in data) || data[key] == null || data[key] is number;
+    }
+
+    function optBool(data, key) {
+      return !(key in data) || data[key] == null || data[key] is bool;
+    }
+
+    function containsNoSecretFields(data) {
+      return !('password' in data) &&
+             !('passwordHash' in data) &&
+             !('passwordSalt' in data) &&
+             !('salt' in data);
+    }
+
+    // 4. Entity Schema Validators
+    function isValidPlant(data) {
+      return data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.plantName is string && data.plantName.size() >= 1 && data.plantName.size() <= 160 &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidStaffUser(data) {
+      return containsNoSecretFields(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 64 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.role is string && data.role in ['ADMIN', 'INCHARGE', 'VIEW_ONLY'] &&
+             data.active is bool &&
+             optStr(data, 'uid', 128) &&
+             optStr(data, 'phone', 40) &&
+             optStr(data, 'googleEmail', 160) &&
+             optStr(data, 'plantId', 128) &&
+             optStr(data, 'defaultBranchId', 128) &&
+             optBool(data, 'isSuperAdmin') &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidAuditLog(data) {
+      return containsNoSecretFields(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.plantId is string && data.plantId.size() >= 1 && data.plantId.size() <= 128 &&
+             data.actorUid is string && data.actorUid.size() >= 1 && data.actorUid.size() <= 128 &&
+             data.action is string && data.action.size() >= 1 && data.action.size() <= 40 &&
+             data.module is string && data.module.size() >= 1 && data.module.size() <= 64 &&
+             data.timestampMillis is number &&
+             optStr(data, 'actorUsername', 64) &&
+             optStr(data, 'actorName', 120) &&
+             optStr(data, 'actorRole', 32) &&
+             optStr(data, 'recordId', 128) &&
+             optStr(data, 'recordLabel', 240) &&
+             optStr(data, 'previousValue', 500) &&
+             optStr(data, 'updatedValue', 500) &&
+             optStr(data, 'deviceInfo', 160);
+    }
+
+    function isValidPlantWorkspace(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             optStr(data, 'plantName', 120) &&
+             optStr(data, 'ownerEmail', 160);
+    }
+
+    function isValidLegacyUserAccount(data) {
+      return hasAccessMetadata(data) &&
+             containsNoSecretFields(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 64 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.role is string && data.role in ['ADMIN', 'INCHARGE', 'VIEW_ONLY'] &&
+             data.active is bool &&
+             optStr(data, 'phone', 40) &&
+             optStr(data, 'googleEmail', 160) &&
+             optNum(data, 'createdAt');
+    }
+
+    function isValidPasswordResetRequest(data) {
+      return hasAccessMetadata(data) &&
+             containsNoSecretFields(data) &&
+             (!('newPasswordSet' in data) || data.newPasswordSet == null || data.newPasswordSet == '') &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 64 &&
+             data.isResolved is bool &&
+             optStr(data, 'fullName', 120) &&
+             optStr(data, 'role', 30) &&
+             optStr(data, 'requestTime', 64) &&
+             optStr(data, 'reason', 300) &&
+             optStr(data, 'resolvedAt', 64) &&
+             optStr(data, 'resolvedBy', 120);
+    }
+
+    function isValidCustomer(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+             data.active is bool &&
+             optStr(data, 'customerCode', 40) &&
+             optStr(data, 'phone', 40) &&
+             optStr(data, 'whatsapp', 40) &&
+             optStr(data, 'address', 300) &&
+             optStr(data, 'area', 120) &&
+             optStr(data, 'notes', 500) &&
+             optNum(data, 'currentBalance') &&
+             optNum(data, 'emptyBottlesOwed');
+    }
+
+    function isValidDelivery(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.date is string && data.date.size() >= 1 && data.date.size() <= 32 &&
+             (!('items' in data) || (data.items is list && data.items.size() <= 50)) &&
+             optStr(data, 'deliveryNumber', 64) &&
+             optStr(data, 'customerName', 160) &&
+             optStr(data, 'status', 40) &&
+             optNum(data, 'totalAmount') &&
+             optNum(data, 'paymentCollected');
+    }
+
+    function isValidPayment(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.amount is number && data.amount >= 0 &&
+             (!('allocations' in data) || (data.allocations is list && data.allocations.size() <= 100)) &&
+             optStr(data, 'receiptNumber', 64) &&
+             optStr(data, 'customerName', 160) &&
+             optStr(data, 'date', 32);
+    }
+
+    function isValidInvoice(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.totalAmount is number &&
+             optStr(data, 'invoiceNumber', 64) &&
+             optStr(data, 'status', 40) &&
+             optNum(data, 'balanceDue');
+    }
+
+    function isValidExpense(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.date is string && data.date.size() >= 1 && data.date.size() <= 32 &&
+             data.amount is number && data.amount >= 0 &&
+             optStr(data, 'voucherNumber', 64) &&
+             optStr(data, 'categoryName', 120) &&
+             optStr(data, 'description', 500) &&
+             optStr(data, 'notes', 500);
+    }
+
+    function isValidExpenseCategory(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             optStr(data, 'type', 30);
+    }
+
+    function isValidBottleSize(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             optNum(data, 'capacityLitres') &&
+             optNum(data, 'defaultRefillPrice') &&
+             optBool(data, 'active');
+    }
+
+    function isValidBottleInventory(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.bottleSizeId is string && data.bottleSizeId.size() >= 1 && data.bottleSizeId.size() <= 128 &&
+             data.sizeName is string && data.sizeName.size() >= 1 && data.sizeName.size() <= 120 &&
+             optNum(data, 'atPlantFull') &&
+             optNum(data, 'atPlantEmpty') &&
+             optNum(data, 'inUse') &&
+             optNum(data, 'withCustomers') &&
+             optNum(data, 'damaged');
+    }
+
+    function isValidBottleTransaction(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.bottleSizeId is string && data.bottleSizeId.size() >= 1 && data.bottleSizeId.size() <= 128 &&
+             optStr(data, 'date', 32) &&
+             optStr(data, 'notes', 500);
+    }
+
+    function isValidCustomerRate(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.bottleSizeId is string && data.bottleSizeId.size() >= 1 && data.bottleSizeId.size() <= 128 &&
+             data.customPrice is number &&
+             (!('rateHistory' in data) || (data.rateHistory is list && data.rateHistory.size() <= 200));
+    }
+
+    function isValidCustomerAllocation(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.bottleSizeId is string && data.bottleSizeId.size() >= 1 && data.bottleSizeId.size() <= 128 &&
+             optNum(data, 'emptyHeld') &&
+             optNum(data, 'totalIssued');
+    }
+
+    function isValidSecurityDeposit(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+             data.amount is number &&
+             optStr(data, 'notes', 500);
+    }
+
+    function isValidMaterialOrCostingRecord(data) {
+      return hasAccessMetadata(data) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             optStr(data, 'name', 160) &&
+             optStr(data, 'description', 500) &&
+             optStr(data, 'notes', 500);
+    }
+
+    function isValidAppSettings(data) {
+      return hasAccessMetadata(data) &&
+             data.isDarkMode is bool;
+    }
+
+    function isValidBackup(data) {
+      return hasAccessMetadata(data) &&
+             data.backupId is string && data.backupId.size() >= 1 && data.backupId.size() <= 128 &&
+             data.totalRecords is number &&
+             data.jsonPayload is string && data.jsonPayload.size() <= 900000;
+    }
+
+    function isValidAppRelease(data) {
+      return data.versionCode is int && data.versionCode >= 1 && data.versionCode <= 99999999 &&
+             data.versionName is string && data.versionName.size() >= 1 && data.versionName.size() <= 40 &&
+             optStr(data, 'downloadUrl', 500) &&
+             (!('downloadUrl' in data) || data.downloadUrl == '' || data.downloadUrl.matches('^https://.*')) &&
+             optStr(data, 'githubRepo', 160) &&
+             optStr(data, 'releaseNotes', 1000) &&
+             optBool(data, 'mandatory') &&
+             optNum(data, 'updatedAtMillis');
+    }
+
+    // 5. Server-Only Credentials Collection
+    match /staffCredentials/{uid} {
+      allow read, write: if false;
+    }
+
+    // 6. Staff Profiles, Plants & Immutable Audit Logs
+    match /staffUsers/{uid} {
+      allow get: if isValidId(uid) && isSignedIn() && (
+        request.auth.uid == uid ||
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(resource == null, resource == null ? {} : existing())
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(false, existing())
+      );
+      allow create: if isValidId(uid) &&
+                       isValidStaffUser(incoming()) &&
+                       canCreateManagedStaff(incoming());
+      allow update: if isValidId(uid) &&
+                       isValidStaffUser(incoming()) &&
+                       canUpdateManagedStaff(uid, existing(), incoming());
+      allow delete: if isValidId(uid) &&
+                       canDeleteManagedStaff(uid, existing());
+    }
+
+    match /staffByEmail/{email} {
+      allow get: if isSignedIn() && (
+        (hasVerifiedEmail() && request.auth.token.email.lower() == email) ||
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(resource == null, resource == null ? {} : existing())
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(false, existing())
+      );
+      allow create: if email is string &&
+                       email.size() >= 3 &&
+                       email.size() <= 160 &&
+                       isValidStaffUser(incoming()) &&
+                       (!('googleEmail' in incoming()) || incoming().googleEmail.lower() == email) &&
+                       canCreateManagedStaff(incoming());
+      allow update: if email is string &&
+                       email.size() >= 3 &&
+                       email.size() <= 160 &&
+                       isValidStaffUser(incoming()) &&
+                       (!('googleEmail' in incoming()) || incoming().googleEmail.lower() == email) &&
+                       canUpdateManagedStaff(incoming().get('uid', ''), existing(), incoming());
+      allow delete: if email is string &&
+                       email.size() >= 3 &&
+                       email.size() <= 160 &&
+                       canDeleteManagedStaff(existing().get('uid', ''), existing());
+    }
+
+    match /plants/{plantId} {
+      allow read: if isValidId(plantId) && isActivePlantMember(plantId);
+      allow create: if isValidId(plantId) && isValidPlant(incoming()) && canCreate1(incoming(), ['SETTINGS', ['MANAGE']]);
+      allow update: if isValidId(plantId) && isValidPlant(incoming()) && canUpdate1(existing(), incoming(), ['SETTINGS', ['MANAGE']]);
+      allow delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow get, list: if canRead2(existing(), 'AUDIT_HISTORY', 'REPORTS');
+      allow create: if isValidId(logId) &&
+                       isSignedIn() &&
+                       isValidAuditLog(incoming()) &&
+                       incoming().actorUid == request.auth.uid &&
+                       isActivePlantMember(docPlantId(incoming()));
+      allow update, delete: if false;
+    }
+
+    // Free In-App Update Metadata (0 extra rule reads on get; only Super Admin can publish)
+    match /appReleases/{releaseId} {
+      allow get: if isSignedIn() && releaseId == 'latest';
+      allow list: if false;
+      allow create, update: if releaseId == 'latest' && isValidAppRelease(incoming()) && isSuperAdmin();
+      allow delete: if releaseId == 'latest' && isSuperAdmin();
+    }
+
+    // 7. Centralized Plant Business Collections
+    match /plantWorkspaces/{workspaceId} {
+      allow get, list: if isActivePlantMember(docPlantId(existing()));
+      allow create: if isSignedIn() &&
+                       isValidId(workspaceId) &&
+                       isValidPlantWorkspace(incoming()) &&
+                       isSuperAdmin();
+      allow update: if isSignedIn() &&
+                       isValidId(workspaceId) &&
+                       isValidPlantWorkspace(incoming()) &&
+                       isSuperAdmin();
+      allow delete: if isSignedIn() &&
+                       isValidId(workspaceId) &&
+                       isSuperAdmin();
+    }
+
+    match /users/{userId} {
+      allow get, list: if isSignedIn() && (
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(false, existing())
+      );
+      allow create: if isValidId(userId) &&
+                       isValidLegacyUserAccount(incoming()) &&
+                       canCreateManagedStaff(incoming());
+      allow update: if isValidId(userId) &&
+                       isValidLegacyUserAccount(incoming()) &&
+                       canUpdateManagedStaff(userId, existing(), incoming());
+      allow delete: if isValidId(userId) &&
+                       userId != 'user_admin_01' &&
+                       canDeleteManagedStaff(userId, existing());
+    }
+
+    match /passwordResetRequests/{requestId} {
+      allow get, list: if isSignedIn() && (
+        isSuperAdminClaimOrEmail() ||
+        canReadStaffDoc(false, existing())
+      );
+      allow create: if isValidId(requestId) &&
+                       isValidPasswordResetRequest(incoming()) &&
+                       isActivePlantMember(docPlantId(incoming()));
+      allow update: if isValidId(requestId) &&
+                       isValidPasswordResetRequest(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['STAFF_MANAGEMENT', ['MANAGE']]);
+      allow delete: if isValidId(requestId) &&
+                       canDelete1(existing(), ['STAFF_MANAGEMENT', ['MANAGE']]);
+    }
+
+    match /customers/{customerId} {
+      allow get, list: if canRead1(existing(), 'CUSTOMERS');
+      allow create: if isValidId(customerId) && isValidCustomer(incoming()) &&
+                       canCreate2(incoming(), ['CUSTOMERS', ['ADD', 'MANAGE']], ['DELIVERIES', ['ADD']]);
+      allow update: if isValidId(customerId) && isValidCustomer(incoming()) &&
+                       canUpdate4(existing(), incoming(),
+                         ['CUSTOMERS', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['DELIVERIES', ['ADD', 'EDIT', 'DELETE']],
+                         ['PAYMENTS_BALANCES', ['ADD', 'EDIT', 'DELETE']],
+                         ['BOTTLE_ISSUE', ['ADD', 'EDIT']]);
+      allow delete: if isValidId(customerId) && canDelete1(existing(), ['CUSTOMERS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /deliveries/{deliveryId} {
+      allow get, list: if canRead1(existing(), 'DELIVERIES');
+      allow create: if isValidId(deliveryId) && isValidDelivery(incoming()) &&
+                       canCreate1(incoming(), ['DELIVERIES', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(deliveryId) && isValidDelivery(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['DELIVERIES', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['PAYMENTS_BALANCES', ['ADD', 'EDIT', 'APPROVE']]);
+      allow delete: if isValidId(deliveryId) && canDelete1(existing(), ['DELIVERIES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /payments/{paymentId} {
+      allow get, list: if canRead1(existing(), 'PAYMENTS_BALANCES');
+      allow create: if isValidId(paymentId) && isValidPayment(incoming()) &&
+                       canCreate2(incoming(), ['PAYMENTS_BALANCES', ['ADD', 'MANAGE']], ['DELIVERIES', ['ADD']]);
+      allow update: if isValidId(paymentId) && isValidPayment(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['PAYMENTS_BALANCES', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['DELIVERIES', ['EDIT']]);
+      allow delete: if isValidId(paymentId) &&
+                       canDelete2(existing(), ['PAYMENTS_BALANCES', ['DELETE', 'MANAGE']], ['DELIVERIES', ['DELETE']]);
+    }
+
+    match /invoices/{invoiceId} {
+      allow get, list: if canRead2(existing(), 'DELIVERIES', 'PAYMENTS_BALANCES');
+      allow create: if isValidId(invoiceId) && isValidInvoice(incoming()) &&
+                       canCreate2(incoming(), ['DELIVERIES', ['ADD', 'MANAGE']], ['PAYMENTS_BALANCES', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(invoiceId) && isValidInvoice(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['DELIVERIES', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['PAYMENTS_BALANCES', ['ADD', 'EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(invoiceId) && canDelete1(existing(), ['DELIVERIES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /expenses/{expenseId} {
+      allow get, list: if canRead1(existing(), 'EXPENSES');
+      allow create: if isValidId(expenseId) && isValidExpense(incoming()) &&
+                       canCreate3(incoming(),
+                         ['EXPENSES', ['ADD', 'MANAGE']],
+                         ['BOTTLE_STOCK', ['ADD']],
+                         ['FACTORY_MATERIALS', ['ADD']]);
+      allow update: if isValidId(expenseId) && isValidExpense(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['EXPENSES', ['EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(expenseId) && canDelete1(existing(), ['EXPENSES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /expenseCategories/{categoryId} {
+      allow get, list: if canRead1(existing(), 'EXPENSES');
+      allow create: if isValidId(categoryId) && isValidExpenseCategory(incoming()) &&
+                       canCreate1(incoming(), ['EXPENSES', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(categoryId) && isValidExpenseCategory(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['EXPENSES', ['EDIT', 'MANAGE']]);
+      allow delete: if isValidId(categoryId) && canDelete1(existing(), ['EXPENSES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottleSizes/{sizeId} {
+      allow get, list: if canRead1(existing(), 'BOTTLE_STOCK');
+      allow create: if isValidId(sizeId) && isValidBottleSize(incoming()) &&
+                       canCreate1(incoming(), ['BOTTLE_STOCK', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(sizeId) && isValidBottleSize(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['BOTTLE_STOCK', ['ADD', 'EDIT', 'MANAGE']],
+                         ['REFILL_BATCHES', ['ADD']]);
+      allow delete: if isValidId(sizeId) && canDelete1(existing(), ['BOTTLE_STOCK', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottleInventory/{inventoryId} {
+      allow get, list: if canRead1(existing(), 'BOTTLE_STOCK');
+      allow create: if isValidId(inventoryId) && isValidBottleInventory(incoming()) &&
+                       canCreate5(incoming(),
+                         ['BOTTLE_STOCK', ['ADD', 'MANAGE']],
+                         ['DELIVERIES', ['ADD']],
+                         ['REFILL_BATCHES', ['ADD']],
+                         ['BOTTLE_ISSUE', ['ADD']],
+                         ['CUSTOMERS', ['ADD']]);
+      allow update: if isValidId(inventoryId) && isValidBottleInventory(incoming()) &&
+                       canUpdate5(existing(), incoming(),
+                         ['BOTTLE_STOCK', ['ADD', 'EDIT', 'MANAGE']],
+                         ['DELIVERIES', ['ADD', 'EDIT', 'DELETE']],
+                         ['REFILL_BATCHES', ['ADD', 'EDIT']],
+                         ['BOTTLE_ISSUE', ['ADD', 'EDIT']],
+                         ['CUSTOMERS', ['ADD', 'EDIT']]);
+      allow delete: if isValidId(inventoryId) && canDelete1(existing(), ['BOTTLE_STOCK', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottlePurchases/{purchaseId} {
+      allow get, list: if canRead1(existing(), 'BOTTLE_STOCK');
+      allow create: if isValidId(purchaseId) && isValidBottleTransaction(incoming()) &&
+                       canCreate1(incoming(), ['BOTTLE_STOCK', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(purchaseId) && isValidBottleTransaction(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['BOTTLE_STOCK', ['EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(purchaseId) && canDelete1(existing(), ['BOTTLE_STOCK', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottleRefills/{refillId} {
+      allow get, list: if canRead1(existing(), 'REFILL_BATCHES');
+      allow create: if isValidId(refillId) && isValidBottleTransaction(incoming()) &&
+                       canCreate2(incoming(), ['REFILL_BATCHES', ['ADD', 'MANAGE']], ['BOTTLE_STOCK', ['ADD']]);
+      allow update: if isValidId(refillId) && isValidBottleTransaction(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['REFILL_BATCHES', ['EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(refillId) && canDelete1(existing(), ['REFILL_BATCHES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottleIssueSales/{recordId} {
+      allow get, list: if canRead2(existing(), 'BOTTLE_ISSUE', 'DELIVERIES');
+      allow create: if isValidId(recordId) && isValidBottleTransaction(incoming()) &&
+                       canCreate2(incoming(), ['BOTTLE_ISSUE', ['ADD', 'MANAGE']], ['DELIVERIES', ['ADD']]);
+      allow update: if isValidId(recordId) && isValidBottleTransaction(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['BOTTLE_ISSUE', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['DELIVERIES', ['EDIT']]);
+      allow delete: if isValidId(recordId) &&
+                       canDelete2(existing(), ['BOTTLE_ISSUE', ['DELETE', 'MANAGE']], ['DELIVERIES', ['DELETE']]);
+    }
+
+    match /bottleMovements/{movementId} {
+      allow get, list: if canRead2(existing(), 'BOTTLE_STOCK', 'BOTTLE_ISSUE');
+      allow create: if isValidId(movementId) && isValidBottleTransaction(incoming()) &&
+                       canCreate5(incoming(),
+                         ['BOTTLE_STOCK', ['ADD', 'MANAGE']],
+                         ['BOTTLE_ISSUE', ['ADD']],
+                         ['REFILL_BATCHES', ['ADD']],
+                         ['DELIVERIES', ['ADD']],
+                         ['CUSTOMERS', ['ADD', 'EDIT']]);
+      allow update: if isValidId(movementId) && isValidBottleTransaction(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['BOTTLE_STOCK', ['EDIT', 'MANAGE']]);
+      allow delete: if isValidId(movementId) && canDelete1(existing(), ['BOTTLE_STOCK', ['DELETE', 'MANAGE']]);
+    }
+
+    match /customerRates/{rateId} {
+      allow get, list: if canRead1(existing(), 'CUSTOMERS');
+      allow create: if isValidId(rateId) && isValidCustomerRate(incoming()) &&
+                       canCreate2(incoming(), ['CUSTOMERS', ['ADD', 'MANAGE']], ['DELIVERIES', ['ADD']]);
+      allow update: if isValidId(rateId) && isValidCustomerRate(incoming()) &&
+                       canUpdate2(existing(), incoming(), ['CUSTOMERS', ['EDIT', 'APPROVE', 'MANAGE']], ['DELIVERIES', ['ADD', 'EDIT']]);
+      allow delete: if isValidId(rateId) && canDelete1(existing(), ['CUSTOMERS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /customerBottleAllocations/{allocId} {
+      allow get, list: if canRead2(existing(), 'CUSTOMERS', 'BOTTLE_ISSUE');
+      allow create: if isValidId(allocId) && isValidCustomerAllocation(incoming()) &&
+                       canCreate3(incoming(),
+                         ['CUSTOMERS', ['ADD', 'EDIT', 'MANAGE']],
+                         ['BOTTLE_ISSUE', ['ADD']],
+                         ['DELIVERIES', ['ADD']]);
+      allow update: if isValidId(allocId) && isValidCustomerAllocation(incoming()) &&
+                       canUpdate3(existing(), incoming(),
+                         ['CUSTOMERS', ['ADD', 'EDIT', 'MANAGE']],
+                         ['BOTTLE_ISSUE', ['ADD', 'EDIT', 'MANAGE']],
+                         ['DELIVERIES', ['ADD', 'EDIT', 'DELETE']]);
+      allow delete: if isValidId(allocId) && canDelete1(existing(), ['CUSTOMERS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /securityDeposits/{depositId} {
+      allow get, list: if canRead2(existing(), 'CUSTOMERS', 'PAYMENTS_BALANCES');
+      allow create: if isValidId(depositId) && isValidSecurityDeposit(incoming()) &&
+                       canCreate2(incoming(), ['CUSTOMERS', ['ADD', 'MANAGE']], ['PAYMENTS_BALANCES', ['ADD']]);
+      allow update: if isValidId(depositId) && isValidSecurityDeposit(incoming()) &&
+                       canUpdate2(existing(), incoming(),
+                         ['CUSTOMERS', ['EDIT', 'APPROVE', 'MANAGE']],
+                         ['PAYMENTS_BALANCES', ['EDIT', 'APPROVE']]);
+      allow delete: if isValidId(depositId) && canDelete1(existing(), ['CUSTOMERS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /roPlantItems/{itemId} {
+      allow get, list: if canRead1(existing(), 'FACTORY_MATERIALS');
+      allow create: if isValidId(itemId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['FACTORY_MATERIALS', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(itemId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['FACTORY_MATERIALS', ['ADD', 'EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(itemId) && canDelete1(existing(), ['FACTORY_MATERIALS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /roItemTransactions/{txId} {
+      allow get, list: if canRead1(existing(), 'FACTORY_MATERIALS');
+      allow create: if isValidId(txId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['FACTORY_MATERIALS', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(txId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['FACTORY_MATERIALS', ['ADD', 'EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(txId) && canDelete1(existing(), ['FACTORY_MATERIALS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /factoryMaterials/{materialId} {
+      allow get, list: if canRead1(existing(), 'FACTORY_MATERIALS');
+      allow create: if isValidId(materialId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['FACTORY_MATERIALS', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(materialId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['FACTORY_MATERIALS', ['ADD', 'EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(materialId) && canDelete1(existing(), ['FACTORY_MATERIALS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /materialTransactions/{txId} {
+      allow get, list: if canRead1(existing(), 'FACTORY_MATERIALS');
+      allow create: if isValidId(txId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['FACTORY_MATERIALS', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(txId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['FACTORY_MATERIALS', ['ADD', 'EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(txId) && canDelete1(existing(), ['FACTORY_MATERIALS', ['DELETE', 'MANAGE']]);
+    }
+
+    match /bottleCostings/{costingId} {
+      allow get, list: if canRead2(existing(), 'BOTTLE_STOCK', 'REPORTS');
+      allow create: if isValidId(costingId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['BOTTLE_STOCK', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(costingId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['BOTTLE_STOCK', ['ADD', 'EDIT', 'MANAGE']]);
+      allow delete: if isValidId(costingId) && canDelete1(existing(), ['BOTTLE_STOCK', ['DELETE', 'MANAGE']]);
+    }
+
+    match /monthlyRecurringExpenses/{expId} {
+      allow get, list: if canRead1(existing(), 'EXPENSES');
+      allow create: if isValidId(expId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['EXPENSES', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(expId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['EXPENSES', ['EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(expId) && canDelete1(existing(), ['EXPENSES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /cashClosings/{closingId} {
+      allow get, list: if canRead2(existing(), 'PAYMENTS_BALANCES', 'REPORTS');
+      allow create: if isValidId(closingId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canCreate1(incoming(), ['PAYMENTS_BALANCES', ['ADD', 'MANAGE']]);
+      allow update: if isValidId(closingId) && isValidMaterialOrCostingRecord(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['PAYMENTS_BALANCES', ['EDIT', 'APPROVE', 'MANAGE']]);
+      allow delete: if isValidId(closingId) && canDelete1(existing(), ['PAYMENTS_BALANCES', ['DELETE', 'MANAGE']]);
+    }
+
+    match /appSettings/{settingId} {
+      allow get, list: if isActivePlantMember(docPlantId(existing()));
+      allow create: if isValidId(settingId) && isValidAppSettings(incoming()) &&
+                       canCreate1(incoming(), ['SETTINGS', ['MANAGE']]);
+      allow update: if isValidId(settingId) && isValidAppSettings(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['SETTINGS', ['MANAGE']]);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /backups/{backupId} {
+      allow get, list: if canRead1(existing(), 'SETTINGS');
+      allow create: if isValidId(backupId) && isValidBackup(incoming()) &&
+                       canCreate1(incoming(), ['SETTINGS', ['MANAGE']]);
+      allow update: if isValidId(backupId) && isValidBackup(incoming()) &&
+                       canUpdate1(existing(), incoming(), ['SETTINGS', ['MANAGE']]);
+      allow delete: if isValidId(backupId) && canDelete1(existing(), ['SETTINGS', ['MANAGE']]);
+    }
+  }
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="file" path="db_session_login.txt" />
+    <exclude domain="file" path="db_current_profile.json" />
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>
