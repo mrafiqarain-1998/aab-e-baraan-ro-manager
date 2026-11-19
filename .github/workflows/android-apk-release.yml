@@ -30,10 +30,48 @@ jobs:
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           fi
 
-      - name: Restore consistent debug keystore (for seamless in-place updates)
+      - name: Restore signing keystore & Firebase google-services.json
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+          # 1. Restore consistent debug.keystore (for Google Sign-In SHA-1 & seamless in-place updates)
+          if [ ! -f debug.keystore ]; then
+            if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+              printf '%s' "$DEBUG_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > debug.keystore
+              echo "Restored debug.keystore from GitHub Secret DEBUG_KEYSTORE_BASE64."
+            elif [ -f debug.keystore.base64 ]; then
+              tr -d '[:space:]' < debug.keystore.base64 | base64 -d > debug.keystore
+              echo "Restored debug.keystore from debug.keystore.base64."
+            fi
+          fi
+
+          # 2. Restore app/google-services.json (for Firebase Auth, Firestore & Google Sign-In)
+          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            TRIMMED="$(printf '%s' "$GOOGLE_SERVICES_JSON" | sed 's/^[[:space:]]*//')"
+            case "$TRIMMED" in
+              \{*)
+                printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+                ;;
+              *)
+                printf '%s' "$GOOGLE_SERVICES_JSON" | tr -d '[:space:]' | base64 -d > app/google-services.json
+                ;;
+            esac
+            echo "Restored app/google-services.json from GitHub Secret GOOGLE_SERVICES_JSON."
+          fi
+
+          # 3. Validate both files before spending minutes building
+          MISSING=0
+          if [ ! -s debug.keystore ]; then
+            echo "::error::Missing debug.keystore! Add GitHub Secret 'DEBUG_KEYSTORE_BASE64' (copy content of debug.keystore.base64 from AI Studio -> GitHub Repo -> Settings -> Secrets and variables -> Actions -> New repository secret)."
+            MISSING=1
+          fi
+          if [ ! -s app/google-services.json ]; then
+            echo "::error::Missing app/google-services.json! Add GitHub Secret 'GOOGLE_SERVICES_JSON' (copy content of app/google-services.json from AI Studio -> GitHub Repo -> Settings -> Secrets and variables -> Actions -> New repository secret)."
+            MISSING=1
+          fi
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
           fi
 
       - name: Compute auto-incremented version code & tag
