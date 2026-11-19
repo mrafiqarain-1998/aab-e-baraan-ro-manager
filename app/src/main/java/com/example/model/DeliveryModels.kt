@@ -44,5 +44,6 @@ data class Delivery(
     val invoiceId: String = "",
     val businessId: String = "aab_e_baraan_plant_01",
     val createdBy: String = "",
+    val createdByUid: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )

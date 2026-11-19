@@ -9,16 +9,18 @@ enum class AppModule(
 ) {
     DASHBOARD("Dashboard", "ڈیش بورڈ", "Plant overview, KPIs, and summary"),
     DELIVERIES("Deliveries", "ترسیلات", "Record and track customer water deliveries"),
-    CUSTOMERS("Customers", "گاہک", "Customer directory, rates, deposits, and allocations"),
+    CUSTOMERS("Customers", "گاہک", "Customer directory, deposits, and allocations"),
+    CUSTOMER_RATES("Customer Rates", "گاہک کے ریٹ", "Allow or block changing customer bottle rates"),
     PAYMENTS_BALANCES("Payments & Balances", "وصولیاں اور کھاتہ", "Receive payments, invoices, and cash closing"),
     BOTTLE_STOCK("Bottle Stock & Cost", "بوتل اسٹاک", "Add stock, manage sizes, and view costing"),
+    NEW_ITEMS("Add New Items & Sizes", "نئے آئٹمز شامل کریں", "Allow or block adding new bottle sizes, materials, and categories"),
     BOTTLE_ISSUE("Bottle Issue", "بوتل اجراء", "Issue bottles to RO plant or customers"),
     REFILL_BATCHES("Refill Batches", "ریفل بیچ", "Bottle refilling and packet/carton conversion"),
     EXPENSES("Expenses", "اخراجات", "Record OPEX/CAPEX and recurring expenses"),
     FACTORY_MATERIALS("Factory Materials", "فیکٹری میٹریل", "RO plant spares, chemicals, and materials"),
     STAFF_MANAGEMENT("Staff Management", "عملہ کنٹرول", "Create/edit staff logins and permissions"),
     REPORTS("Reports", "رپورٹس", "Financial, customer, and bottle movement reports"),
-    SETTINGS("Settings & Backup", "ترتیبات و بیک اپ", "Plant branches, dark mode, backup & restore"),
+    SETTINGS("Settings & Backup", "ترتیبات و بیک اپ", "Plant branches, backup & restore"),
     AUDIT_HISTORY("Audit History", "آڈٹ ہسٹری", "Immutable activity log and change tracking")
 }
 
@@ -163,8 +165,10 @@ object PermissionDefaults {
                 AppModule.DASHBOARD.name to listOf(PermissionAction.VIEW.name),
                 AppModule.DELIVERIES.name to listOf(PermissionAction.VIEW.name),
                 AppModule.CUSTOMERS.name to listOf(PermissionAction.VIEW.name),
+                AppModule.CUSTOMER_RATES.name to listOf(PermissionAction.VIEW.name),
                 AppModule.PAYMENTS_BALANCES.name to listOf(PermissionAction.VIEW.name),
                 AppModule.BOTTLE_STOCK.name to listOf(PermissionAction.VIEW.name),
+                AppModule.NEW_ITEMS.name to emptyList(),
                 AppModule.BOTTLE_ISSUE.name to listOf(PermissionAction.VIEW.name),
                 AppModule.REFILL_BATCHES.name to listOf(PermissionAction.VIEW.name),
                 AppModule.EXPENSES.name to listOf(PermissionAction.VIEW.name),
@@ -178,8 +182,10 @@ object PermissionDefaults {
                 AppModule.DASHBOARD.name to listOf(PermissionAction.VIEW.name),
                 AppModule.DELIVERIES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
                 AppModule.CUSTOMERS.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name, PermissionAction.EDIT.name),
+                AppModule.CUSTOMER_RATES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name, PermissionAction.EDIT.name),
                 AppModule.PAYMENTS_BALANCES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
                 AppModule.BOTTLE_STOCK.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
+                AppModule.NEW_ITEMS.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
                 AppModule.BOTTLE_ISSUE.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
                 AppModule.REFILL_BATCHES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
                 AppModule.EXPENSES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name),
@@ -205,7 +211,11 @@ object PermissionDefaults {
         val out = linkedMapOf<String, List<String>>()
 
         AppModule.entries.forEach { mod ->
-            val raw = input?.get(mod.name) ?: fallback[mod.name].orEmpty()
+            val raw = when {
+                input == null || input.isEmpty() -> fallback[mod.name].orEmpty()
+                mod.name in input -> input[mod.name].orEmpty()
+                else -> fallback[mod.name].orEmpty()
+            }
             val cleaned = raw.map { it.trim().uppercase() }
                 .filter { it in validActionNames }
                 .distinct()

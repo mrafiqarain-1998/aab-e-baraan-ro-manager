@@ -169,7 +169,8 @@ fun BottleStockSubTab(
                     )
                 }
 
-                if (!isViewOnly) {
+                val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
+                if (!isViewOnly && canAddNewItems) {
                     Button(
                         onClick = { showAddSizeDialog = true },
                         colors = ButtonDefaults.buttonColors(
@@ -666,22 +667,29 @@ fun UnifiedBottleSizeCard(
             } else {
                 inventory.fullPackets
             }
-            val plantFullCount = if (isSingleUse) totalPacketsFull else inventory.atPlantFull
-            val plantFullSubtitle = if (isSingleUse) {
-                if (inventory.fullLooseBottles > 0) "${inventory.atPlantFull} Btl (+${inventory.fullLooseBottles} loose)"
-                else "${inventory.atPlantFull} Bottles"
-            } else null
+            val isSingleBottlePack = isSingleUse && (
+                (inventory.packVariants.isNotEmpty() && inventory.packVariants.all { it.packSize <= 1 }) ||
+                    (inventory.packVariants.isEmpty() && size.packQuantity <= 1 && size.packetPackagingQty <= 1)
+            )
+            val isCartonOnlyPack = isSingleUse && inventory.packVariants.isNotEmpty() &&
+                inventory.packVariants.all { it.packSize > 1 && it.containerType == PackContainerType.CARTON }
+            val plantFullCount = if (isSingleUse && !isSingleBottlePack) totalPacketsFull else inventory.atPlantFull
+            val plantFullUnitLabel = when {
+                !isSingleUse || isSingleBottlePack -> "Bottle"
+                isCartonOnlyPack -> "Carton"
+                else -> "Packet"
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 SquareNumberBoard(
-                    label = if (isSingleUse) "Plant Full (Pkt)" else "Plant Full",
+                    label = "Plant Full",
+                    unitLabel = plantFullUnitLabel,
                     count = plantFullCount,
                     color = SuccessGreen,
                     bg = SuccessGreenLight,
-                    subtitle = plantFullSubtitle,
                     modifier = Modifier.weight(1f)
                 )
                 SquareNumberBoard(
@@ -719,8 +727,13 @@ fun UnifiedBottleSizeCard(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        val hasMultiPackVariant = inventory.packVariants.any { it.packSize > 1 }
                         Text(
-                            text = "Packet / Carton Breakdown (Plant Full)",
+                            text = if (hasMultiPackVariant) {
+                                "Stock Breakdown (Plant Full • ${inventory.atPlantFull} Bottles)"
+                            } else {
+                                "Bottle Stock Breakdown (Plant Full)"
+                            },
                             fontSize = 8.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondaryDark
@@ -731,8 +744,13 @@ fun UnifiedBottleSizeCard(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                val displayLabel = if (variant.packSize <= 1) {
+                                    normalizeLegacyBottleName(size.name)
+                                } else {
+                                    variant.displayName
+                                }
                                 Text(
-                                    text = variant.displayName,
+                                    text = displayLabel,
                                     fontSize = 9.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = WaterNavyPrimary,
@@ -745,7 +763,7 @@ fun UnifiedBottleSizeCard(
                                     color = if (variant.packetCount > 0) SuccessGreenLight else Color(0xFFE2E8F0)
                                 ) {
                                     Text(
-                                        text = if (variant.packSize <= 1) "${variant.packetCount} Btl" else "${variant.packetCount} ${variant.containerType.shortLabel}",
+                                        text = if (variant.packSize <= 1) "${variant.packetCount} Bottle" else "${variant.packetCount} ${variant.containerType.label}",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = if (variant.packetCount > 0) SuccessGreen else TextSecondaryDark,
@@ -769,14 +787,14 @@ private fun SquareNumberBoard(
     count: Int,
     color: Color,
     bg: Color,
-    subtitle: String? = null,
+    unitLabel: String? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = bg,
         border = BorderStroke(0.5.dp, color.copy(alpha = 0.2f)),
-        modifier = modifier.height(66.dp)
+        modifier = modifier.height(74.dp)
     ) {
         Column(
             modifier = Modifier
@@ -790,31 +808,31 @@ private fun SquareNumberBoard(
                 fontWeight = FontWeight.ExtraBold,
                 fontSize = 15.sp,
                 color = color,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(1.dp))
-            Text(
-                text = label,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                color = color.copy(alpha = 0.9f),
                 maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
+                softWrap = false
             )
-            if (!subtitle.isNullOrBlank()) {
+            if (!unitLabel.isNullOrBlank()) {
                 Text(
-                    text = subtitle,
-                    fontSize = 7.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = color.copy(alpha = 0.8f),
+                    text = unitLabel,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = color.copy(alpha = 0.85f),
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center
                 )
             }
+            Text(
+                text = label,
+                fontSize = 8.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = color.copy(alpha = 0.95f),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -1480,47 +1498,68 @@ fun RefillBatchSingleUseDialog(
                 }
             }
 
-            // Packet vs Carton Checkboxes
-            Text("Convert Into*", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                PackContainerType.values().forEach { type ->
-                    val checked = selectedContainerType == type
-                    Surface(
-                        onClick = { selectedContainerType = type },
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (checked) WaterSkyLight else Color(0xFFF8FAFC),
-                        border = BorderStroke(1.dp, if (checked) WaterNavyPrimary else BorderLight),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("checkbox_container_${type.name.lowercase()}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+            // Packet vs Carton Checkboxes (only applicable when qty > 1; qty = 1 saves as single Bottle without Packet)
+            if (selectedPacketSize > 1) {
+                Text("Convert Into*", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PackContainerType.values().forEach { type ->
+                        val checked = selectedContainerType == type
+                        Surface(
+                            onClick = { selectedContainerType = type },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (checked) WaterSkyLight else Color(0xFFF8FAFC),
+                            border = BorderStroke(1.dp, if (checked) WaterNavyPrimary else BorderLight),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("checkbox_container_${type.name.lowercase()}")
                         ) {
-                            Checkbox(
-                                checked = checked,
-                                onCheckedChange = { selectedContainerType = type },
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = type.label,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = WaterNavyPrimary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = { selectedContainerType = type },
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = type.label,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WaterNavyPrimary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = SuccessGreenLight.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Single Bottle (Qty 1): Saved directly as Bottle — no Packet label attached.",
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = SuccessGreen,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
             }
 
-            Text("Select ${selectedContainerType.label} Size*", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+            Text(
+                text = if (selectedPacketSize <= 1) "Select Bottle Qty Per Unit*" else "Select ${selectedContainerType.label} Size*",
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = WaterNavyPrimary
+            )
             val packetOptions = listOf(1 to "1 Bottle", 6 to "6 Bottles", 12 to "12 Bottles", 24 to "24 Bottles")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 packetOptions.chunked(2).forEach { pair ->
@@ -1562,42 +1601,44 @@ fun RefillBatchSingleUseDialog(
                 modifier = Modifier.fillMaxWidth().testTag("input_refill_damaged_qty")
             )
 
-            // Return Loose Bottles back to In Use Checkbox
-            Surface(
-                onClick = { returnLooseToInUse = !returnLooseToInUse },
-                shape = RoundedCornerShape(8.dp),
-                color = if (returnLooseToInUse) WaterSkyLight else Color(0xFFF8FAFC),
-                border = BorderStroke(1.dp, if (returnLooseToInUse) WaterAqua else BorderLight),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("checkbox_return_loose_inuse")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // Return Loose Bottles back to In Use Checkbox (only relevant when pack size > 1)
+            if (selectedPacketSize > 1) {
+                Surface(
+                    onClick = { returnLooseToInUse = !returnLooseToInUse },
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (returnLooseToInUse) WaterSkyLight else Color(0xFFF8FAFC),
+                    border = BorderStroke(1.dp, if (returnLooseToInUse) WaterAqua else BorderLight),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("checkbox_return_loose_inuse")
                 ) {
-                    Checkbox(
-                        checked = returnLooseToInUse,
-                        onCheckedChange = { returnLooseToInUse = it },
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Return Loose Bottles to In Use Stock",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = WaterNavyPrimary
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = returnLooseToInUse,
+                            onCheckedChange = { returnLooseToInUse = it },
+                            modifier = Modifier.size(20.dp)
                         )
-                        Text(
-                            text = if (returnLooseToInUse) {
-                                "$remainingLooseBottles loose bottle(s) will return to In Use; only complete ${selectedContainerType.label}s go to Plant Full."
-                            } else {
-                                "$remainingLooseBottles loose bottle(s) will stay in Plant Full separately."
-                            },
-                            fontSize = 9.sp,
-                            color = TextSecondaryDark
-                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Return Loose Bottles to In Use Stock",
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = WaterNavyPrimary
+                            )
+                            Text(
+                                text = if (returnLooseToInUse) {
+                                    "$remainingLooseBottles loose bottle(s) will return to In Use; only complete ${selectedContainerType.label}s go to Plant Full."
+                                } else {
+                                    "$remainingLooseBottles loose bottle(s) will stay in Plant Full separately."
+                                },
+                                fontSize = 9.sp,
+                                color = TextSecondaryDark
+                            )
+                        }
                     }
                 }
             }
@@ -1617,24 +1658,26 @@ fun RefillBatchSingleUseDialog(
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(
-                            text = if (selectedPacketSize <= 1) "Single Bottles (1/unit):" else "Complete ${selectedContainerType.label}s ($selectedPacketSize/pack):",
+                            text = if (selectedPacketSize <= 1) "Ready Bottles (Plant Full):" else "Complete ${selectedContainerType.label}s ($selectedPacketSize/pack):",
                             fontSize = 10.sp,
                             color = TextSecondaryDark
                         )
                         Text(
-                            text = if (selectedPacketSize <= 1) "$completePackets Btl" else "$completePackets ${selectedContainerType.shortLabel} ($packedBottles Btl)",
+                            text = if (selectedPacketSize <= 1) "$completePackets Bottle" else "$completePackets ${selectedContainerType.label} ($packedBottles Btl)",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = SuccessGreen
                         )
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(
-                            if (returnLooseToInUse) "Loose -> Back to In Use:" else "Remaining Loose -> Full:",
-                            fontSize = 10.sp,
-                            color = TextSecondaryDark
-                        )
-                        Text("$remainingLooseBottles bottles", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterBlueDeep)
+                    if (selectedPacketSize > 1) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(
+                                if (returnLooseToInUse) "Loose -> Back to In Use:" else "Remaining Loose -> Full:",
+                                fontSize = 10.sp,
+                                color = TextSecondaryDark
+                            )
+                            Text("$remainingLooseBottles bottles", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterBlueDeep)
+                        }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Damaged / Lost Bottles:", fontSize = 10.sp, color = TextSecondaryDark)

@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.SectionHeader
@@ -43,6 +44,7 @@ fun ReceivePaymentScreen(
     val context = LocalContext.current
     val customers by viewModel.customers.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
     val allPayments by viewModel.payments.collectAsState()
     val isAdmin = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE) ||
         viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.DELETE)
@@ -808,12 +810,26 @@ fun ReceivePaymentScreen(
                 }
             }
         } else {
-            items(allPayments) { pay ->
+            items(allPayments, key = { it.id }) { pay ->
+                val isNewPayment = viewModel.isRecordNewForCurrentUser(
+                    type = "payment",
+                    recordId = pay.id,
+                    createdByUid = pay.createdByUid,
+                    createdByName = pay.receivedBy,
+                    createdAt = pay.createdAt,
+                    seenKeys = seenRecordKeys,
+                    user = currentUser
+                )
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            viewModel.markRecordSeen("payment", pay.id)
+                        }
+                        .testTag("payment_card_${pay.id}")
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(
@@ -822,12 +838,26 @@ fun ReceivePaymentScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = pay.customerName,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = WaterNavyDark
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Text(
+                                        text = pay.customerName,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = WaterNavyDark,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (isNewPayment) {
+                                        NewItemBadge(
+                                            onClick = { viewModel.markRecordSeen("payment", pay.id) },
+                                            modifier = Modifier.testTag("new_payment_badge_${pay.id}")
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = "${pay.receiptNumber} • ${pay.date} • ${pay.paymentMethod.label.split(" ")[0]}",
                                     fontSize = 10.sp,
@@ -874,6 +904,7 @@ fun ReceivePaymentScreen(
                                 // Open Payment Receipt PDF Preview before sharing
                                 IconButton(
                                     onClick = {
+                                        viewModel.markRecordSeen("payment", pay.id)
                                         val cust = customers.firstOrNull { it.id == pay.customerId }
                                         val pdfFile = PdfGenerator.generatePaymentReceiptPdf(context, pay, cust)
                                         previewPdfRequest = PdfPreviewRequest(
@@ -895,7 +926,10 @@ fun ReceivePaymentScreen(
 
                                 // Share Slip Dialog / WhatsApp Text
                                 IconButton(
-                                    onClick = { receiptToShare = pay },
+                                    onClick = {
+                                        viewModel.markRecordSeen("payment", pay.id)
+                                        receiptToShare = pay
+                                    },
                                     modifier = Modifier.size(32.dp).testTag("share_payment_whatsapp_${pay.id}")
                                 ) {
                                     Icon(
@@ -908,7 +942,10 @@ fun ReceivePaymentScreen(
 
                                 if (isAdmin) {
                                     IconButton(
-                                        onClick = { paymentToDelete = pay },
+                                        onClick = {
+                                            viewModel.markRecordSeen("payment", pay.id)
+                                            paymentToDelete = pay
+                                        },
                                         modifier = Modifier.size(30.dp).testTag("delete_payment_${pay.id}")
                                     ) {
                                         Icon(
@@ -949,7 +986,10 @@ fun ReceivePaymentScreen(
                                 } else {
                                     if (isAdmin) {
                                         Button(
-                                            onClick = { viewModel.acknowledgePayment(pay.id) },
+                                            onClick = {
+                                                viewModel.markRecordSeen("payment", pay.id)
+                                                viewModel.acknowledgePayment(pay.id)
+                                            },
                                             colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
                                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                             shape = RoundedCornerShape(6.dp),

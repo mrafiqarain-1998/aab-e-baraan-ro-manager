@@ -30,6 +30,7 @@ import com.example.model.Customer
 import com.example.model.Invoice
 import com.example.model.PermissionAction
 import com.example.model.UserRole
+import com.example.ui.components.BlinkingOrangeDot
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.SectionHeader
@@ -52,15 +53,23 @@ fun CustomerDetailScreen(
     val allInvoices by viewModel.invoices.collectAsState()
     val allDeliveries by viewModel.deliveries.collectAsState()
     val bottleSizes by viewModel.bottleSizes.collectAsState()
+    val inventory by viewModel.inventory.collectAsState()
     val allCustomerAllocations by viewModel.customerAllocations.collectAsState()
+    val rateDisplayOptions = remember(bottleSizes, inventory) {
+        buildDeliverySelectableOptions(bottleSizes, inventory)
+    }
 
     val currentCust = allCustomers.find { it.id == customer.id } ?: customer
+    LaunchedEffect(currentCust.id) {
+        viewModel.markRecordSeen("customer", currentCust.id)
+    }
     val customerInvoices = allInvoices.filter { it.customerId == currentCust.id }
     val customerDeliveries = allDeliveries.filter { it.customerId == currentCust.id }
     val thisCustAllocations = allCustomerAllocations.filter { it.customerId == currentCust.id }
     val currentUser by viewModel.currentUser.collectAsState()
     val isAdmin = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.DELETE) ||
         viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.MANAGE)
+    val canEditCustomerRates = viewModel.hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)
     val isViewOnly = !viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT) &&
         !viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD) &&
         !viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
@@ -181,9 +190,64 @@ fun CustomerDetailScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        Text("Address: ${currentCust.address} (${currentCust.area})", fontSize = 11.5.sp, color = TextPrimaryDark, fontWeight = FontWeight.Medium)
-                        Text("Payment Cycle: ${currentCust.paymentCycle.label} • Phone: ${currentCust.phone}", fontSize = 10.5.sp, color = TextSecondaryDark)
+                        Text("Address: ${currentCust.address.ifBlank { "—" }} (${currentCust.area.ifBlank { "—" }})", fontSize = 11.5.sp, color = TextPrimaryDark, fontWeight = FontWeight.Medium)
+                        Text("Payment Cycle: ${currentCust.paymentCycle.label} • Phone: ${currentCust.phone.ifBlank { "—" }}", fontSize = 10.5.sp, color = TextSecondaryDark)
                         Text("Bottles with Customer: ${currentCust.emptyBottlesOwed} bottles", fontSize = 10.5.sp, color = WaterBlueDeep, fontWeight = FontWeight.Bold)
+
+                        val missingFields = remember(currentCust.name, currentCust.phone, currentCust.whatsapp, currentCust.area, currentCust.address) {
+                            currentCust.missingDetailLabels()
+                        }
+                        if (missingFields.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = WarningOrangeLight,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("customer_detail_missing_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        BlinkingOrangeDot(dotSize = 9.dp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Detail Missing: ${missingFields.joinToString(", ")}",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = WarningOrange,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (!isViewOnly) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        TextButton(
+                                            onClick = { showEditDialog = true },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(26.dp)
+                                        ) {
+                                            Text(
+                                                text = "Fill Now",
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = WarningOrange,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(10.dp))
 
@@ -568,7 +632,7 @@ fun CustomerDetailScreen(
                                 maxLines = 1,
                                 softWrap = false
                             )
-                            if (!isViewOnly) {
+                            if (!isViewOnly && canEditCustomerRates) {
                                 TextButton(
                                     onClick = { showRateDialog = true },
                                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
@@ -581,17 +645,26 @@ fun CustomerDetailScreen(
                             }
                         }
 
-                        bottleSizes.forEach { size ->
-                            val currentPrice = viewModel.getCustomerPrice(customer.id, size.id)
+                        rateDisplayOptions.forEach { opt ->
+                            val directPrice = viewModel.getCustomerPrice(currentCust.id, opt.rateKey)
+                            val fallbackPrice = if (directPrice <= 0.0 && opt.rateKey != opt.bottleSizeId) {
+                                viewModel.getCustomerPrice(currentCust.id, opt.bottleSizeId)
+                            } else 0.0
+                            val currentPrice = if (directPrice > 0.0) directPrice else fallbackPrice
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("${size.name} (${size.packQuantity} in pack)", fontSize = 10.5.sp, color = TextSecondaryDark)
                                 Text(
-                                    "Rs. ${currentPrice.toInt()} / bottle" + if (currentPrice > 0.0) " (Agreed)" else " (Default Zero)",
+                                    text = opt.shortName,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = WaterNavyDark
+                                )
+                                Text(
+                                    text = if (currentPrice > 0.0) "Rs. ${currentPrice.toInt()} (Agreed)" else "Rs. 0 (Not Set)",
                                     fontSize = 10.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (currentPrice > 0.0) WaterAqua else TextSecondaryDark

@@ -413,6 +413,30 @@ fun UserManagementScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val effPerms = PermissionDefaults.normalizePermissions(acc.permissions, acc.role, acc.isSuperAdmin)
+                                val allowRates = acc.isSuperAdmin || PermissionAction.EDIT.name in effPerms[AppModule.CUSTOMER_RATES.name].orEmpty()
+                                val allowAddStock = acc.isSuperAdmin || PermissionAction.ADD.name in effPerms[AppModule.BOTTLE_STOCK.name].orEmpty()
+                                val allowNewItems = acc.isSuperAdmin || PermissionAction.ADD.name in effPerms[AppModule.NEW_ITEMS.name].orEmpty()
+                                Row(
+                                    modifier = Modifier.padding(top = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    StatusBadge(
+                                        text = if (allowRates) "Rates ✓" else "Rates ✕",
+                                        backgroundColor = if (allowRates) SuccessGreenLight else ErrorRedLight,
+                                        textColor = if (allowRates) SuccessGreen else ErrorRed
+                                    )
+                                    StatusBadge(
+                                        text = if (allowAddStock) "Stock ✓" else "Stock ✕",
+                                        backgroundColor = if (allowAddStock) SuccessGreenLight else ErrorRedLight,
+                                        textColor = if (allowAddStock) SuccessGreen else ErrorRed
+                                    )
+                                    StatusBadge(
+                                        text = if (allowNewItems) "New Items ✓" else "New Items ✕",
+                                        backgroundColor = if (allowNewItems) SuccessGreenLight else ErrorRedLight,
+                                        textColor = if (allowNewItems) SuccessGreen else ErrorRed
+                                    )
+                                }
                             }
                         }
                     }
@@ -679,6 +703,11 @@ fun UserManagementScreen(
                     }
                 )
             }
+
+            AdminSpecialControlsCard(
+                permissions = customPerms,
+                onPermissionsChanged = { customPerms = it }
+            )
 
             PermissionMatrixEditor(
                 permissions = customPerms,
@@ -1070,6 +1099,11 @@ fun UserManagementScreen(
                     )
                 }
 
+                AdminSpecialControlsCard(
+                    permissions = customPerms,
+                    onPermissionsChanged = { customPerms = it }
+                )
+
                 PermissionMatrixEditor(
                     permissions = customPerms,
                     onPermissionsChanged = { customPerms = it }
@@ -1115,11 +1149,148 @@ private fun BranchAssignmentSelector(
 }
 
 @Composable
+private fun AdminSpecialControlsCard(
+    permissions: Map<String, List<String>>,
+    onPermissionsChanged: (Map<String, List<String>>) -> Unit
+) {
+    val canChangeRates = PermissionAction.EDIT.name in permissions[AppModule.CUSTOMER_RATES.name].orEmpty()
+    val canAddStock = PermissionAction.ADD.name in permissions[AppModule.BOTTLE_STOCK.name].orEmpty() ||
+        PermissionAction.ADD.name in permissions[AppModule.FACTORY_MATERIALS.name].orEmpty()
+    val canAddNewItems = PermissionAction.ADD.name in permissions[AppModule.NEW_ITEMS.name].orEmpty()
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = WaterSkyLight.copy(alpha = 0.65f),
+        border = BorderStroke(1.dp, WaterAqua.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("admin_special_controls_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "Admin Special Controls (ایڈمن خصوصی اختیارات)",
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = WaterNavyPrimary
+            )
+            Text(
+                text = "Allow or block staff from changing customer rates, adding stock, or adding new items/sizes.",
+                fontSize = 9.sp,
+                color = TextSecondaryDark
+            )
+
+            AdminControlToggleRow(
+                title = "Change Customer Rates",
+                subtitle = "گاہک کے بوتل ریٹ سیٹ یا تبدیل کرنے کی اجازت",
+                checked = canChangeRates,
+                tag = "toggle_ctrl_customer_rates",
+                onCheckedChange = { allowed ->
+                    val next = permissions.toMutableMap()
+                    next[AppModule.CUSTOMER_RATES.name] = if (allowed) {
+                        listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name, PermissionAction.EDIT.name)
+                    } else {
+                        listOf(PermissionAction.VIEW.name)
+                    }
+                    onPermissionsChanged(next)
+                }
+            )
+
+            HorizontalDivider(color = BorderLight.copy(alpha = 0.6f))
+
+            AdminControlToggleRow(
+                title = "Add Stock (Bottles & Materials)",
+                subtitle = "نیا بوتل یا فیکٹری میٹریل اسٹاک شامل کرنے کی اجازت",
+                checked = canAddStock,
+                tag = "toggle_ctrl_add_stock",
+                onCheckedChange = { allowed ->
+                    val next = permissions.toMutableMap()
+                    val bottleActions = next[AppModule.BOTTLE_STOCK.name].orEmpty().toMutableSet()
+                    val matActions = next[AppModule.FACTORY_MATERIALS.name].orEmpty().toMutableSet()
+                    if (allowed) {
+                        bottleActions.add(PermissionAction.VIEW.name)
+                        bottleActions.add(PermissionAction.ADD.name)
+                        matActions.add(PermissionAction.VIEW.name)
+                        matActions.add(PermissionAction.ADD.name)
+                    } else {
+                        bottleActions.remove(PermissionAction.ADD.name)
+                        matActions.remove(PermissionAction.ADD.name)
+                    }
+                    next[AppModule.BOTTLE_STOCK.name] = bottleActions.toList()
+                    next[AppModule.FACTORY_MATERIALS.name] = matActions.toList()
+                    onPermissionsChanged(next)
+                }
+            )
+
+            HorizontalDivider(color = BorderLight.copy(alpha = 0.6f))
+
+            AdminControlToggleRow(
+                title = "Add New Items & Sizes",
+                subtitle = "نیا بوتل سائز، آئٹم، میٹریل یا خرچہ کیٹیگری بنانے کی اجازت",
+                checked = canAddNewItems,
+                tag = "toggle_ctrl_new_items",
+                onCheckedChange = { allowed ->
+                    val next = permissions.toMutableMap()
+                    next[AppModule.NEW_ITEMS.name] = if (allowed) {
+                        listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name, PermissionAction.EDIT.name)
+                    } else {
+                        emptyList()
+                    }
+                    onPermissionsChanged(next)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun AdminControlToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    tag: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = title,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = WaterNavyDark
+            )
+            Text(
+                text = subtitle,
+                fontSize = 8.5.sp,
+                color = TextSecondaryDark
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(tag),
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = SuccessGreen,
+                uncheckedThumbColor = Color.White,
+                uncheckedTrackColor = ErrorRed.copy(alpha = 0.45f)
+            )
+        )
+    }
+}
+
+@Composable
 private fun PermissionMatrixEditor(
     permissions: Map<String, List<String>>,
     onPermissionsChanged: (Map<String, List<String>>) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(true) }
+    var expanded by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
@@ -1128,7 +1299,7 @@ private fun PermissionMatrixEditor(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Granular Module Permissions (اختیارات)",
+                text = "Granular Module Permissions (تفصیلی اختیارات)",
                 fontSize = 10.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = WaterNavyPrimary
@@ -1168,11 +1339,8 @@ private fun PermissionMatrixEditor(
                                         onClick = {
                                             val next = if (checked) currentActions - action.name else currentActions + action.name
                                             val updatedMap = permissions.toMutableMap()
-                                            if (next.isEmpty()) {
-                                                updatedMap.remove(module.name)
-                                            } else {
-                                                updatedMap[module.name] = next.toList()
-                                            }
+                                            // Keep explicit emptyList() so blocked modules stay blocked after normalization
+                                            updatedMap[module.name] = next.toList()
                                             onPermissionsChanged(updatedMap)
                                         },
                                         label = {

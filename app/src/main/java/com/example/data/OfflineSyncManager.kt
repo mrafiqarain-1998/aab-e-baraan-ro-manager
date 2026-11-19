@@ -367,6 +367,17 @@ class OfflineSyncManager(
                 }
             } else {
                 _queueItems.value = _queueItems.value.filterNot { it.id == itemId }
+                val hadConflict = _conflicts.value.any {
+                    !it.resolved && it.collection == current.collection && it.docId == current.docId
+                }
+                if (hadConflict) {
+                    _conflicts.value = _conflicts.value.map { c ->
+                        if (!c.resolved && c.collection == current.collection && c.docId == current.docId) {
+                            c.copy(resolved = true, resolution = "Synced cleanly")
+                        } else c
+                    }
+                    storage.saveSyncConflicts(_conflicts.value)
+                }
             }
             storage.saveSyncQueue(_queueItems.value)
         }
@@ -448,6 +459,28 @@ class OfflineSyncManager(
             }
             _conflicts.value = (listOf(conflict) + deduplicated).take(100)
             storage.saveSyncConflicts(_conflicts.value)
+        }
+    }
+
+    fun clearFalsePositiveWorkflowConflicts() {
+        synchronized(lock) {
+            val pendingIds = _queueItems.value
+                .filter { it.status != SyncQueueStatus.SYNCED }
+                .map { it.id }
+                .toSet()
+            var changed = false
+            val updated = _conflicts.value.map { c ->
+                val docKey = "${c.collection}|${c.docId}"
+                val isWorkflowDoc = c.collection in setOf("expenses", "payments", "deliveries") && docKey !in pendingIds
+                if (!c.resolved && isWorkflowDoc) {
+                    changed = true
+                    c.copy(resolved = true, resolution = "Normal operational approval (auto-cleared)")
+                } else c
+            }
+            if (changed) {
+                _conflicts.value = updated
+                storage.saveSyncConflicts(updated)
+            }
         }
     }
 

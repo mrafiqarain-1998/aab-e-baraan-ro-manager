@@ -31,6 +31,7 @@ data class Payment(
     val isAcknowledged: Boolean = true,
     val acknowledgedBy: String = "",
     val businessId: String = "aab_e_baraan_plant_01",
+    val createdByUid: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )
 

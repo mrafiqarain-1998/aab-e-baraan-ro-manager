@@ -1,7 +1,7 @@
 package com.example.model
 
 enum class UserRole(val displayName: String, val urduTitle: String) {
-    ADMIN("Admin (مالک / ایڈمن)", "ایڈمن"),
+    ADMIN("Admin (ایڈمن)", "ایڈمن"),
     INCHARGE("Supervisor (سپروائزر)", "سپروائزر"),
     VIEW_ONLY("View-Only (صرف دیکھنے کی اجازت)", "صرف نظارہ")
 }
@@ -38,7 +38,8 @@ data class UserAccount(
     val defaultBranchId: String = PermissionDefaults.DEFAULT_PLANT_ID,
     val active: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
-    val googleEmail: String = ""
+    val googleEmail: String = "",
+    val passwordUpdatedAtMillis: Long = 0L
 )
 
 data class PasswordResetRequest(

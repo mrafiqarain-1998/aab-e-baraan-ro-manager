@@ -116,39 +116,28 @@ data class BottlePackVariant(
     val packetCount: Int = 0
 )
 
-fun cleanBaseBottleName(rawName: String): String {
+fun normalizeLegacyBottleName(rawName: String): String {
     return rawName
+        .replace(Regex("12\\.5\\s*Litre", RegexOption.IGNORE_CASE), "12 Litre")
+        .replace(Regex("12\\.5\\s*Liter", RegexOption.IGNORE_CASE), "12 Litre")
+        .replace(Regex("12\\.5\\s*L\\b", RegexOption.IGNORE_CASE), "12L")
         .trim()
+}
+
+fun cleanBaseBottleName(rawName: String): String {
+    return normalizeLegacyBottleName(rawName)
         .replace(Regex("\\s*Pack\\s*\\((Carton|Packet)\\)\\s*$", RegexOption.IGNORE_CASE), "")
         .replace(Regex("\\s*\\((Carton|Packet)\\)\\s*$", RegexOption.IGNORE_CASE), "")
         .trim()
-        .ifBlank { rawName.trim() }
+        .ifBlank { normalizeLegacyBottleName(rawName) }
 }
 
-fun formatPackVariantName(
-    baseSizeName: String,
-    packSize: Int,
-    containerType: PackContainerType
-): String {
+fun shortBaseSizeToken(baseSizeName: String, capacityLitres: Double = 0.0): String {
     val cleanBase = cleanBaseBottleName(baseSizeName)
-    return if (packSize <= 1) {
-        "$cleanBase (1 Bottle)"
-    } else {
-        "$cleanBase ($packSize Bottle ${containerType.label})"
-    }
-}
-
-fun formatPackVariantShortLabel(
-    baseSizeName: String,
-    capacityLitres: Double,
-    packSize: Int,
-    containerType: PackContainerType
-): String {
-    val cleanBase = cleanBaseBottleName(baseSizeName)
-    val baseShort = when {
+    return when {
         cleanBase.contains("19", ignoreCase = true) -> "19L"
-        cleanBase.contains("12.5", ignoreCase = true) -> "12.5L"
-        cleanBase.contains("12", ignoreCase = true) -> "12L"
+        cleanBase.contains("12.5", ignoreCase = true) || cleanBase.contains("12", ignoreCase = true) -> "12L"
+        cleanBase.startsWith("6", ignoreCase = true) || cleanBase.contains("6 Lit", ignoreCase = true) -> "6L"
         cleanBase.contains("1.5", ignoreCase = true) -> "1.5L"
         cleanBase.contains("500", ignoreCase = true) -> "500ml"
         cleanBase.contains("300", ignoreCase = true) -> "300ml"
@@ -161,10 +150,33 @@ fun formatPackVariantShortLabel(
         }
         else -> cleanBase.take(8)
     }
+}
+
+fun formatPackVariantName(
+    baseSizeName: String,
+    packSize: Int,
+    containerType: PackContainerType
+): String {
+    val cleanBase = cleanBaseBottleName(baseSizeName)
+    val shortBase = shortBaseSizeToken(cleanBase)
     return if (packSize <= 1) {
-        "$baseShort (1B)"
+        cleanBase
     } else {
-        "$baseShort (${packSize}B ${containerType.shortLabel})"
+        "$shortBase ${containerType.label}"
+    }
+}
+
+fun formatPackVariantShortLabel(
+    baseSizeName: String,
+    capacityLitres: Double,
+    packSize: Int,
+    containerType: PackContainerType
+): String {
+    val baseShort = shortBaseSizeToken(baseSizeName, capacityLitres)
+    return if (packSize <= 1) {
+        baseShort
+    } else {
+        "$baseShort ${containerType.label}"
     }
 }
 

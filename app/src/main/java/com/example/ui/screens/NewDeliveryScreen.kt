@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -51,38 +53,93 @@ fun buildDeliverySelectableOptions(
     inventory: List<BottleInventory>
 ): List<DeliverySelectableOption> {
     val result = mutableListOf<DeliverySelectableOption>()
-    bottleSizes.filter { it.active }.forEach { size ->
+
+    // Order standard sizes cleanly: 19L, 12L, 6L, 500ml (Carton & Packet), 1.5L (Carton & Packet), then custom sizes
+    val activeSizes = bottleSizes.filter { it.active }.sortedBy { size ->
+        when (size.id) {
+            "size_19l" -> 0
+            "size_12l" -> 1
+            "size_6l" -> 2
+            "size_500ml" -> 3
+            "size_1_5l" -> 4
+            else -> 10
+        }
+    }
+
+    activeSizes.forEach { size ->
         val isRet = size.usageType == BottleUsageType.MULTIPLE_TIME ||
             (size.usageType == BottleUsageType.CUSTOM && size.isReturnableBottle)
         val inv = inventory.find { it.bottleSizeId == size.id }
         val variants = inv?.packVariants.orEmpty()
-        if (!isRet && variants.isNotEmpty()) {
-            variants.forEach { v ->
+        val baseShort = shortBottleLabel(size)
+        val cleanBaseName = normalizeLegacyBottleName(size.name)
+
+        val isMultiPackStandard = size.id == "size_500ml" || size.id == "size_1_5l" ||
+            baseShort.equals("500ml", ignoreCase = true) || baseShort.equals("1.5L", ignoreCase = true)
+
+        if (!isRet && isMultiPackStandard) {
+            val defaultCartonPackSize = if (baseShort.equals("500ml", ignoreCase = true)) 24 else 12
+            val defaultPacketPackSize = if (baseShort.equals("500ml", ignoreCase = true)) 12 else 6
+
+            val cartonVariant = variants.firstOrNull { it.packSize > 1 && it.containerType == PackContainerType.CARTON }
+            val packetVariant = variants.firstOrNull { it.packSize > 1 && it.containerType == PackContainerType.PACKET }
+
+            val cartonLabel = "$baseShort Carton"
+            val packetLabel = "$baseShort Packet"
+
+            result.add(
+                DeliverySelectableOption(
+                    rateKey = cartonVariant?.variantId ?: "${size.id}_carton_$defaultCartonPackSize",
+                    bottleSizeId = size.id,
+                    variantId = cartonVariant?.variantId ?: "${size.id}_carton_$defaultCartonPackSize",
+                    packSize = cartonVariant?.packSize ?: defaultCartonPackSize,
+                    displayName = cartonLabel,
+                    shortName = cartonLabel,
+                    isReturnable = false,
+                    stdRefillPrice = size.defaultRefillPrice
+                )
+            )
+            result.add(
+                DeliverySelectableOption(
+                    rateKey = packetVariant?.variantId ?: "${size.id}_packet_$defaultPacketPackSize",
+                    bottleSizeId = size.id,
+                    variantId = packetVariant?.variantId ?: "${size.id}_packet_$defaultPacketPackSize",
+                    packSize = packetVariant?.packSize ?: defaultPacketPackSize,
+                    displayName = packetLabel,
+                    shortName = packetLabel,
+                    isReturnable = false,
+                    stdRefillPrice = size.defaultRefillPrice
+                )
+            )
+        } else if (!isRet && variants.any { it.packSize > 1 }) {
+            // Other single-use sizes with multi-bottle pack variants: show clean Carton / Packet tabs
+            val groupedByContainer = variants.filter { it.packSize > 1 }.distinctBy { it.containerType }
+            groupedByContainer.forEach { v ->
+                val cleanLabel = formatPackVariantShortLabel(cleanBaseName, size.capacityLitres, v.packSize, v.containerType)
                 result.add(
                     DeliverySelectableOption(
                         rateKey = v.variantId,
                         bottleSizeId = size.id,
                         variantId = v.variantId,
                         packSize = v.packSize.coerceAtLeast(1),
-                        displayName = v.displayName,
-                        shortName = v.shortLabel.ifBlank {
-                            if (v.packSize <= 1) "${shortBottleLabel(size)} (1B)"
-                            else "${shortBottleLabel(size)} (${v.packSize}B ${v.containerType.shortLabel})"
-                        },
+                        displayName = cleanLabel,
+                        shortName = cleanLabel,
                         isReturnable = false,
                         stdRefillPrice = size.defaultRefillPrice
                     )
                 )
             }
         } else {
+            // Returnable (19L, 12L) or single-bottle (6L, etc.) — clean short label, NEVER "1 Bottle" or "(1B)"
+            val singleVariant = if (!isRet) variants.firstOrNull { it.packSize <= 1 } else null
             result.add(
                 DeliverySelectableOption(
-                    rateKey = size.id,
+                    rateKey = singleVariant?.variantId ?: size.id,
                     bottleSizeId = size.id,
-                    variantId = "",
+                    variantId = singleVariant?.variantId ?: "",
                     packSize = 1,
-                    displayName = size.name,
-                    shortName = shortBottleLabel(size),
+                    displayName = baseShort,
+                    shortName = baseShort,
                     isReturnable = isRet,
                     stdRefillPrice = size.defaultRefillPrice
                 )
@@ -115,12 +172,11 @@ data class DeliveryLineState(
 }
 
 fun shortBottleLabel(size: BottleSize): String {
-    val n = size.name.trim()
+    val n = normalizeLegacyBottleName(size.name).trim()
     return when {
         size.id == "size_19l" || n.contains("19", ignoreCase = true) -> "19L"
-        size.id == "size_12l" || n.contains("12.5", ignoreCase = true) -> "12.5L"
-        n.contains("12", ignoreCase = true) -> "12L"
-        size.id == "size_6l" || n.startsWith("6 ", ignoreCase = true) || n.contains("6 Lit", ignoreCase = true) -> "6L"
+        size.id == "size_12l" || n.contains("12.5", ignoreCase = true) || n.contains("12", ignoreCase = true) -> "12L"
+        size.id == "size_6l" || n.startsWith("6 ", ignoreCase = true) || n.contains("6 Lit", ignoreCase = true) || n.equals("6L", ignoreCase = true) -> "6L"
         size.id == "size_1_5l" || n.contains("1.5", ignoreCase = true) -> "1.5L"
         size.id == "size_500ml" || n.contains("500", ignoreCase = true) -> "500ml"
         size.capacityLitres > 0 && n.contains("ml", ignoreCase = true) -> {
@@ -129,7 +185,7 @@ fun shortBottleLabel(size: BottleSize): String {
         }
         n.length <= 7 -> n
         else -> {
-            val cap = size.capacityLitres
+            val cap = if (size.capacityLitres == 12.5) 12.0 else size.capacityLitres
             if (cap > 0) {
                 if (cap % 1.0 == 0.0) "${cap.toInt()}L" else "${cap}L"
             } else n.take(7)
@@ -144,11 +200,13 @@ fun NewDeliveryScreen(
     preSelectedCustomer: Customer? = null,
     onDeliverySaved: () -> Unit
 ) {
+    val context = LocalContext.current
     val customers by viewModel.customers.collectAsState()
     val bottleSizes by viewModel.bottleSizes.collectAsState()
     val inventory by viewModel.inventory.collectAsState()
     val allCustomerRates by viewModel.customerRates.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val canEditCustomerRates = viewModel.hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)
 
     val selectableOptions = remember(bottleSizes, inventory) {
         buildDeliverySelectableOptions(bottleSizes, inventory)
@@ -556,8 +614,16 @@ fun NewDeliveryScreen(
                                             .height(34.dp)
                                             .clickable(enabled = !isAlreadyAdded) {
                                                 if (!hasFixedRateForCustomer(cust.id, option.rateKey)) {
-                                                    // Rate not fixed for this customer -> open Rate Fix Window first
-                                                    pendingRateOption = option
+                                                    if (canEditCustomerRates) {
+                                                        // Rate not fixed for this customer -> open Rate Fix Window first
+                                                        pendingRateOption = option
+                                                    } else {
+                                                        Toast.makeText(
+                                                            context,
+                                                            "Rate not set for ${option.shortName}. Admin has restricted rate changes.",
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                    }
                                                 } else {
                                                     addBottleLineForOption(cust, option)
                                                 }

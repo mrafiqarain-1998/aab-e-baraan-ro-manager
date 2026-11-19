@@ -40,7 +40,23 @@ data class Customer(
     val notes: String = "",
     val active: Boolean = true,
     val businessId: String = "aab_e_baraan_plant_01",
-    val createdBy: String = ""
+    val createdBy: String = "",
+    val createdByUid: String = "",
+    val createdAt: Long = 0L
 ) {
     val effectiveSecurityDeposit: Double get() = if (securityDeposit > 0) securityDeposit else bottleDeposit
+
+    /**
+     * Returns the list of incomplete customer profile details.
+     * Used to show a blinking orange indicator until all details are filled.
+     */
+    fun missingDetailLabels(): List<String> = buildList {
+        if (name.isBlank()) add("Name")
+        if (phone.isBlank()) add("Phone")
+        if (whatsapp.isBlank()) add("WhatsApp")
+        if (area.isBlank()) add("Area")
+        if (address.isBlank()) add("Address")
+    }
+
+    val hasMissingDetails: Boolean get() = missingDetailLabels().isNotEmpty()
 }

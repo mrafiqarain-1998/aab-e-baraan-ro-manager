@@ -11,6 +11,16 @@
       }
     },
 
+    "authVerifiers": {
+      ".read": false,
+      ".write": false,
+      "$username": {
+        ".read": true,
+        ".write": "auth != null && ((auth.token.email != null && auth.token.email_verified === true && (auth.token.email.toLowerCase() === 'mrafiqarain1998@gmail.com' || (root.child('staffByEmail').child(auth.token.email.toLowerCase().replace('.', ',')).child('active').val() === true && (root.child('staffByEmail').child(auth.token.email.toLowerCase().replace('.', ',')).child('permissionsMap').child('STAFF_MANAGEMENT').child('MANAGE').val() === true || root.child('staffByEmail').child(auth.token.email.toLowerCase().replace('.', ',')).child('username').val() === $username)))) || (root.child('staffUsers').child(auth.uid).child('active').val() === true && (root.child('staffUsers').child(auth.uid).child('permissionsMap').child('STAFF_MANAGEMENT').child('MANAGE').val() === true || root.child('staffUsers').child(auth.uid).child('username').val() === $username)))",
+        ".validate": "!newData.exists() || (!newData.hasChild('password') && newData.hasChild('credVerifier') && newData.hasChild('credSalt'))"
+      }
+    },
+
     "plants": {
       ".read": "auth != null && auth.token.email != null && auth.token.email_verified === true && (auth.token.email.toLowerCase() === 'mrafiqarain1998@gmail.com' || root.child('staffByEmail').child(auth.token.email.toLowerCase().replace('.', ',')).child('active').val() === true) || (auth != null && root.child('staffUsers').child(auth.uid).child('active').val() === true)",
       "$plantId": {

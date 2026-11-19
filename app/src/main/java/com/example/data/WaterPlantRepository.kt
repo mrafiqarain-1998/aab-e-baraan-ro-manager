@@ -70,6 +70,61 @@ class WaterPlantRepository private constructor(private val context: Context) {
     )
     val currentUser: StateFlow<UserProfile> = _currentUser.asStateFlow()
 
+    private val _seenRecordKeys = MutableStateFlow<Set<String>>(emptySet())
+    val seenRecordKeys: StateFlow<Set<String>> = _seenRecordKeys.asStateFlow()
+
+    private fun currentUserSeenBucketKey(profile: UserProfile = _currentUser.value): String {
+        return profile.id.ifBlank { profile.uid }.ifBlank { profile.username }.trim().lowercase().ifBlank { "default" }
+    }
+
+    private fun refreshSeenRecordsForCurrentUser() {
+        val bucket = currentUserSeenBucketKey()
+        storage.getOrInitSeenBaselineMillis(bucket)
+        _seenRecordKeys.value = storage.loadSeenRecordKeys(bucket)
+    }
+
+    fun markRecordSeen(type: String, recordId: String) {
+        if (recordId.isBlank()) return
+        val key = "${type.trim().lowercase()}:$recordId"
+        val currentSet = _seenRecordKeys.value
+        if (key in currentSet) return
+        val updated = currentSet + key
+        _seenRecordKeys.value = updated
+        storage.saveSeenRecordKeys(currentUserSeenBucketKey(), updated)
+    }
+
+    fun isRecordNewForCurrentUser(
+        type: String,
+        recordId: String,
+        createdByUid: String,
+        createdByName: String,
+        createdAt: Long,
+        seenKeys: Set<String> = _seenRecordKeys.value,
+        user: UserProfile = _currentUser.value
+    ): Boolean {
+        if (recordId.isBlank()) return false
+        val key = "${type.trim().lowercase()}:$recordId"
+        if (key in seenKeys) return false
+
+        // Creator must never see the "NEW" badge on their own newly added record
+        val userIds = setOf(user.id.trim(), user.uid.trim()).filter { it.isNotBlank() }
+        if (createdByUid.isNotBlank() && userIds.any { it.equals(createdByUid.trim(), ignoreCase = true) }) {
+            return false
+        }
+        val userNames = setOf(user.name.trim(), user.username.trim()).filter { it.isNotBlank() }
+        if (createdByUid.isBlank() && createdByName.isNotBlank() && userNames.any { it.equals(createdByName.trim(), ignoreCase = true) }) {
+            return false
+        }
+
+        // Any record stamped with createdByUid was created by another user after this feature
+        if (createdByUid.isNotBlank()) return true
+
+        // Backwards compatibility: if an older APK created a record without createdByUid,
+        // show NEW if its createdAt is after this user's local baseline timestamp.
+        val baseline = storage.getOrInitSeenBaselineMillis(currentUserSeenBucketKey(user))
+        return createdAt > 0L && createdAt >= baseline
+    }
+
     // Business Data Flows
     private val _customers = MutableStateFlow<List<Customer>>(SampleData.customers)
     val customers: StateFlow<List<Customer>> = _customers.asStateFlow()
@@ -614,7 +669,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             ownerId = resolvedOwnerId,
             memberUids = memberUids,
             memberEmails = memberEmails,
-            plantId = plantId
+            plantId = plantId,
+            lastModifiedByUid = user.uid
         )
     }
 
@@ -676,6 +732,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             loadAllFromLocalStorage()
         }
         loadExtraPlatformState()
+        normalizeLegacyBottleRecords()
+        offlineSyncManager.clearFalsePositiveWorkflowConflicts()
 
         // 3. Auth-gated Firestore listener lifecycle (no unauthenticated cold-start queries)
         try {
@@ -775,8 +833,117 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return acc.copy(
             password = "",
             passwordHash = hash,
-            passwordSalt = salt
+            passwordSalt = salt,
+            passwordUpdatedAtMillis = System.currentTimeMillis()
         )
+    }
+
+    private fun buildCredentialVerifierMap(acc: UserAccount): Map<String, Any?> {
+        val cleanUser = normalizeUsername(acc.username)
+        val ts = acc.passwordUpdatedAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+        return mapOf(
+            "id" to cleanUser,
+            "username" to cleanUser,
+            "accountId" to acc.id,
+            "name" to acc.name,
+            "role" to acc.role.name,
+            "isSuperAdmin" to (acc.isSuperAdmin || acc.id == "user_admin_01"),
+            "active" to (if (acc.isSuperAdmin || acc.id == "user_admin_01") true else acc.active),
+            "credVerifier" to acc.passwordHash,
+            "credSalt" to acc.passwordSalt,
+            "passwordUpdatedAtMillis" to ts
+        )
+    }
+
+    private fun syncPasswordVerifierToCloud(acc: UserAccount) {
+        val cleanUser = normalizeUsername(acc.username)
+        if (cleanUser.isBlank() || acc.passwordHash.isBlank() || acc.passwordSalt.isBlank()) return
+        val verifierMap = buildCredentialVerifierMap(acc)
+        // 1. Sync inside plantData/{plantId}/staffCredentials (works immediately under existing RTDB rules)
+        syncDocument("staffCredentials", cleanUser, verifierMap)
+        // 2. Also sync to top-level authVerifiers/{username} for fresh-install multi-device login verification
+        val db = rtdb ?: return
+        if (!isFirebaseSignedIn()) return
+        scope.launch {
+            try {
+                db.reference
+                    .child("authVerifiers")
+                    .child(RtdbSyncHelper.sanitizeKey(cleanUser))
+                    .setValue(verifierMap)
+                    .await()
+            } catch (e: Exception) {
+                Log.w("WaterPlantRepo", "authVerifiers cloud write notice: ${e.message}")
+            }
+        }
+    }
+
+    internal fun applyRemoteCredentialVerifier(
+        username: String,
+        credVerifier: String,
+        credSalt: String,
+        updatedAtMillis: Long,
+        active: Boolean? = null
+    ): Boolean {
+        val cleanUser = normalizeUsername(username)
+        if (cleanUser.isBlank() || credVerifier.isBlank() || credSalt.isBlank()) return false
+        val existing = _userAccounts.value.find { normalizeUsername(it.username) == cleanUser } ?: return false
+        val shouldReplace = existing.passwordHash.isBlank() ||
+            existing.passwordUpdatedAtMillis == 0L ||
+            updatedAtMillis >= existing.passwordUpdatedAtMillis
+        if (!shouldReplace) return false
+        val isSuper = existing.isSuperAdmin || existing.id == "user_admin_01"
+        val resolvedActive = if (isSuper) true else (active ?: existing.active)
+        val updated = existing.copy(
+            password = "",
+            passwordHash = credVerifier,
+            passwordSalt = credSalt,
+            passwordUpdatedAtMillis = updatedAtMillis.coerceAtLeast(1L),
+            active = resolvedActive
+        )
+        _userAccounts.value = _userAccounts.value.map {
+            if (normalizeUsername(it.username) == cleanUser) updated else it
+        }
+        storage.saveUserAccounts(_userAccounts.value)
+        return true
+    }
+
+    private fun applyCredentialVerifierSnapshot(snapshot: DataSnapshot): Boolean {
+        if (!snapshot.exists()) return false
+        val map = RtdbSyncHelper.snapshotToMap(snapshot) ?: return false
+        val uName = (map["username"] as? String)?.let { normalizeUsername(it) }
+            ?.takeIf { it.isNotBlank() } ?: snapshot.key.orEmpty()
+        val verifier = (map["credVerifier"] as? String).orEmpty()
+        val salt = (map["credSalt"] as? String).orEmpty()
+        val ts = (map["passwordUpdatedAtMillis"] as? Number)?.toLong()
+            ?: (map["updatedAtMillis"] as? Number)?.toLong() ?: 1L
+        val active = map["active"] as? Boolean
+        return applyRemoteCredentialVerifier(uName, verifier, salt, ts, active)
+    }
+
+    private suspend fun refreshCloudVerifierForUsername(cleanUser: String) {
+        val db = rtdb ?: return
+        if (!isDeviceOnline.value) return
+        val safeKey = RtdbSyncHelper.sanitizeKey(cleanUser)
+        try {
+            kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                try {
+                    val topSnap = db.reference.child("authVerifiers").child(safeKey).get().await()
+                    if (topSnap.exists()) {
+                        applyCredentialVerifierSnapshot(topSnap)
+                    }
+                } catch (_: Exception) {}
+                if (isFirebaseSignedIn()) {
+                    try {
+                        val plantSnap = rtdbDocRef(db, "staffCredentials", safeKey).get().await()
+                        if (plantSnap.exists()) {
+                            applyCredentialVerifierSnapshot(plantSnap)
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("WaterPlantRepo", "refreshCloudVerifierForUsername notice: ${e.message}")
+        }
     }
 
     private fun mergeAccountsPreservingLocalCredentials(
@@ -795,6 +962,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 (remote.id == "user_admin_01") ||
                 (remote.googleEmail.trim().lowercase() in primaryAdminEmails)
             val resolvedRole = if (resolvedSuperAdmin) UserRole.ADMIN else remote.role
+            val useRemoteHash = remote.passwordHash.isNotBlank() &&
+                remote.passwordSalt.isNotBlank() &&
+                (prev == null || prev.passwordHash.isBlank() || remote.passwordUpdatedAtMillis > prev.passwordUpdatedAtMillis)
             val normalized = remote.copy(
                 uid = remote.uid.ifBlank { remote.id },
                 isSuperAdmin = resolvedSuperAdmin,
@@ -802,9 +972,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 permissions = PermissionDefaults.normalizePermissions(remote.permissions, resolvedRole, resolvedSuperAdmin),
                 assignedBranchIds = remote.assignedBranchIds.ifEmpty { listOf(_activePlantId.value) },
                 defaultBranchId = remote.defaultBranchId.ifBlank { _activePlantId.value },
-                password = prev?.password?.takeIf { it.isNotEmpty() } ?: "",
-                passwordHash = prev?.passwordHash?.takeIf { it.isNotBlank() } ?: remote.passwordHash,
-                passwordSalt = prev?.passwordSalt?.takeIf { it.isNotBlank() } ?: remote.passwordSalt
+                password = if (useRemoteHash) "" else (prev?.password?.takeIf { it.isNotEmpty() } ?: ""),
+                passwordHash = if (useRemoteHash) remote.passwordHash else (prev?.passwordHash?.takeIf { it.isNotBlank() } ?: remote.passwordHash),
+                passwordSalt = if (useRemoteHash) remote.passwordSalt else (prev?.passwordSalt?.takeIf { it.isNotBlank() } ?: remote.passwordSalt),
+                passwordUpdatedAtMillis = if (useRemoteHash) remote.passwordUpdatedAtMillis else (prev?.passwordUpdatedAtMillis ?: remote.passwordUpdatedAtMillis)
             )
             map[normalized.id] = normalized
         }
@@ -943,6 +1114,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             active = account.active
         )
         _currentUser.value = profile
+        refreshSeenRecordsForCurrentUser()
         storage.saveCurrentProfile(profile)
         storage.saveLoginState(true)
         storage.saveLastUser(cleanUser)
@@ -1041,6 +1213,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
             // If backend is unconfigured or network error, fall through to offline hashed verification
         }
+
+        // 1b. Sync latest cloud password verifier BEFORE local check so changed passwords on another phone
+        // immediately invalidate old default passwords (e.g. admin123) on fresh installs
+        refreshCloudVerifierForUsername(cleanUser)
 
         // 2. Local offline-first hashed verification (supports offline staff login after initial sync)
         val localByUsername = _userAccounts.value.find { normalizeUsername(it.username) == cleanUser }
@@ -1149,6 +1325,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveUserAccounts(_userAccounts.value)
 
         syncStaffAccountDocuments(newAcc)
+        syncPasswordVerifierToCloud(newAcc)
 
         if (isFirebaseSignedIn() && staffAuthApiClient.isConfigured() && rawPassword.isNotEmpty()) {
             scope.launch {
@@ -1227,6 +1404,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveUserAccounts(_userAccounts.value)
 
         syncStaffAccountDocuments(updated, previousEmail = existing?.googleEmail.orEmpty())
+        if (rawNewPass.isNotEmpty()) {
+            syncPasswordVerifierToCloud(updated)
+        }
 
         if (isFirebaseSignedIn() && staffAuthApiClient.isConfigured()) {
             scope.launch {
@@ -1260,6 +1440,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveUserAccounts(_userAccounts.value)
 
         syncStaffAccountDocuments(updated)
+        syncPasswordVerifierToCloud(updated)
 
         if (isFirebaseSignedIn() && staffAuthApiClient.isConfigured()) {
             scope.launch {
@@ -1339,6 +1520,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveUserAccounts(_userAccounts.value)
 
         syncStaffAccountDocuments(updated)
+        syncPasswordVerifierToCloud(updated)
 
         if (isFirebaseSignedIn() && staffAuthApiClient.isConfigured()) {
             scope.launch {
@@ -1384,6 +1566,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.MANAGE)) {
             syncStaffAccountDocuments(updated)
         }
+        syncPasswordVerifierToCloud(updated)
 
         if (isFirebaseSignedIn() && staffAuthApiClient.isConfigured()) {
             scope.launch {
@@ -1570,6 +1753,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             permissions = PermissionDefaults.defaultPermissionsForRole(role)
         )
         _currentUser.value = updated
+        refreshSeenRecordsForCurrentUser()
         storage.saveCurrentProfile(updated)
         addNotification(
             "Role Switched",
@@ -1593,6 +1777,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     // Bottle Sizes & Rates Management
     fun addBottleSize(size: BottleSize): String {
+        if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
+            addNotification("Access Restricted", "Admin has restricted adding new bottle sizes/items.", NotificationSeverity.WARNING)
+            return ""
+        }
         val id = if (size.id.isNotEmpty()) size.id else nextRecordId("size")
         val newSize = size.copy(id = id)
         _bottleSizes.value = _bottleSizes.value + newSize
@@ -1640,7 +1828,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (!hasPermission(AppModule.CUSTOMERS, PermissionAction.ADD)) return ""
         val newId = if (customer.id.isNotEmpty()) customer.id else nextRecordId("cust")
         val code = if (customer.customerCode.isNotEmpty()) customer.customerCode else "C-${100 + _customers.value.size + 1}"
-        val newCust = customer.copy(id = newId, customerCode = code)
+        val creatorUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
+        val creatorName = customer.createdBy.ifBlank { _currentUser.value.name }
+        val newCust = customer.copy(
+            id = newId,
+            customerCode = code,
+            createdBy = creatorName,
+            createdByUid = customer.createdByUid.ifBlank { creatorUid },
+            createdAt = if (customer.createdAt > 0L) customer.createdAt else System.currentTimeMillis()
+        )
+        markRecordSeen("customer", newId)
         return withSyncAction("Add Customer • ${newCust.name}") {
             _customers.value = listOf(newCust) + _customers.value
 
@@ -1672,10 +1869,18 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     fun updateCustomer(customer: Customer) {
         if (!hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT)) return
-        withSyncAction("Update Customer • ${customer.name}") {
-            _customers.value = _customers.value.map { if (it.id == customer.id) customer else it }
+        val existing = _customers.value.find { it.id == customer.id }
+        val preserved = if (existing != null) {
+            customer.copy(
+                createdBy = customer.createdBy.ifBlank { existing.createdBy },
+                createdByUid = customer.createdByUid.ifBlank { existing.createdByUid },
+                createdAt = if (customer.createdAt > 0L) customer.createdAt else existing.createdAt
+            )
+        } else customer
+        withSyncAction("Update Customer • ${preserved.name}") {
+            _customers.value = _customers.value.map { if (it.id == preserved.id) preserved else it }
             storage.saveCustomers(_customers.value)
-            syncDocument("customers", customer.id, customer)
+            syncDocument("customers", preserved.id, preserved)
         }
     }
 
@@ -1746,9 +1951,17 @@ class WaterPlantRepository private constructor(private val context: Context) {
         bottleSizeName: String? = null,
         appliedDate: String? = null
     ) {
+        if (!hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT) &&
+            !hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.ADD)
+        ) {
+            addNotification("Rate Change Restricted", "Admin has restricted changing customer rates.", NotificationSeverity.WARNING)
+            return
+        }
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
         val effectiveDate = if (!appliedDate.isNullOrBlank()) appliedDate else todayStr
-        val name = bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
+        val name = normalizeLegacyBottleName(
+            bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
+        )
         val existingRate = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
         val otherRates = _customerRates.value.filterNot { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
 
@@ -1759,7 +1972,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             bottleSizeName = name,
             rate = customPrice,
             appliedFromDate = effectiveDate,
-            updatedBy = "Admin",
+            updatedBy = _currentUser.value.name.ifBlank { "Admin" },
             timestamp = System.currentTimeMillis()
         )
 
@@ -1791,6 +2004,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun removeCustomerBottleSize(customerId: String, bottleSizeId: String) {
+        if (!hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)) {
+            addNotification("Rate Change Restricted", "Admin has restricted changing customer rates.", NotificationSeverity.WARNING)
+            return
+        }
         val existing = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
         val sizeName = existing?.bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
         _customerRates.value = _customerRates.value.map {
@@ -1805,6 +2022,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun reactivateCustomerBottleSize(customerId: String, bottleSizeId: String) {
+        if (!hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)) {
+            addNotification("Rate Change Restricted", "Admin has restricted changing customer rates.", NotificationSeverity.WARNING)
+            return
+        }
         val existing = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
         val sizeName = existing?.bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
         _customerRates.value = _customerRates.value.map {
@@ -2253,8 +2474,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 paymentMethod = if (immediatePaymentAmount > 0) paymentMethod.label else "Unpaid",
                 notes = notes,
                 invoiceId = invId,
-                createdBy = _currentUser.value.name
+                createdBy = _currentUser.value.name,
+                createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
             )
+            markRecordSeen("delivery", delId)
             _deliveries.value = listOf(delivery) + _deliveries.value
 
             // 1. Generate Invoice
@@ -2403,8 +2626,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     receivedByRole = _currentUser.value.role,
                     isAcknowledged = isAdmin, // Admin auto-cleared; Staff/Supervisor starts Unsettle until Admin clears
                     acknowledgedBy = if (isAdmin) _currentUser.value.name else "",
-                    businessId = activePlant
+                    businessId = activePlant,
+                    createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
                 )
+                markRecordSeen("payment", payment.id)
                 _payments.value = listOf(payment) + _payments.value
                 storage.savePayments(_payments.value)
                 syncDocument("payments", payment.id, payment)
@@ -2559,8 +2784,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 receivedByRole = _currentUser.value.role,
                 isAcknowledged = isAdmin, // Admin auto-cleared; Staff/Supervisor starts Unsettle until Admin clears
                 acknowledgedBy = if (isAdmin) _currentUser.value.name else "",
-                businessId = activePlant
+                businessId = activePlant,
+                createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
             )
+            markRecordSeen("payment", paymentId)
             _payments.value = listOf(payment) + _payments.value
             storage.savePayments(_payments.value)
             storage.saveInvoices(_invoices.value)
@@ -3241,6 +3468,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     // RO PLANT MATERIALS, SPARES & CONSUMABLES (Section 6)
     // -------------------------------------------------------------
     fun addRoPlantItem(item: RoPlantItem): String {
+        if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
+            addNotification("Access Restricted", "Admin has restricted adding new items.", NotificationSeverity.WARNING)
+            return ""
+        }
         val id = if (item.id.isNotEmpty()) item.id else nextRecordId("item")
         val newItem = item.copy(id = id)
         _roPlantItems.value = _roPlantItems.value + newItem
@@ -3396,8 +3627,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 enteredByRole = _currentUser.value.role,
                 isAcknowledged = isAdmin, // Admin additions auto-verified, Incharge needs Admin acknowledgment
                 acknowledgedBy = if (isAdmin) _currentUser.value.name else "",
-                isApprovedByOwner = isAdmin
+                isApprovedByOwner = isAdmin,
+                createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
             )
+            markRecordSeen("expense", expId)
             _expenses.value = listOf(expense) + _expenses.value
             storage.saveExpenses(_expenses.value)
             syncDocument("expenses", expId, expense)
@@ -3428,11 +3661,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
         capacityLitres: Double? = null,
         depositAmount: Double = 0.0
     ): String = withSyncAction("Add Bottle Size: ${name.trim()}") {
+        if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
+            addNotification("Access Restricted", "Admin has restricted adding new bottle sizes/items.", NotificationSeverity.WARNING)
+            return@withSyncAction ""
+        }
         val sizeId = nextRecordId("size")
         val isReturnable = (usageType == BottleUsageType.MULTIPLE_TIME || (usageType == BottleUsageType.CUSTOM && (name.contains("19", true) || name.contains("12", true))))
         val resolvedCapacity = capacityLitres ?: when {
             name.contains("19", true) -> 19.0
-            name.contains("12", true) -> 12.5
+            name.contains("12", true) -> 12.0
             name.contains("6", true) -> 6.0
             name.contains("1.5", true) -> 1.5
             else -> 0.5
@@ -3566,6 +3803,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE,
         paymentMode: StockPaymentMode = StockPaymentMode.CASH
     ): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
         if (quantity <= 0) return@synchronized Pair(false, "Quantity must be greater than zero (مقدار صفر سے زیادہ ہونی چاہیے)")
         if (unitPurchaseRate < 0) return@synchronized Pair(false, "Purchase rate cannot be negative (خریداری قیمت منفی نہیں ہو سکتی)")
         val size = _bottleSizes.value.find { it.id == bottleSizeId }
@@ -3793,6 +4033,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveBottleRefills(_bottleRefills.value)
         syncDocument("bottleRefills", refillRec.id, refillRec)
 
+        val unitLabel = if (packetSize <= 1) "Bottle" else containerType.label
         if (bottlesAddedToFull > 0) {
             val refillMov = BottleMovement(
                 id = nextRecordId("mov", "fill"),
@@ -3801,7 +4042,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 sizeName = if (completePackets > 0) variantName else size.name,
                 movementType = BottleMovementType.PLANT_REFILL,
                 quantity = bottlesAddedToFull,
-                referenceType = "Refill Batch & ${containerType.label} Conversion",
+                referenceType = if (packetSize <= 1) "Refill Batch (Single Bottle)" else "Refill Batch & ${containerType.label} Conversion",
                 notes = "$conversionSummary. ${notes.trim()}".trim(),
                 createdBy = _currentUser.value.name
             )
@@ -3817,7 +4058,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 movementType = BottleMovementType.DAMAGED,
                 quantity = damagedQuantity,
                 referenceType = "Refill Batch Loss/Damage",
-                notes = "Damaged/lost $damagedQuantity ${size.name} during refill batch ($packetSize-bottle ${containerType.label}). ${notes.trim()}".trim(),
+                notes = "Damaged/lost $damagedQuantity ${size.name} during refill batch (${if (packetSize <= 1) "Single Bottle" else "$packetSize-bottle ${containerType.label}"}). ${notes.trim()}".trim(),
                 createdBy = _currentUser.value.name
             )
             _bottleMovements.value = listOf(dmgMov) + _bottleMovements.value
@@ -3826,16 +4067,21 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveBottleMovements(_bottleMovements.value)
 
         val looseMsg = if (returnLooseToInUse && looseBottles > 0) "$looseBottles loose returned to In Use" else "$looseBottles remaining loose"
+        val convertedSummary = if (packetSize <= 1) {
+            "$completePackets $unitLabel(s)"
+        } else {
+            "$completePackets $unitLabel(s) ($packedBottles bottles)"
+        }
         addNotification(
             "Refill Batch Converted",
-            "$variantName: $completePackets ${containerType.label}(s) ($packedBottles bottles) added to Plant Full" +
+            "$variantName: $convertedSummary added to Plant Full" +
                 (if (looseBottles > 0) ", $looseMsg" else "") +
                 (if (damagedQuantity > 0) ", $damagedQuantity damaged." else "."),
             NotificationSeverity.SUCCESS
         )
         Pair(
             true,
-            "$variantName: $completePackets ${containerType.label}(s) ($packedBottles bottles), $looseMsg, $damagedQuantity damaged."
+            "$variantName: $convertedSummary, $looseMsg, $damagedQuantity damaged."
         )
     } }
 
@@ -4469,6 +4715,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     // --- Sub-Tab 2: Other Material Stock Operations ---
 
     fun addFactoryMaterial(material: FactoryMaterial): String {
+        if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
+            addNotification("Access Restricted", "Admin has restricted adding new items/materials.", NotificationSeverity.WARNING)
+            return ""
+        }
         val matId = if (material.id.isNotBlank()) material.id else nextRecordId("mat")
         val newMat = material.copy(id = matId, currentStock = material.openingStock)
         return withSyncAction("Add Material • ${newMat.name}") {
@@ -4570,6 +4820,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE,
         paymentMode: StockPaymentMode = StockPaymentMode.CASH
     ): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding material stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
         if (quantity <= 0) return@synchronized Pair(false, "Quantity must be greater than zero")
         if (purchaseRate < 0) return@synchronized Pair(false, "Purchase rate cannot be negative")
         val mat = _factoryMaterials.value.find { it.id == materialId }
@@ -5460,6 +5713,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun addExpenseCategory(name: String, urdu: String, type: ExpenseType = ExpenseType.OPEX) {
+        if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
+            addNotification("Access Restricted", "Admin has restricted adding new categories/items.", NotificationSeverity.WARNING)
+            return
+        }
         val newCat = ExpenseCategory(
             id = nextRecordId("cat"),
             name = name,
@@ -5618,12 +5875,69 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadBottleCostings()?.let { _bottleCostings.value = it } ?: storage.saveBottleCostings(_bottleCostings.value)
         storage.loadMonthlyRecurringExpenses()?.let { _monthlyRecurringExpenses.value = it } ?: storage.saveMonthlyRecurringExpenses(_monthlyRecurringExpenses.value)
         storage.loadCurrentProfile()?.let { _currentUser.value = it }
+        refreshSeenRecordsForCurrentUser()
         storage.loadDarkMode()?.let { _isDarkMode.value = it }
         val loadedHistory = storage.loadBackupHistory()
         _backupHistory.value = loadedHistory
         _isAutoBackupEnabled.value = storage.loadAutoBackupEnabled()
         _lastBackupTime.value = loadedHistory.firstOrNull { it.status == "SUCCESS" }?.timestamp
         checkAndRunDailyAutoBackup()
+    }
+
+    private fun normalizeBottleSizesList(sizes: List<BottleSize>): List<BottleSize> {
+        return sizes.map { size ->
+            val isLegacy12 = size.id == "size_12l" ||
+                size.name.contains("12.5", ignoreCase = true) ||
+                size.capacityLitres == 12.5
+            if (isLegacy12) {
+                size.copy(
+                    name = normalizeLegacyBottleName(size.name).ifBlank { "12 Litre Bottle" },
+                    capacityLitres = if (size.capacityLitres == 12.5) 12.0 else size.capacityLitres
+                )
+            } else {
+                size
+            }
+        }
+    }
+
+    private fun normalizeInventoryList(invList: List<BottleInventory>): List<BottleInventory> {
+        val sizesById = _bottleSizes.value.associateBy { it.id }
+        return invList.map { inv ->
+            val fixedName = normalizeLegacyBottleName(inv.sizeName)
+            val size = sizesById[inv.bottleSizeId]
+            val fixedVariants = inv.packVariants.map { v ->
+                val baseName = size?.name ?: fixedName
+                val cap = size?.capacityLitres ?: 0.0
+                v.copy(
+                    displayName = formatPackVariantName(baseName, v.packSize, v.containerType),
+                    shortLabel = formatPackVariantShortLabel(baseName, cap, v.packSize, v.containerType)
+                )
+            }
+            if (fixedName != inv.sizeName || fixedVariants != inv.packVariants) {
+                inv.copy(sizeName = fixedName, packVariants = fixedVariants)
+            } else inv
+        }
+    }
+
+    private fun normalizeLegacyBottleRecords() {
+        val normSizes = normalizeBottleSizesList(_bottleSizes.value)
+        if (normSizes != _bottleSizes.value) {
+            _bottleSizes.value = normSizes
+            storage.saveBottleSizes(normSizes)
+        }
+        val normInv = normalizeInventoryList(_inventory.value)
+        if (normInv != _inventory.value) {
+            _inventory.value = normInv
+            storage.saveInventory(normInv)
+        }
+        val normRates = _customerRates.value.map { r ->
+            val clean = normalizeLegacyBottleName(r.bottleSizeName)
+            if (clean != r.bottleSizeName) r.copy(bottleSizeName = clean) else r
+        }
+        if (normRates != _customerRates.value) {
+            _customerRates.value = normRates
+            storage.saveCustomerRates(normRates)
+        }
     }
 
     private fun loadExtraPlatformState() {
@@ -5867,7 +6181,24 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         }
                         if (offlineSyncManager.hasPendingOrFailedMutation(collection, itemId)) {
                             val pendingItem = offlineSyncManager.queueItems.value.find { it.id == "$collection|$itemId" }
-                            if (pendingItem != null && remoteTs > 0L && pendingItem.baseRemoteUpdatedAtMillis > 0L && remoteTs > pendingItem.baseRemoteUpdatedAtMillis) {
+                            val currentAuthUid = try { Firebase.auth.currentUser?.uid.orEmpty() } catch (_: Exception) { "" }
+                            val remoteModifiedByUid = child.child("lastModifiedByUid").getValue(String::class.java).orEmpty()
+                            val isOwnEcho = pendingItem?.status == SyncQueueStatus.SYNCING ||
+                                (currentAuthUid.isNotBlank() && remoteModifiedByUid == currentAuthUid)
+                            val isOperationalApproval = pendingItem != null && (
+                                pendingItem.actionTitle.startsWith("Verify", ignoreCase = true) ||
+                                    pendingItem.actionTitle.startsWith("Clear", ignoreCase = true) ||
+                                    pendingItem.actionTitle.startsWith("Approve", ignoreCase = true) ||
+                                    pendingItem.actionTitle.startsWith("Acknowledge", ignoreCase = true) ||
+                                    collection in setOf("expenses", "payments")
+                                )
+                            if (pendingItem != null &&
+                                !isOwnEcho &&
+                                !isOperationalApproval &&
+                                remoteTs > 0L &&
+                                pendingItem.baseRemoteUpdatedAtMillis > 0L &&
+                                remoteTs > pendingItem.baseRemoteUpdatedAtMillis
+                            ) {
                                 offlineSyncManager.recordConflict(
                                     SyncConflictRecord(
                                         id = nextRecordId("conflict", "${collection}_$itemId"),
@@ -6067,8 +6398,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _inventory.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
-                            _inventory.value = list
-                            storage.saveInventory(list)
+                            val normalized = normalizeInventoryList(list)
+                            _inventory.value = normalized
+                            storage.saveInventory(normalized)
                         },
                         allowEmptyOverwriteAfterLoad = false,
                         markConnectedOnSuccess = true
@@ -6081,8 +6413,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _bottleSizes.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
-                            _bottleSizes.value = list
-                            storage.saveBottleSizes(list)
+                            val normalized = normalizeBottleSizesList(list)
+                            _bottleSizes.value = normalized
+                            storage.saveBottleSizes(normalized)
                         },
                         allowEmptyOverwriteAfterLoad = false,
                         markConnectedOnSuccess = true
@@ -6375,6 +6708,24 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         }
                     }
                 }
+
+                // Real-time password verifier sync across all logged-in devices
+                val credRef = rtdbCollectionRef(db, "staffCredentials")
+                registerRtdbListener(
+                    credRef,
+                    object : ValueEventListener {
+                        override fun onDataChange(snapshot: DataSnapshot) {
+                            if (!snapshot.exists()) return
+                            snapshot.children.forEach { child ->
+                                applyCredentialVerifierSnapshot(child)
+                            }
+                        }
+
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.w("WaterPlantRepo", "staffCredentials listener notice: ${error.message}")
+                        }
+                    }
+                )
 
                 val parsePlantBranch: (DataSnapshot) -> PlantBranch? = { snap ->
                     val pid = snap.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() } ?: snap.key.orEmpty()
@@ -6709,6 +7060,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     _userAccounts.value.forEach {
                         if (it.id.isNotBlank()) {
                             syncStaffAccountDocuments(it)
+                            if (it.passwordUpdatedAtMillis > 0L) {
+                                syncPasswordVerifierToCloud(it)
+                            }
                         }
                     }
                     _deliveries.value.forEach { if (it.id.isNotBlank()) syncDocument("deliveries", it.id, it) }
@@ -6804,6 +7158,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             active = true
         )
         _currentUser.value = profile
+        refreshSeenRecordsForCurrentUser()
         _cloudUserEmail.value = cleanEmail
         storage.saveCurrentProfile(profile)
         storage.saveLoginState(true)
@@ -6900,6 +7255,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 permissions = PermissionDefaults.fullAdminPermissions()
             )
             _currentUser.value = updated
+            refreshSeenRecordsForCurrentUser()
             storage.saveCurrentProfile(updated)
         }
         startFirestoreSync()
@@ -7708,7 +8064,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             "CASH_CLOSING" -> {
                 sb.appendLine("Closing ID,Date,Opening Cash,Customer Cash Collected,Cash Expenses,Expected Cash,Actual Cash,Difference,Closed By,Status")
                 _cashClosings.value.forEach { cc ->
-                    sb.appendLine(listOf(cc.id, cc.date, cc.openingCash, cc.customerCashCollected, cc.cashExpenses, cc.expectedClosingCash, cc.actualClosingCash, cc.difference, cc.closedBy, if (cc.isApprovedByOwner) "Approved by Owner" else "Pending Review").joinToString(",") { escape(it) })
+                    sb.appendLine(listOf(cc.id, cc.date, cc.openingCash, cc.customerCashCollected, cc.cashExpenses, cc.expectedClosingCash, cc.actualClosingCash, cc.difference, cc.closedBy, if (cc.isApprovedByOwner) "Approved by Admin" else "Pending Review").joinToString(",") { escape(it) })
                 }
             }
             else -> return null

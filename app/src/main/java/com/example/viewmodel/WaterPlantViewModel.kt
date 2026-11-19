@@ -58,6 +58,31 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     val availableAppUpdate = repository.availableAppUpdate
     val isCheckingAppUpdate = repository.isCheckingAppUpdate
     val appUpdateStatusMessage = repository.appUpdateStatusMessage
+    val seenRecordKeys = repository.seenRecordKeys
+
+    fun markRecordSeen(type: String, recordId: String) {
+        repository.markRecordSeen(type, recordId)
+    }
+
+    fun isRecordNewForCurrentUser(
+        type: String,
+        recordId: String,
+        createdByUid: String,
+        createdByName: String,
+        createdAt: Long,
+        seenKeys: Set<String> = seenRecordKeys.value,
+        user: UserProfile = currentUser.value
+    ): Boolean {
+        return repository.isRecordNewForCurrentUser(
+            type = type,
+            recordId = recordId,
+            createdByUid = createdByUid,
+            createdByName = createdByName,
+            createdAt = createdAt,
+            seenKeys = seenKeys,
+            user = user
+        )
+    }
 
     fun hasPermission(module: AppModule, action: PermissionAction): Boolean {
         return repository.hasPermission(module, action)

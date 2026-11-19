@@ -72,12 +72,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            val isDarkMode by viewModel.isDarkMode.collectAsState()
             val context = LocalContext.current
             val coroutineScope = rememberCoroutineScope()
             val credentialManager = remember { CredentialManager.create(context) }
 
-            MyApplicationTheme(darkTheme = isDarkMode) {
+            MyApplicationTheme(darkTheme = false) {
                 var isAuthenticated by remember { mutableStateOf(viewModel.isUserLoggedIn()) }
 
                 if (!isAuthenticated) {
@@ -116,7 +115,6 @@ fun MainAppScaffold(
     val isCloudConnected by viewModel.isCloudConnected.collectAsState()
     val cloudUserEmail by viewModel.cloudUserEmail.collectAsState()
     val feedbackMessage by viewModel.userFeedbackMessage.collectAsState()
-    val isDarkMode by viewModel.isDarkMode.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
@@ -245,8 +243,6 @@ fun MainAppScaffold(
                             scope = coroutineScope
                         )
                     },
-                    isDarkMode = isDarkMode,
-                    onToggleDarkMode = { viewModel.toggleDarkMode() },
                     onSwitchRole = { newRole -> viewModel.switchRole(newRole) },
                     onVerifyAdminPassword = { pwd -> viewModel.verifyAdminPassword(pwd) },
                     onVerifyRolePassword = { role, pwd -> viewModel.verifyRolePassword(role, pwd) },
@@ -301,7 +297,7 @@ fun MainAppScaffold(
         bottomBar = {
             if (!isSubScreen) {
                 NavigationBar(
-                    containerColor = if (isDarkMode) DarkSurface else Color.White,
+                    containerColor = Color.White,
                     tonalElevation = 6.dp
                 ) {
                     val navItems = listOf(
@@ -351,11 +347,11 @@ fun MainAppScaffold(
                                 }
                             },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = if (isDarkMode) WaterMint else WaterNavyPrimary,
-                                selectedTextColor = if (isDarkMode) WaterMint else WaterNavyPrimary,
-                                unselectedIconColor = if (isDarkMode) DarkTextSecondary else TextSecondaryDark,
-                                unselectedTextColor = if (isDarkMode) DarkTextSecondary else TextSecondaryDark,
-                                indicatorColor = if (isDarkMode) WaterBlueDeep else WaterAqua.copy(alpha = 0.18f)
+                                selectedIconColor = WaterNavyPrimary,
+                                selectedTextColor = WaterNavyPrimary,
+                                unselectedIconColor = TextSecondaryDark,
+                                unselectedTextColor = TextSecondaryDark,
+                                indicatorColor = WaterAqua.copy(alpha = 0.18f)
                             )
                         )
                     }

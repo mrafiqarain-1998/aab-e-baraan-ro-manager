@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.components.CompactFormTextField
 import com.example.ui.components.MobileFormDialog
+import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.StatusBadge
@@ -64,6 +66,7 @@ fun DeliveriesListScreen(
     val bottleSizes by viewModel.bottleSizes.collectAsState()
     val payments by viewModel.payments.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
     val isAdmin = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.DELETE) ||
         viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.MANAGE)
     val isViewOnly = !viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD) &&
@@ -137,8 +140,8 @@ fun DeliveriesListScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(WaterSkySurface),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // 1. TOP SINGLE-LINE FILTER TABS (Today, Yesterday, Last 7 Days, Last 30 Days, All Deliveries)
@@ -423,37 +426,66 @@ fun DeliveriesListScreen(
         } else {
             items(filteredDeliveries, key = { it.id }) { delivery ->
                 val cardPayments = PdfGenerator.findRelatedPaymentsForDelivery(delivery, payments)
+                val isNewDelivery = viewModel.isRecordNewForCurrentUser(
+                    type = "delivery",
+                    recordId = delivery.id,
+                    createdByUid = delivery.createdByUid,
+                    createdByName = delivery.createdBy,
+                    createdAt = delivery.createdAt,
+                    seenKeys = seenRecordKeys,
+                    user = currentUser
+                )
                 DeliveryCardItem(
                     delivery = delivery,
                     bottleSizes = bottleSizes,
                     relatedPayments = cardPayments,
                     isAdmin = isAdmin,
                     isViewOnly = isViewOnly,
-                    onClick = { selectedDeliveryId = delivery.id },
+                    isNew = isNewDelivery,
+                    onDismissNew = { viewModel.markRecordSeen("delivery", delivery.id) },
+                    onClick = {
+                        viewModel.markRecordSeen("delivery", delivery.id)
+                        selectedDeliveryId = delivery.id
+                    },
                     onSharePdf = {
-                        val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
-                            context = context,
-                            delivery = delivery,
-                            payments = cardPayments,
-                            bottleSizes = bottleSizes
-                        )
-                        previewPdfRequest = PdfPreviewRequest(
-                            file = pdfFile,
-                            title = "Delivery Slip #${delivery.deliveryNumber}",
-                            chooserTitle = "Share Delivery Slip #${delivery.deliveryNumber}",
-                            whatsAppCaption = "Delivery Voucher #${delivery.deliveryNumber} - ${delivery.customerName}"
-                        )
+                        viewModel.markRecordSeen("delivery", delivery.id)
+                        try {
+                            val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
+                                context = context,
+                                delivery = delivery,
+                                payments = cardPayments,
+                                bottleSizes = bottleSizes
+                            )
+                            previewPdfRequest = PdfPreviewRequest(
+                                file = pdfFile,
+                                title = "Delivery Slip #${delivery.deliveryNumber}",
+                                chooserTitle = "Share Delivery Slip #${delivery.deliveryNumber}",
+                                whatsAppCaption = "Delivery Voucher #${delivery.deliveryNumber} - ${delivery.customerName}"
+                            )
+                        } catch (t: Throwable) {
+                            Toast.makeText(context, "Unable to open PDF: ${t.message ?: "Error"}", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onMarkClear = {
+                        viewModel.markRecordSeen("delivery", delivery.id)
                         val unsettledIds = cardPayments.filter { !it.isAcknowledged }.map { it.id }
                         if (unsettledIds.isNotEmpty()) {
                             viewModel.acknowledgePayments(unsettledIds)
                         }
                     },
-                    onReceivePayment = { deliveryForDirectPayment = it },
-                    onEdit = { deliveryToEdit = it },
-                    onDelete = { deliveryToDelete = it },
-                    modifier = Modifier.fillMaxWidth(0.95f)
+                    onReceivePayment = {
+                        viewModel.markRecordSeen("delivery", delivery.id)
+                        deliveryForDirectPayment = it
+                    },
+                    onEdit = {
+                        viewModel.markRecordSeen("delivery", delivery.id)
+                        deliveryToEdit = it
+                    },
+                    onDelete = {
+                        viewModel.markRecordSeen("delivery", delivery.id)
+                        deliveryToDelete = it
+                    },
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
@@ -567,18 +599,22 @@ fun DeliveriesListScreen(
                                 containerColor = WaterSkyLight,
                                 contentColor = WaterNavyPrimary,
                                 onClick = {
-                                    val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
-                                        context = context,
-                                        delivery = del,
-                                        payments = relatedPayments,
-                                        bottleSizes = bottleSizes
-                                    )
-                                    previewPdfRequest = PdfPreviewRequest(
-                                        file = pdfFile,
-                                        title = "Delivery Slip #${del.deliveryNumber}",
-                                        chooserTitle = "Share Delivery PDF #${del.deliveryNumber}",
-                                        whatsAppCaption = "Delivery Voucher #${del.deliveryNumber} - ${del.customerName}"
-                                    )
+                                    try {
+                                        val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
+                                            context = context,
+                                            delivery = del,
+                                            payments = relatedPayments,
+                                            bottleSizes = bottleSizes
+                                        )
+                                        previewPdfRequest = PdfPreviewRequest(
+                                            file = pdfFile,
+                                            title = "Delivery Slip #${del.deliveryNumber}",
+                                            chooserTitle = "Share Delivery PDF #${del.deliveryNumber}",
+                                            whatsAppCaption = "Delivery Voucher #${del.deliveryNumber} - ${del.customerName}"
+                                        )
+                                    } catch (t: Throwable) {
+                                        Toast.makeText(context, "Unable to open PDF: ${t.message ?: "Error"}", Toast.LENGTH_SHORT).show()
+                                    }
                                 },
                                 modifier = Modifier
                                     .weight(1f)
@@ -1371,6 +1407,8 @@ private fun DeliveryCardItem(
     relatedPayments: List<Payment> = emptyList(),
     isAdmin: Boolean,
     isViewOnly: Boolean,
+    isNew: Boolean = false,
+    onDismissNew: () -> Unit = {},
     onClick: () -> Unit,
     onSharePdf: () -> Unit,
     onMarkClear: () -> Unit = {},
@@ -1398,7 +1436,7 @@ private fun DeliveryCardItem(
     }
 
     Card(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(9.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         border = if (isCredit) androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.45f)) else null,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -1409,9 +1447,10 @@ private fun DeliveryCardItem(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
+            // Row 1: Voucher # + NEW Badge (for other users) + Customer Name + Amount
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1422,24 +1461,31 @@ private fun DeliveryCardItem(
                     modifier = Modifier.weight(1f)
                 ) {
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
+                        shape = RoundedCornerShape(5.dp),
                         color = WaterSkyLight
                     ) {
                         Text(
                             text = delivery.deliveryNumber,
-                            fontSize = 9.sp,
+                            fontSize = 8.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = WaterNavyPrimary,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
+                    if (isNew) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        NewItemBadge(
+                            onClick = onDismissNew,
+                            modifier = Modifier.testTag("new_delivery_badge_${delivery.id}")
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = delivery.customerName,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.5.sp,
+                        fontSize = 11.sp,
                         color = WaterNavyPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1452,185 +1498,178 @@ private fun DeliveryCardItem(
                 Text(
                     text = "Rs. ${delivery.totalAmount.toInt()}",
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 12.sp,
+                    fontSize = 11.5.sp,
                     color = WaterNavyPrimary,
                     maxLines = 1,
                     softWrap = false
                 )
             }
 
+            // Row 2: Items + Empties + Area/Date | Status + Due
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "$itemsCompact  •  Ret: ${delivery.totalEmptyCollected}",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = WaterAqua,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "${delivery.customerArea} • ${delivery.date}",
-                        fontSize = 9.5.sp,
-                        color = TextSecondaryDark,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Text(
+                    text = "$itemsCompact • Ret:${delivery.totalEmptyCollected} • ${delivery.date}",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = TextSecondaryDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 6.dp)
+                )
 
-                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    val (statusLabel, statusBg, statusFg) = when {
-                        delivery.totalAmount <= 0.0 -> Triple("N/A", Color(0xFFF1F5F9), TextMuted)
-                        remainingDue <= 0.0 -> Triple("Paid", SuccessGreenLight, SuccessGreen)
-                        isFullCredit -> Triple("Credit", ErrorRedLight, ErrorRed)
-                        else -> Triple("Partial Credit", WarningOrangeLight, WarningOrange)
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        if (hasUnsettledPayment) {
-                            Surface(
-                                shape = RoundedCornerShape(5.dp),
-                                color = WarningOrangeLight,
-                                modifier = Modifier.testTag("badge_delivery_unsettle_${delivery.id}")
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.HourglassTop,
-                                        contentDescription = "Unsettle",
-                                        tint = WarningOrange,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(
-                                        text = "Unsettle",
-                                        fontSize = 8.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = WarningOrange,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-                        } else if (allPaymentsCleared) {
-                            Surface(
-                                shape = RoundedCornerShape(5.dp),
-                                color = SuccessGreenLight,
-                                modifier = Modifier.testTag("badge_delivery_clear_${delivery.id}")
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = "Clear",
-                                        tint = SuccessGreen,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(
-                                        text = "Clear",
-                                        fontSize = 8.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SuccessGreen,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-                        }
-                        StatusBadge(
-                            text = statusLabel,
-                            backgroundColor = statusBg,
-                            textColor = statusFg
-                        )
-                    }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     if (isCredit) {
                         Text(
-                            text = "Due: Rs. ${remainingDue.toInt()}",
-                            fontSize = 9.5.sp,
+                            text = "Due ${remainingDue.toInt()}",
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
                             color = ErrorRed,
                             maxLines = 1,
                             softWrap = false
                         )
                     }
+                    val (statusLabel, statusBg, statusFg) = when {
+                        delivery.totalAmount <= 0.0 -> Triple("N/A", Color(0xFFF1F5F9), TextMuted)
+                        remainingDue <= 0.0 -> Triple("Paid", SuccessGreenLight, SuccessGreen)
+                        isFullCredit -> Triple("Credit", ErrorRedLight, ErrorRed)
+                        else -> Triple("Partial", WarningOrangeLight, WarningOrange)
+                    }
+                    StatusBadge(
+                        text = statusLabel,
+                        backgroundColor = statusBg,
+                        textColor = statusFg
+                    )
                 }
             }
 
-            // Aligned Compact Iconic Actions Row
-            if (!isViewOnly) {
-                HorizontalDivider(color = BorderLight.copy(alpha = 0.6f), thickness = 0.5.dp)
+            // Row 3: Compact Inline Badges & Actions (Unsettle/Clear + PDF + Pay + Edit/Delete)
+            if (!isViewOnly || hasUnsettledPayment || allPaymentsCleared) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CardSmallIconButton(
-                        icon = Icons.Default.PictureAsPdf,
-                        label = "PDF",
-                        containerColor = WaterSkyLight,
-                        contentColor = WaterNavyPrimary,
-                        onClick = onSharePdf,
-                        modifier = Modifier.testTag("card_pdf_btn_${delivery.id}")
-                    )
-
-                    if (isCredit) {
+                    if (!isViewOnly) {
                         CardSmallIconButton(
-                            icon = Icons.Default.Payments,
-                            label = "Pay Now",
-                            containerColor = SuccessGreenLight,
-                            contentColor = SuccessGreen,
-                            onClick = { onReceivePayment(delivery) },
-                            modifier = Modifier.testTag("pay_delivery_btn_${delivery.id}")
+                            icon = Icons.Default.PictureAsPdf,
+                            label = "PDF",
+                            containerColor = WaterSkyLight,
+                            contentColor = WaterNavyPrimary,
+                            onClick = onSharePdf,
+                            modifier = Modifier.testTag("card_pdf_btn_${delivery.id}")
                         )
+
+                        if (isCredit) {
+                            CardSmallIconButton(
+                                icon = Icons.Default.Payments,
+                                label = "Pay",
+                                containerColor = SuccessGreenLight,
+                                contentColor = SuccessGreen,
+                                onClick = { onReceivePayment(delivery) },
+                                modifier = Modifier.testTag("pay_delivery_btn_${delivery.id}")
+                            )
+                        }
+
+                        if (isAdmin && hasUnsettledPayment) {
+                            CardSmallIconButton(
+                                icon = Icons.Default.DoneAll,
+                                label = "Clear",
+                                containerColor = SuccessGreen,
+                                contentColor = Color.White,
+                                onClick = onMarkClear,
+                                modifier = Modifier.testTag("clear_delivery_payment_btn_${delivery.id}")
+                            )
+                        }
                     }
 
-                    if (isAdmin && hasUnsettledPayment) {
-                        CardSmallIconButton(
-                            icon = Icons.Default.DoneAll,
-                            label = "Clear",
-                            containerColor = SuccessGreen,
-                            contentColor = Color.White,
-                            onClick = onMarkClear,
-                            modifier = Modifier.testTag("clear_delivery_payment_btn_${delivery.id}")
-                        )
+                    if (hasUnsettledPayment) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = WarningOrangeLight,
+                            modifier = Modifier.testTag("badge_delivery_unsettle_${delivery.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.HourglassTop,
+                                    contentDescription = "Unsettle",
+                                    tint = WarningOrange,
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Unsettle",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WarningOrange,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    } else if (allPaymentsCleared) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = SuccessGreenLight,
+                            modifier = Modifier.testTag("badge_delivery_clear_${delivery.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Clear",
+                                    tint = SuccessGreen,
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Clear",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SuccessGreen,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    if (isAdmin) {
+                    if (isAdmin && !isViewOnly) {
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(5.dp),
                             color = WaterSkyLight,
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(24.dp)
                                 .clickable { onEdit(delivery) }
                                 .testTag("card_edit_delivery_${delivery.id}")
                         ) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Delivery", tint = WaterNavyPrimary, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Edit, contentDescription = "Edit Delivery", tint = WaterNavyPrimary, modifier = Modifier.size(13.dp))
                             }
                         }
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(5.dp),
                             color = ErrorRedLight,
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(24.dp)
                                 .clickable { onDelete(delivery) }
                                 .testTag("card_delete_delivery_${delivery.id}")
                         ) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete Delivery", tint = ErrorRed, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Delete, contentDescription = "Delete Delivery", tint = ErrorRed, modifier = Modifier.size(13.dp))
                             }
                         }
                     }

@@ -28,6 +28,7 @@ import com.example.model.*
 import com.example.ui.components.CompactDropdownField
 import com.example.ui.components.CompactFormTextField
 import com.example.ui.components.MobileFormDialog
+import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.theme.*
@@ -75,6 +76,7 @@ fun ExpensesScreen(
 ) {
     val context = LocalContext.current
     val currentUser by viewModel.currentUser.collectAsState()
+    val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
     val expenses by viewModel.expenses.collectAsState()
     val categories by viewModel.expenseCategories.collectAsState()
 
@@ -166,6 +168,7 @@ fun ExpensesScreen(
     val isAdmin = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE) ||
         viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)
     val isViewOnly = !viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.ADD)
+    val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
 
     fun shareExpensePdf(exp: Expense) {
         try {
@@ -238,21 +241,23 @@ fun ExpensesScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            OutlinedButton(
-                                onClick = { showNewCategoryDialog = true },
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.height(32.dp)
-                            ) {
-                                Icon(Icons.Default.Category, contentDescription = "Manage Categories", modifier = Modifier.size(13.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = "Categories",
-                                    fontSize = 9.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
+                            if (canAddNewItems) {
+                                OutlinedButton(
+                                    onClick = { showNewCategoryDialog = true },
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Category, contentDescription = "Manage Categories", modifier = Modifier.size(13.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = "Categories",
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
                             }
 
                             Button(
@@ -777,11 +782,11 @@ fun ExpensesScreen(
             }
         }
 
-        // Expense Items List (List-wise view)
+        // Expense Items List (Compact high-density list-wise view)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             if (filteredExpenses.isEmpty()) {
                 item {
@@ -814,14 +819,40 @@ fun ExpensesScreen(
                 }
             } else {
                 items(filteredExpenses, key = { it.id }) { exp ->
+                    val isNewExpense = viewModel.isRecordNewForCurrentUser(
+                        type = "expense",
+                        recordId = exp.id,
+                        createdByUid = exp.createdByUid,
+                        createdByName = exp.enteredBy,
+                        createdAt = exp.createdAt,
+                        seenKeys = seenRecordKeys,
+                        user = currentUser
+                    )
                     ExpenseItemCard(
                         expense = exp,
                         isAdmin = isAdmin,
-                        onOpenDetail = { selectedExpenseForDetail = exp },
-                        onSharePdf = { shareExpensePdf(exp) },
-                        onAcknowledge = { viewModel.acknowledgeExpense(exp.id) },
-                        onEdit = { expenseToEdit = exp },
-                        onDelete = { expenseToDelete = exp }
+                        isNew = isNewExpense,
+                        onDismissNew = { viewModel.markRecordSeen("expense", exp.id) },
+                        onOpenDetail = {
+                            viewModel.markRecordSeen("expense", exp.id)
+                            selectedExpenseForDetail = exp
+                        },
+                        onSharePdf = {
+                            viewModel.markRecordSeen("expense", exp.id)
+                            shareExpensePdf(exp)
+                        },
+                        onAcknowledge = {
+                            viewModel.markRecordSeen("expense", exp.id)
+                            viewModel.acknowledgeExpense(exp.id)
+                        },
+                        onEdit = {
+                            viewModel.markRecordSeen("expense", exp.id)
+                            expenseToEdit = exp
+                        },
+                        onDelete = {
+                            viewModel.markRecordSeen("expense", exp.id)
+                            expenseToDelete = exp
+                        }
                     )
                 }
             }
@@ -1001,6 +1032,8 @@ fun ExpenseDateSectionHeader(
 fun ExpenseItemCard(
     expense: Expense,
     isAdmin: Boolean,
+    isNew: Boolean = false,
+    onDismissNew: () -> Unit = {},
     onOpenDetail: () -> Unit = {},
     onSharePdf: () -> Unit = {},
     onAcknowledge: () -> Unit,
@@ -1011,16 +1044,19 @@ fun ExpenseItemCard(
     val modeLabel = if (expense.paymentMethod.isCash) "Cash" else "Online"
 
     Card(
-        shape = RoundedCornerShape(11.dp),
+        shape = RoundedCornerShape(9.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onOpenDetail() }
             .testTag("expense_card_${expense.id}")
     ) {
-        Column(modifier = Modifier.padding(11.dp)) {
-            // Row 1: Type Badge + Category + Source + Amount
+        Column(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            // Row 1: NEW Badge (for other users) + Type + Category + Source + Amount
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1029,58 +1065,65 @@ fun ExpenseItemCard(
                 Row(
                     modifier = Modifier.weight(1f).padding(end = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (isNew) {
+                        NewItemBadge(
+                            onClick = onDismissNew,
+                            modifier = Modifier.testTag("new_expense_badge_${expense.id}")
+                        )
+                    }
+
                     val isCapex = expense.expenseType == ExpenseType.CAPEX
                     Surface(
-                        shape = RoundedCornerShape(5.dp),
+                        shape = RoundedCornerShape(4.dp),
                         color = if (isCapex) Color(0xFFF3E5F5) else WaterNavyPrimary.copy(alpha = 0.1f)
                     ) {
                         Text(
                             text = if (isCapex) "CAPEX" else "OPEX",
                             color = if (isCapex) Color(0xFF6A1B9A) else WaterNavyPrimary,
-                            fontSize = 9.sp,
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
 
                     Surface(
-                        shape = RoundedCornerShape(5.dp),
+                        shape = RoundedCornerShape(4.dp),
                         color = ErrorRedLight
                     ) {
                         Text(
                             text = expense.categoryName,
                             color = ErrorRed,
-                            fontSize = 9.sp,
+                            fontSize = 8.5.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
 
                     Surface(
-                        shape = RoundedCornerShape(5.dp),
+                        shape = RoundedCornerShape(4.dp),
                         color = WaterSkyLight
                     ) {
                         Text(
-                            text = sourceLabel,
+                            text = "$sourceLabel/$modeLabel",
                             color = WaterBlueDeep,
-                            fontSize = 8.5.sp,
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
                 }
 
                 Text(
                     text = "Rs. ${expense.amount.toInt()}",
-                    fontSize = 13.sp,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = ErrorRed,
                     maxLines = 1,
@@ -1088,85 +1131,54 @@ fun ExpenseItemCard(
                 )
             }
 
-            Spacer(modifier = Modifier.height(5.dp))
-
-            // Description
-            Text(
-                text = expense.description,
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = WaterNavyDark,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(3.dp))
-
-            // Vendor, Mode, Voucher #, Date
+            // Row 2: Description + Date
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Vendor: ${expense.payee.ifEmpty { "General" }} • $modeLabel",
-                    fontSize = 9.5.sp,
-                    color = TextSecondaryDark,
+                    text = expense.description.ifBlank { expense.categoryName },
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = WaterNavyDark,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(end = 6.dp)
                 )
                 Text(
                     text = "${expense.voucherNumber} • ${expense.date}",
-                    fontSize = 9.5.sp,
+                    fontSize = 8.5.sp,
                     color = TextMuted,
                     maxLines = 1,
                     softWrap = false
                 )
             }
 
-            if (expense.notes.isNotBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "Note: ${expense.notes}",
-                    fontSize = 9.sp,
-                    color = TextMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-            HorizontalDivider(color = BorderLight, thickness = 0.5.dp)
-            Spacer(modifier = Modifier.height(5.dp))
-
-            // Footer Row: Entered by + PDF Share + Admin Edit/Delete + Status
+            // Row 3: Compact Footer — Vendor / Entered By + Action Icons + Status
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
-                    Text(
-                        text = "By: ${expense.enteredBy}",
-                        fontSize = 9.5.sp,
-                        color = TextSecondaryDark,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Text(
+                    text = "${expense.payee.ifEmpty { "General" }} • By: ${expense.enteredBy}",
+                    fontSize = 8.5.sp,
+                    color = TextSecondaryDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 6.dp)
+                )
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Share PDF Quick Icon
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
+                        shape = RoundedCornerShape(5.dp),
                         color = WaterSkyLight,
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(24.dp)
                             .clickable(onClick = onSharePdf)
                             .testTag("share_expense_pdf_${expense.id}")
                     ) {
@@ -1175,7 +1187,7 @@ fun ExpenseItemCard(
                                 Icons.Default.PictureAsPdf,
                                 contentDescription = "Share Expense PDF",
                                 tint = WaterNavyPrimary,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(13.dp)
                             )
                         }
                     }
@@ -1183,49 +1195,49 @@ fun ExpenseItemCard(
                     if (isAdmin) {
                         IconButton(
                             onClick = onEdit,
-                            modifier = Modifier.size(28.dp).testTag("edit_expense_${expense.id}")
+                            modifier = Modifier.size(24.dp).testTag("edit_expense_${expense.id}")
                         ) {
                             Icon(
                                 Icons.Default.Edit,
                                 contentDescription = "Edit Expense",
                                 tint = WaterNavyPrimary,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                         }
 
                         IconButton(
                             onClick = onDelete,
-                            modifier = Modifier.size(28.dp).testTag("delete_expense_${expense.id}")
+                            modifier = Modifier.size(24.dp).testTag("delete_expense_${expense.id}")
                         ) {
                             Icon(
                                 Icons.Default.DeleteOutline,
                                 contentDescription = "Delete Expense",
                                 tint = ErrorRed,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                         }
                     }
 
                     if (expense.isAcknowledged) {
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(5.dp),
                             color = SuccessGreenLight,
-                            modifier = Modifier.height(26.dp)
+                            modifier = Modifier.height(22.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 6.dp),
+                                modifier = Modifier.padding(horizontal = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     Icons.Default.CheckCircle,
                                     contentDescription = null,
                                     tint = SuccessGreen,
-                                    modifier = Modifier.size(12.dp)
+                                    modifier = Modifier.size(11.dp)
                                 )
-                                Spacer(modifier = Modifier.width(3.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
                                 Text(
                                     text = "Verified",
-                                    fontSize = 9.sp,
+                                    fontSize = 8.5.sp,
                                     maxLines = 1,
                                     softWrap = false,
                                     fontWeight = FontWeight.Bold,
@@ -1237,15 +1249,15 @@ fun ExpenseItemCard(
                         Button(
                             onClick = onAcknowledge,
                             colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
-                            shape = RoundedCornerShape(6.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.height(26.dp)
+                            shape = RoundedCornerShape(5.dp),
+                            contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
+                            modifier = Modifier.height(22.dp)
                         ) {
-                            Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(12.dp))
-                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(11.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
                             Text(
                                 text = "Verify",
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 maxLines = 1,
                                 softWrap = false,
                                 fontWeight = FontWeight.Bold
@@ -1253,9 +1265,9 @@ fun ExpenseItemCard(
                         }
                     } else {
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(5.dp),
                             color = WarningOrangeLight,
-                            modifier = Modifier.height(26.dp)
+                            modifier = Modifier.height(22.dp)
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 6.dp),

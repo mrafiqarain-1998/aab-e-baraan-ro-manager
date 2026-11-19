@@ -81,7 +81,8 @@ object RtdbSyncHelper {
         memberUids: List<String>,
         memberEmails: List<String>,
         plantId: String,
-        useServerTimestamp: Boolean = true
+        useServerTimestamp: Boolean = true,
+        lastModifiedByUid: String = ""
     ): MutableMap<String, Any?> {
         val json = FirestoreSyncHelper.toPlainJsonString(data)
         val rawMap = OfflineSyncManager.mapFromPayloadJson(json) ?: linkedMapOf()
@@ -94,6 +95,9 @@ object RtdbSyncHelper {
         sanitized["ownerId"] = ownerId
         sanitized["memberUids"] = memberUids.distinct()
         sanitized["memberEmails"] = memberEmails.map { it.trim().lowercase() }.filter { it.isNotBlank() }.distinct()
+        if (lastModifiedByUid.isNotBlank()) {
+            sanitized["lastModifiedByUid"] = lastModifiedByUid
+        }
         val now = System.currentTimeMillis()
         sanitized["updatedAtMillis"] = now
         if (useServerTimestamp) {

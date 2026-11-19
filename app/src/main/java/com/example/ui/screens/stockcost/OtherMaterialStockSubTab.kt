@@ -92,12 +92,15 @@ fun OtherMaterialStockSubTab(
                         .padding(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
+                    val canAddMaterialStock = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.ADD)
+                    val canEditMaterials = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.EDIT) || canAddMaterialStock
                     MaterialActionTile(
                         label = "Add Items",
                         icon = Icons.Default.AddBox,
                         containerColor = WaterSkyLight,
                         contentColor = WaterNavyPrimary,
-                        enabled = !isViewOnly,
+                        enabled = canAddNewItems,
                         onClick = { showAddItemsDialog = true },
                         modifier = Modifier
                             .weight(1f)
@@ -108,7 +111,7 @@ fun OtherMaterialStockSubTab(
                         icon = Icons.Default.Output,
                         containerColor = WaterNavyPrimary,
                         contentColor = Color.White,
-                        enabled = !isViewOnly && activeMaterials.isNotEmpty(),
+                        enabled = canEditMaterials && activeMaterials.isNotEmpty(),
                         onClick = { showIssueMaterialDialog = true },
                         modifier = Modifier
                             .weight(1f)
@@ -119,7 +122,7 @@ fun OtherMaterialStockSubTab(
                         icon = Icons.Default.AddShoppingCart,
                         containerColor = SuccessGreenLight,
                         contentColor = SuccessGreen,
-                        enabled = !isViewOnly && activeMaterials.isNotEmpty(),
+                        enabled = canAddMaterialStock && activeMaterials.isNotEmpty(),
                         onClick = { showRefillStockDialog = true },
                         modifier = Modifier
                             .weight(1f)
@@ -130,7 +133,7 @@ fun OtherMaterialStockSubTab(
                         icon = Icons.Default.BrokenImage,
                         containerColor = WarningOrangeLight,
                         contentColor = WarningOrange,
-                        enabled = !isViewOnly && activeMaterials.isNotEmpty(),
+                        enabled = canEditMaterials && activeMaterials.isNotEmpty(),
                         onClick = { showMarkDamageDialog = true },
                         modifier = Modifier
                             .weight(1f)

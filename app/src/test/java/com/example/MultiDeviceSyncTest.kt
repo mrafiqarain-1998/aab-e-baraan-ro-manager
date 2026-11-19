@@ -196,7 +196,9 @@ class MultiDeviceSyncTest {
         val freshRepo = WaterPlantRepository.getInstance(context)
         assertTrue(freshRepo.passwordResetRequests.value.any { it.id == reqId && it.isResolved })
 
-        val (outcome, profile) = freshRepo.authenticateWithOutcome("kashif_staff", "NewPass@2026")
+        val (outcome, profile) = runBlocking {
+            freshRepo.authenticateWithOutcome("kashif_staff", "NewPass@2026")
+        }
         assertEquals(LoginOutcome.SUCCESS, outcome)
         assertNotNull(profile)
         assertEquals(createdUid, profile!!.uid)

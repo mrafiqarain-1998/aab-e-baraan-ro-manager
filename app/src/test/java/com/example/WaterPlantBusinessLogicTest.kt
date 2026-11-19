@@ -1565,7 +1565,7 @@ class WaterPlantBusinessLogicTest {
         assertEquals(4, invAfterPacket.fullPackets)
         assertEquals(0, invAfterPacket.fullLooseBottles)
         val pktVariant = invAfterPacket.packVariants.first { it.variantId == makePackVariantId(bottleId, 12, PackContainerType.PACKET) }
-        assertEquals("300Ml Water Bottle (12 Bottle Packet)", pktVariant.displayName)
+        assertEquals("300ml Packet", pktVariant.displayName)
         assertEquals(4, pktVariant.packetCount)
 
         // 5. Convert remaining 12 In Use into 6-Bottle CARTON -> produces 2 cartons coexisting separately!
@@ -1587,7 +1587,7 @@ class WaterPlantBusinessLogicTest {
         assertEquals(6, invAfterBoth.fullPackets)
         assertEquals(2, invAfterBoth.packVariants.size)
         val cartonVariant = invAfterBoth.packVariants.first { it.variantId == makePackVariantId(bottleId, 6, PackContainerType.CARTON) }
-        assertEquals("300Ml Water Bottle (6 Bottle Carton)", cartonVariant.displayName)
+        assertEquals("300ml Carton", cartonVariant.displayName)
         assertEquals(2, cartonVariant.packetCount)
 
         // 6. Deliver 2 packets of "300Ml Water Bottle (12 Bottle Packet)" -> deducts 2 packets (24 bottles)
@@ -1618,7 +1618,7 @@ class WaterPlantBusinessLogicTest {
             deliveryDate = "2026-11-16"
         )
         val savedDel = repository.deliveries.value.first { it.deliveryNumber == delNum }
-        assertEquals("300Ml Water Bottle (12 Bottle Packet)", savedDel.items.first().bottleName)
+        assertEquals("300ml Packet", savedDel.items.first().bottleName)
 
         val invAfterDel = repository.inventory.value.first { it.bottleSizeId == bottleId }
         assertEquals(2, invAfterDel.packVariants.first { it.variantId == pktVariant.variantId }.packetCount)
@@ -1749,15 +1749,15 @@ class WaterPlantBusinessLogicTest {
         assertEquals("rashid.khan@gmail.com", persistedStaff?.googleEmail)
 
         // Unknown user on unsynced offline device reports CLOUD_SYNC_REQUIRED instead of false wrong-password
-        val unknownOutcome = run2Repo.authenticateWithOutcome("someone_else", "abc")
+        val unknownOutcome = runBlocking { run2Repo.authenticateWithOutcome("someone_else", "abc") }
         assertEquals(LoginOutcome.CLOUD_SYNC_REQUIRED, unknownOutcome.first)
 
         // Wrong password for existing user reports INVALID_CREDENTIALS
-        val wrongPwdOutcome = run2Repo.authenticateWithOutcome("rashidstaff", "wrong")
+        val wrongPwdOutcome = runBlocking { run2Repo.authenticateWithOutcome("rashidstaff", "wrong") }
         assertEquals(LoginOutcome.INVALID_CREDENTIALS, wrongPwdOutcome.first)
 
         // Correct credentials (even with '@' prefix or spaces) succeed with exact role
-        val okOutcome = run2Repo.authenticateWithOutcome("@RashidStaff", "pass9988")
+        val okOutcome = runBlocking { run2Repo.authenticateWithOutcome("@RashidStaff", "pass9988") }
         assertEquals(LoginOutcome.SUCCESS, okOutcome.first)
         assertEquals(UserRole.INCHARGE, run2Repo.currentUser.value.role)
         assertTrue(run2Repo.isUserLoggedIn())
@@ -1765,25 +1765,33 @@ class WaterPlantBusinessLogicTest {
         // Inactive user returns INACTIVE_ACCOUNT
         assertNotNull(run2Repo.authenticate("admin", "admin123"))
         assertTrue(run2Repo.toggleUserAccountActive(staffId).first)
-        val inactiveOutcome = run2Repo.authenticateWithOutcome("rashidstaff", "pass9988")
+        val inactiveOutcome = runBlocking { run2Repo.authenticateWithOutcome("rashidstaff", "pass9988") }
         assertEquals(LoginOutcome.INACTIVE_ACCOUNT, inactiveOutcome.first)
     }
 
     @Test
     fun testSingleBottlePackFormattingOmitsPacketLabel() {
         val fullName1 = formatPackVariantName("500ml Bottle", packSize = 1, containerType = PackContainerType.PACKET)
-        assertEquals("500ml Bottle (1 Bottle)", fullName1)
+        assertEquals("500ml Bottle", fullName1)
         assertFalse(fullName1.contains("Packet", ignoreCase = true))
 
         val short1 = formatPackVariantShortLabel("500ml Bottle", capacityLitres = 0.5, packSize = 1, containerType = PackContainerType.PACKET)
-        assertEquals("500ml (1B)", short1)
+        assertEquals("500ml", short1)
         assertFalse(short1.contains("Pkt", ignoreCase = true))
+        assertFalse(short1.contains("1B", ignoreCase = true))
+
+        val short6 = formatPackVariantShortLabel("6 Litre Bottle", capacityLitres = 6.0, packSize = 1, containerType = PackContainerType.PACKET)
+        assertEquals("6L", short6)
+        assertFalse(short6.contains("1 Bottle", ignoreCase = true))
 
         val fullName12 = formatPackVariantName("500ml Bottle", packSize = 12, containerType = PackContainerType.PACKET)
-        assertEquals("500ml Bottle (12 Bottle Packet)", fullName12)
+        assertEquals("500ml Packet", fullName12)
 
         val short12 = formatPackVariantShortLabel("500ml Bottle", capacityLitres = 0.5, packSize = 12, containerType = PackContainerType.PACKET)
-        assertEquals("500ml (12B Pkt)", short12)
+        assertEquals("500ml Packet", short12)
+
+        val short24 = formatPackVariantShortLabel("500ml Bottle", capacityLitres = 0.5, packSize = 24, containerType = PackContainerType.CARTON)
+        assertEquals("500ml Carton", short24)
     }
 
     @Test
@@ -1928,4 +1936,406 @@ class WaterPlantBusinessLogicTest {
         assertTrue(com.example.data.SampleData.initialBottleCostings.isEmpty())
         assertTrue(com.example.data.SampleData.initialMonthlyRecurringExpenses.isEmpty())
     }
+
+    @Test
+    fun testCrossDevicePasswordVerifierSyncRejectsDefaultAdminPassword() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        // Phone A: Admin logs in with default password and changes it to a new password
+        assertNotNull(repository.authenticate("admin", "admin123"))
+        val changed = repository.changeUserPassword("user_admin_01", "MyNewAdmin@789")
+        assertTrue("Admin password change must succeed", changed)
+        val adminOnPhoneA = repository.userAccounts.value.first { it.username == "admin" }
+        assertTrue(adminOnPhoneA.passwordHash.isNotBlank())
+        assertTrue(adminOnPhoneA.passwordSalt.isNotBlank())
+        assertTrue(adminOnPhoneA.passwordUpdatedAtMillis > 0L)
+
+        // Phone B: Fresh install (cleared local prefs/files) receives remote credential verifier from RTDB
+        context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
+        WaterPlantRepository.resetInstanceForTesting()
+        val phoneBRepo = WaterPlantRepository.getInstance(context)
+
+        val applied = phoneBRepo.applyRemoteCredentialVerifier(
+            username = "admin",
+            credVerifier = adminOnPhoneA.passwordHash,
+            credSalt = adminOnPhoneA.passwordSalt,
+            updatedAtMillis = adminOnPhoneA.passwordUpdatedAtMillis,
+            active = true
+        )
+        assertTrue("Remote credential verifier must apply on fresh device", applied)
+
+        // Old default password admin123 MUST be rejected on Phone B
+        val oldPassAttempt = runBlocking { phoneBRepo.authenticateWithOutcome("admin", "admin123") }
+        assertEquals(LoginOutcome.INVALID_CREDENTIALS, oldPassAttempt.first)
+
+        // New password synced from Phone A MUST succeed on Phone B
+        val newPassAttempt = runBlocking { phoneBRepo.authenticateWithOutcome("admin", "MyNewAdmin@789") }
+        assertEquals(LoginOutcome.SUCCESS, newPassAttempt.first)
+    }
+
+    @Test
+    fun testGranularAdminControlsForRatesStockAndNewItems() {
+        val custId = repository.addCustomer(
+            Customer(name = "Control Gate Customer", phone = "03005554433", active = true)
+        )
+        // Create staff user where Admin explicitly blocks CUSTOMER_RATES, BOTTLE_STOCK ADD, FACTORY_MATERIALS ADD, NEW_ITEMS ADD
+        val blockedPerms = PermissionDefaults.defaultPermissionsForRole(UserRole.INCHARGE).toMutableMap()
+        blockedPerms[AppModule.CUSTOMER_RATES.name] = emptyList()
+        blockedPerms[AppModule.BOTTLE_STOCK.name] = listOf(PermissionAction.VIEW.name)
+        blockedPerms[AppModule.FACTORY_MATERIALS.name] = listOf(PermissionAction.VIEW.name)
+        blockedPerms[AppModule.NEW_ITEMS.name] = emptyList()
+
+        val staffId = repository.createUserAccount(
+            UserAccount(
+                username = "limited_incharge",
+                password = "pass1234",
+                name = "Limited Incharge",
+                role = UserRole.INCHARGE,
+                active = true,
+                permissions = blockedPerms
+            )
+        )
+        assertTrue(staffId.isNotBlank())
+        assertNotNull(repository.authenticate("limited_incharge", "pass1234"))
+
+        // 1. Blocked from changing customer rates
+        val beforePrices = repository.customerRates.value.size
+        repository.setCustomerPrice(custId, "size_19l", 111.0, "19L", "2026-11-19")
+        assertEquals("Blocked staff must not change customer rates", beforePrices, repository.customerRates.value.size)
+
+        // 2. Blocked from adding bottle stock
+        val stockRes = repository.refillBottleStock("size_19l", 10, "2026-11-19", "Test", 300.0, "")
+        assertFalse("Blocked staff must not add bottle stock", stockRes.first)
+
+        // 3. Blocked from adding new bottle size / item
+        val newSizeId = repository.addBottleSize(BottleSize(name = "Blocked 8L", capacityLitres = 8.0))
+        assertTrue("Blocked staff must not add new bottle sizes", newSizeId.isBlank())
+
+        // Admin grants all 3 controls back -> operations succeed
+        assertNotNull(repository.authenticate("admin", "admin123"))
+        val staffAccount = repository.userAccounts.value.first { it.id == staffId }
+        val allowedPerms = staffAccount.permissions.toMutableMap()
+        allowedPerms[AppModule.CUSTOMER_RATES.name] = listOf(
+            PermissionAction.VIEW.name,
+            PermissionAction.ADD.name,
+            PermissionAction.EDIT.name,
+            PermissionAction.DELETE.name
+        )
+        allowedPerms[AppModule.BOTTLE_STOCK.name] = listOf(
+            PermissionAction.VIEW.name,
+            PermissionAction.ADD.name,
+            PermissionAction.EDIT.name
+        )
+        allowedPerms[AppModule.NEW_ITEMS.name] = listOf(
+            PermissionAction.VIEW.name,
+            PermissionAction.ADD.name,
+            PermissionAction.EDIT.name
+        )
+        repository.updateUserAccount(staffAccount.copy(permissions = allowedPerms))
+
+        assertNotNull(repository.authenticate("limited_incharge", "pass1234"))
+        repository.setCustomerPrice(custId, "size_19l", 115.0, "19L", "2026-11-19")
+        assertTrue(repository.customerRates.value.any { it.customerId == custId && it.bottleSizeId == "size_19l" && it.customPrice == 115.0 })
+
+        val allowedStock = repository.refillBottleStock("size_19l", 5, "2026-11-19", "Test", 300.0, "")
+        assertTrue(allowedStock.first)
+
+        val allowedNewSize = repository.addBottleSize(BottleSize(name = "Allowed 8L", capacityLitres = 8.0))
+        assertTrue(allowedNewSize.isNotBlank())
+    }
+
+    @Test
+    fun testCleanBottleTabsAndTwelveLitreNormalization() {
+        val size12 = repository.bottleSizes.value.first { it.id == "size_12l" }
+        assertEquals(12.0, size12.capacityLitres, 0.001)
+        assertFalse("12L bottle name must not contain 12.5", size12.name.contains("12.5"))
+        assertEquals("12 Litre Bottle", normalizeLegacyBottleName("12.5 Litre Bottle"))
+
+        val tabs = com.example.ui.screens.buildDeliverySelectableOptions(
+            bottleSizes = repository.bottleSizes.value,
+            inventory = repository.inventory.value
+        ).map { it.shortName }
+
+        assertTrue("Expected 19L tab in $tabs", tabs.contains("19L"))
+        assertTrue("Expected 12L tab in $tabs", tabs.contains("12L"))
+        assertTrue("Expected 6L tab in $tabs", tabs.contains("6L"))
+        assertTrue("Expected 500ml Carton tab in $tabs", tabs.contains("500ml Carton"))
+        assertTrue("Expected 500ml Packet tab in $tabs", tabs.contains("500ml Packet"))
+        assertTrue("Expected 1.5L Carton tab in $tabs", tabs.contains("1.5L Carton"))
+        assertTrue("Expected 1.5L Packet tab in $tabs", tabs.contains("1.5L Packet"))
+        assertFalse("Must not contain 12.5L", tabs.any { it.contains("12.5") })
+        assertFalse("Must not append 1 Bottle to 6L", tabs.any { it.contains("1 Bottle", ignoreCase = true) || it.contains("(1B)", ignoreCase = true) })
+    }
+
+    @Test
+    fun testWorkflowConflictsAutoClearedAndUnapprovedStatementTracked() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val storage = com.example.data.PlantDataStorage(context)
+        val syncManager = com.example.data.OfflineSyncManager(context, storage)
+
+        // Simulate a legacy false-positive conflict when staff added an expense/payment and admin verified/cleared it
+        syncManager.recordConflict(
+            SyncConflictRecord(
+                id = "c_exp_1",
+                collection = "expenses",
+                docId = "exp_1",
+                recordLabel = "Expense EXP-1",
+                localSummary = "Unverified",
+                remoteSummary = "Verified by Admin",
+                resolved = false
+            )
+        )
+        syncManager.recordConflict(
+            SyncConflictRecord(
+                id = "c_pay_1",
+                collection = "payments",
+                docId = "pay_1",
+                recordLabel = "Payment RCP-1",
+                localSummary = "Unsettled",
+                remoteSummary = "Cleared by Admin",
+                resolved = false
+            )
+        )
+        assertTrue(syncManager.conflicts.value.any { !it.resolved })
+
+        // Operational workflow Verify/Clear/Approve conflicts must be automatically cleared
+        syncManager.clearFalsePositiveWorkflowConflicts()
+        assertTrue(
+            "Workflow verify/clear conflicts must be auto-resolved",
+            syncManager.conflicts.value.none { !it.resolved && (it.docId == "exp_1" || it.docId == "pay_1") }
+        )
+
+        // Verify unapproved staff payment & expense are preserved for Daily/Weekly/Monthly statement reports
+        val custId = repository.addCustomer(
+            Customer(name = "Statement Customer", phone = "03001234999", currentBalance = 1500.0, active = true)
+        )
+        repository.switchUserRole(UserRole.INCHARGE)
+        val unapprovedPayment = repository.recordPayment(
+            customerId = custId,
+            amount = 500.0,
+            method = PaymentMethod.CASH,
+            notes = "Pending admin clear"
+        )
+        assertFalse("Staff payment starts unapproved", unapprovedPayment.isAcknowledged)
+
+        val unapprovedExpVoucher = repository.addExpense(
+            categoryId = repository.expenseCategories.value.first().id,
+            categoryName = repository.expenseCategories.value.first().name,
+            description = "Pending admin verify fuel",
+            amount = 800.0,
+            method = PaymentMethod.CASH,
+            payee = "Pump",
+            notes = "",
+            type = ExpenseType.OPEX,
+            expenseDate = "2026-11-19",
+            paymentSource = PaymentSource.PAY_FROM_SALE
+        )
+        val unapprovedExp = repository.expenses.value.first { it.voucherNumber == unapprovedExpVoucher }
+        assertFalse("Staff expense starts unapproved", unapprovedExp.isAcknowledged && unapprovedExp.isApprovedByOwner)
+
+        // Admin approves both — no sync conflict created
+        repository.switchUserRole(UserRole.ADMIN)
+        repository.acknowledgePayments(listOf(unapprovedPayment.id))
+        repository.acknowledgeExpense(unapprovedExp.id)
+        assertTrue(repository.payments.value.first { it.id == unapprovedPayment.id }.isAcknowledged)
+        assertTrue(repository.expenses.value.first { it.id == unapprovedExp.id }.isAcknowledged)
+    }
+
+    @Test
+    fun testNewRecordBadgeShowsOnlyForOtherUsersAndDismissesOnSeen() {
+        // 1. Admin creates two staff accounts and adds Customer, Delivery, Payment, and Expense
+        repository.switchUserRole(UserRole.ADMIN)
+        repository.createUserAccount(
+            UserAccount(
+                id = "staff_badge_1",
+                username = "staff_one",
+                password = "pass123",
+                name = "Staff One",
+                phone = "0300-1111111",
+                role = UserRole.INCHARGE,
+                active = true
+            )
+        )
+        repository.createUserAccount(
+            UserAccount(
+                id = "staff_badge_2",
+                username = "staff_two",
+                password = "pass456",
+                name = "Staff Two",
+                phone = "0300-2222222",
+                role = UserRole.VIEW_ONLY,
+                active = true
+            )
+        )
+        val adminUser = repository.currentUser.value
+
+        val custId = repository.addCustomer(
+            Customer(
+                name = "Fresh Badge Customer",
+                phone = "03001112233",
+                whatsapp = "03001112233",
+                area = "Gulberg",
+                address = "House 10, Block B",
+                active = true
+            )
+        )
+        val createdCustomer = repository.customers.value.first { it.id == custId }
+
+        val deliveryItems = listOf(
+            DeliveryItem(
+                bottleSizeId = "size_19l",
+                bottleName = "19 L",
+                quantity = 2,
+                emptyCollected = 2,
+                unitPrice = 200.0,
+                lineTotal = 400.0
+            )
+        )
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = deliveryItems,
+            assignedStaffName = "Rider Badge",
+            notes = "Badge delivery test",
+            immediatePaymentAmount = 0.0,
+            paymentMethod = PaymentMethod.CASH
+        )
+        val createdDelivery = repository.deliveries.value.first { it.deliveryNumber == delNum }
+
+        val createdPayment = repository.recordPayment(
+            customerId = custId,
+            amount = 200.0,
+            method = PaymentMethod.CASH,
+            notes = "Badge payment test"
+        )
+
+        val expVoucher = repository.addExpense(
+            categoryId = repository.expenseCategories.value.first().id,
+            categoryName = repository.expenseCategories.value.first().name,
+            description = "Badge expense test",
+            amount = 350.0,
+            method = PaymentMethod.CASH,
+            payee = "Vendor",
+            notes = "",
+            type = ExpenseType.OPEX,
+            expenseDate = "2026-11-19",
+            paymentSource = PaymentSource.PAY_FROM_SALE
+        )
+        val createdExpense = repository.expenses.value.first { it.voucherNumber == expVoucher }
+
+        // Creator (Admin) must NOT see NEW badge on any of their own created records
+        assertFalse(
+            "Admin must not see NEW badge on own customer",
+            repository.isRecordNewForCurrentUser("customer", createdCustomer.id, createdCustomer.createdByUid, createdCustomer.createdBy, createdCustomer.createdAt, repository.seenRecordKeys.value, adminUser)
+        )
+        assertFalse(
+            "Admin must not see NEW badge on own delivery",
+            repository.isRecordNewForCurrentUser("delivery", createdDelivery.id, createdDelivery.createdByUid, createdDelivery.createdBy, createdDelivery.createdAt, repository.seenRecordKeys.value, adminUser)
+        )
+        assertFalse(
+            "Admin must not see NEW badge on own payment",
+            repository.isRecordNewForCurrentUser("payment", createdPayment.id, createdPayment.createdByUid, createdPayment.receivedBy, createdPayment.createdAt, repository.seenRecordKeys.value, adminUser)
+        )
+        assertFalse(
+            "Admin must not see NEW badge on own expense",
+            repository.isRecordNewForCurrentUser("expense", createdExpense.id, createdExpense.createdByUid, createdExpense.enteredBy, createdExpense.createdAt, repository.seenRecordKeys.value, adminUser)
+        )
+
+        // 2. Log in as Staff One — all 4 records must show NEW badge
+        assertTrue(repository.switchUserByCredentials("staff_one", "pass123").first)
+        val staffOne = repository.currentUser.value
+        assertTrue(
+            "Other user (Staff One) must see NEW badge on new customer",
+            repository.isRecordNewForCurrentUser("customer", createdCustomer.id, createdCustomer.createdByUid, createdCustomer.createdBy, createdCustomer.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertTrue(
+            "Other user (Staff One) must see NEW badge on new delivery",
+            repository.isRecordNewForCurrentUser("delivery", createdDelivery.id, createdDelivery.createdByUid, createdDelivery.createdBy, createdDelivery.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertTrue(
+            "Other user (Staff One) must see NEW badge on new payment",
+            repository.isRecordNewForCurrentUser("payment", createdPayment.id, createdPayment.createdByUid, createdPayment.receivedBy, createdPayment.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertTrue(
+            "Other user (Staff One) must see NEW badge on new expense",
+            repository.isRecordNewForCurrentUser("expense", createdExpense.id, createdExpense.createdByUid, createdExpense.enteredBy, createdExpense.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+
+        // 3. Staff One taps / views each record -> NEW badge disappears for Staff One
+        repository.markRecordSeen("customer", createdCustomer.id)
+        repository.markRecordSeen("delivery", createdDelivery.id)
+        repository.markRecordSeen("payment", createdPayment.id)
+        repository.markRecordSeen("expense", createdExpense.id)
+
+        assertFalse(
+            repository.isRecordNewForCurrentUser("customer", createdCustomer.id, createdCustomer.createdByUid, createdCustomer.createdBy, createdCustomer.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertFalse(
+            repository.isRecordNewForCurrentUser("delivery", createdDelivery.id, createdDelivery.createdByUid, createdDelivery.createdBy, createdDelivery.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertFalse(
+            repository.isRecordNewForCurrentUser("payment", createdPayment.id, createdPayment.createdByUid, createdPayment.receivedBy, createdPayment.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+        assertFalse(
+            repository.isRecordNewForCurrentUser("expense", createdExpense.id, createdExpense.createdByUid, createdExpense.enteredBy, createdExpense.createdAt, repository.seenRecordKeys.value, staffOne)
+        )
+
+        // 4. Another user (Staff Two) who hasn't opened them yet must STILL see NEW badge
+        assertTrue(repository.switchUserByCredentials("staff_two", "pass456").first)
+        val staffTwo = repository.currentUser.value
+        assertTrue(
+            "Staff Two who hasn't opened customer must still see NEW badge",
+            repository.isRecordNewForCurrentUser("customer", createdCustomer.id, createdCustomer.createdByUid, createdCustomer.createdBy, createdCustomer.createdAt, repository.seenRecordKeys.value, staffTwo)
+        )
+        assertTrue(
+            "Staff Two who hasn't opened delivery must still see NEW badge",
+            repository.isRecordNewForCurrentUser("delivery", createdDelivery.id, createdDelivery.createdByUid, createdDelivery.createdBy, createdDelivery.createdAt, repository.seenRecordKeys.value, staffTwo)
+        )
+
+        // 5. Returning to Staff One must still remember seen state from SharedPreferences
+        assertTrue(repository.switchUserByCredentials("staff_one", "pass123").first)
+        assertFalse(
+            "Staff One seen state must persist across user switches",
+            repository.isRecordNewForCurrentUser("customer", createdCustomer.id, createdCustomer.createdByUid, createdCustomer.createdBy, createdCustomer.createdAt, repository.seenRecordKeys.value, repository.currentUser.value)
+        )
+    }
+
+    @Test
+    fun testCustomerMissingDetailsDetectionClearsWhenAllFilled() {
+        repository.switchUserRole(UserRole.ADMIN)
+
+        // Add customer with missing whatsapp, area, and address
+        val custId = repository.addCustomer(
+            Customer(
+                name = "Incomplete Profile User",
+                phone = "03009998877",
+                whatsapp = "",
+                area = "",
+                address = "",
+                active = true
+            )
+        )
+        val incomplete = repository.customers.value.first { it.id == custId }
+        assertTrue("Customer with blank whatsapp/area/address must flag missing details", incomplete.hasMissingDetails)
+        val missing = incomplete.missingDetailLabels()
+        assertTrue(missing.contains("WhatsApp"))
+        assertTrue(missing.contains("Area"))
+        assertTrue(missing.contains("Address"))
+
+        // Partially fill area only -> still missing WhatsApp & Address
+        repository.updateCustomer(incomplete.copy(area = "Model Town"))
+        val stillIncomplete = repository.customers.value.first { it.id == custId }
+        assertTrue("Customer must keep flagging missing details until ALL fields are filled", stillIncomplete.hasMissingDetails)
+        assertEquals(listOf("WhatsApp", "Address"), stillIncomplete.missingDetailLabels())
+
+        // Fill remaining missing details -> blinking orange dot clears
+        repository.updateCustomer(
+            stillIncomplete.copy(
+                whatsapp = "03009998877",
+                address = "House 42, Street 5"
+            )
+        )
+        val completed = repository.customers.value.first { it.id == custId }
+        assertFalse("Completed customer profile must NOT show missing details indicator", completed.hasMissingDetails)
+        assertTrue(completed.missingDetailLabels().isEmpty())
+    }
 }
+

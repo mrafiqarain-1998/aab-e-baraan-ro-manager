@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -31,6 +32,7 @@ import com.example.model.Delivery
 import com.example.model.PermissionAction
 import com.example.model.UserRole
 import com.example.ui.components.MetricStatCard
+import com.example.ui.components.NewItemBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusBadge
 import com.example.ui.theme.*
@@ -67,6 +69,7 @@ fun DashboardScreen(
     val payments by viewModel.payments.collectAsState()
     val passwordResetRequests by viewModel.passwordResetRequests.collectAsState()
     val expenseCategories by viewModel.expenseCategories.collectAsState()
+    val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
 
     var showAddExpenseDialog by remember { mutableStateOf(false) }
     var showPasswordResetRequestsDialog by remember { mutableStateOf(false) }
@@ -864,8 +867,21 @@ fun DashboardScreen(
                 }
             }
         } else {
-            items(periodDeliveries) { delivery ->
-                DeliveryItemCard(delivery = delivery)
+            items(periodDeliveries, key = { it.id }) { delivery ->
+                val isDeliveryNew = viewModel.isRecordNewForCurrentUser(
+                    type = "delivery",
+                    recordId = delivery.id,
+                    createdByUid = delivery.createdByUid,
+                    createdByName = delivery.createdBy,
+                    createdAt = delivery.createdAt,
+                    seenKeys = seenRecordKeys,
+                    user = user
+                )
+                DeliveryItemCard(
+                    delivery = delivery,
+                    isNew = isDeliveryNew,
+                    onClick = { viewModel.markRecordSeen("delivery", delivery.id) }
+                )
             }
         }
     }
@@ -1161,12 +1177,18 @@ fun BottleStatBadge(label: String, value: String, color: Color, modifier: Modifi
 }
 
 @Composable
-fun DeliveryItemCard(delivery: Delivery) {
+fun DeliveryItemCard(
+    delivery: Delivery,
+    isNew: Boolean = false,
+    onClick: () -> Unit = {}
+) {
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
@@ -1175,7 +1197,10 @@ fun DeliveryItemCard(delivery: Delivery) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Box(
                     modifier = Modifier
                         .size(38.dp)
@@ -1193,17 +1218,30 @@ fun DeliveryItemCard(delivery: Delivery) {
 
                 Spacer(modifier = Modifier.width(10.dp))
 
-                Column {
-                    Text(
-                        text = delivery.customerName,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        color = WaterNavyPrimary
-                    )
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = delivery.customerName,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = WaterNavyPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isNew) {
+                            NewItemBadge(onClick = onClick)
+                        }
+                    }
                     Text(
                         text = "${delivery.customerArea} • ${delivery.time}",
                         fontSize = 10.sp,
-                        color = TextSecondaryDark
+                        color = TextSecondaryDark,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = "Delivered: ${delivery.totalFullDelivered} | Empty: ${delivery.totalEmptyCollected}",
@@ -1213,6 +1251,7 @@ fun DeliveryItemCard(delivery: Delivery) {
                     )
                 }
             }
+            Spacer(modifier = Modifier.width(8.dp))
 
             Column(horizontalAlignment = Alignment.End) {
                 Text(

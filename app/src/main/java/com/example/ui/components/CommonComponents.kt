@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,10 +18,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -871,32 +876,6 @@ fun AabTopAppBar(
                             }
                         }
 
-                        if (onToggleDarkMode != null) {
-                            TooltipBox(
-                                positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                                tooltip = {
-                                    PlainTooltip {
-                                        Text(if (isDarkMode) "Switch to Light Mode" else "Switch to Dark Mode")
-                                    }
-                                },
-                                state = rememberTooltipState()
-                            ) {
-                                IconButton(
-                                    onClick = onToggleDarkMode,
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .testTag("topbar_dark_mode_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = if (isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
-                                        contentDescription = if (isDarkMode) "Switch to Light Mode" else "Switch to Dark Mode",
-                                        tint = if (isDarkMode) WarningAmber else WaterCyanBright,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-
                         actions()
                     }
                 },
@@ -1194,4 +1173,90 @@ fun AabLogoWatermarkOverlay(
         )
     }
 }
+
+/**
+ * Compact clickable "NEW" badge shown to OTHER users on newly added
+ * Customers, Deliveries, Expenses, and Payments until opened or tapped.
+ */
+@Composable
+fun NewItemBadge(
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(4.dp),
+        color = Color(0xFFE11D48),
+        shadowElevation = 1.dp,
+        modifier = modifier
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .semantics { contentDescription = "New item" }
+    ) {
+        Text(
+            text = "NEW",
+            color = Color.White,
+            fontSize = 7.5.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.4.sp,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+        )
+    }
+}
+
+/**
+ * Smoothly blinking orange indicator dot shown on Customers whose profile details
+ * are incomplete — continues blinking until all required customer details are filled.
+ */
+@Composable
+fun BlinkingOrangeDot(
+    modifier: Modifier = Modifier,
+    dotSize: Dp = 9.dp,
+    description: String = "Customer details missing"
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "missing_detail_orange_blink")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 620, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "orange_dot_alpha"
+    )
+    val haloScale by infiniteTransition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.55f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 620, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "orange_dot_halo_scale"
+    )
+    val vividOrange = Color(0xFFF97316)
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(dotSize + 6.dp)
+            .semantics { contentDescription = description }
+    ) {
+        Box(
+            modifier = Modifier
+                .size(dotSize)
+                .scale(haloScale)
+                .alpha(pulseAlpha * 0.38f)
+                .clip(CircleShape)
+                .background(vividOrange)
+        )
+        Box(
+            modifier = Modifier
+                .size(dotSize)
+                .alpha(pulseAlpha)
+                .clip(CircleShape)
+                .background(vividOrange)
+        )
+    }
+}
+
 

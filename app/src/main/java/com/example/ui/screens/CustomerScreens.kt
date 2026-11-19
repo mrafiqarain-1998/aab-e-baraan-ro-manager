@@ -33,7 +33,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.model.*
+import com.example.ui.components.BlinkingOrangeDot
 import com.example.ui.components.CompactFormTextField
+import com.example.ui.components.NewItemBadge
 import com.example.ui.components.StatusBadge
 import com.example.ui.theme.*
 import com.example.viewmodel.WaterPlantViewModel
@@ -58,6 +60,7 @@ fun CustomerListScreen(
 ) {
     val customers by viewModel.customers.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
     val isAdmin = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.DELETE) ||
         viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.MANAGE)
     val isViewOnly = !viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.ADD) &&
@@ -390,15 +393,44 @@ fun CustomerListScreen(
                     }
                 } else {
                     items(filteredCustomers, key = { it.id }) { customer ->
+                        val isNewCustomer = viewModel.isRecordNewForCurrentUser(
+                            type = "customer",
+                            recordId = customer.id,
+                            createdByUid = customer.createdByUid,
+                            createdByName = customer.createdBy,
+                            createdAt = customer.createdAt,
+                            seenKeys = seenRecordKeys,
+                            user = currentUser
+                        )
                         CustomerCard(
                             customer = customer,
                             effectiveDue = viewModel.getCustomerTotalDue(customer),
-                            onClick = { onCustomerClick(customer) },
-                            onEdit = { customerToEdit = customer },
-                            onOpenBottleRates = { customerForBottleRate = customer },
-                            onOpenSecurityDeposit = { customerForSecurityDeposit = customer },
-                            onDeliver = { onNavigateToNewDelivery(customer) },
-                            onReceivePayment = { onNavigateToReceivePayment(customer) },
+                            isNew = isNewCustomer,
+                            onDismissNew = { viewModel.markRecordSeen("customer", customer.id) },
+                            onClick = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                onCustomerClick(customer)
+                            },
+                            onEdit = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                customerToEdit = customer
+                            },
+                            onOpenBottleRates = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                customerForBottleRate = customer
+                            },
+                            onOpenSecurityDeposit = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                customerForSecurityDeposit = customer
+                            },
+                            onDeliver = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                onNavigateToNewDelivery(customer)
+                            },
+                            onReceivePayment = {
+                                viewModel.markRecordSeen("customer", customer.id)
+                                onNavigateToReceivePayment(customer)
+                            },
                             isViewOnly = isViewOnly
                         )
                     }
@@ -458,6 +490,8 @@ fun CustomerListScreen(
 fun CustomerCard(
     customer: Customer,
     effectiveDue: Double = customer.currentBalance,
+    isNew: Boolean = false,
+    onDismissNew: () -> Unit = {},
     onClick: () -> Unit,
     onEdit: () -> Unit,
     onOpenBottleRates: () -> Unit,
@@ -467,6 +501,10 @@ fun CustomerCard(
     isViewOnly: Boolean = false
 ) {
     val context = LocalContext.current
+    val missingDetails = remember(customer.name, customer.phone, customer.whatsapp, customer.area, customer.address) {
+        customer.missingDetailLabels()
+    }
+    val hasMissingDetails = missingDetails.isNotEmpty()
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -478,7 +516,7 @@ fun CustomerCard(
             .testTag("customer_card_${customer.id}")
     ) {
         Column(modifier = Modifier.padding(11.dp)) {
-            // Row 1: Customer Number & Customer Name
+            // Row 1: Customer Number & Customer Name + Blinking Orange Missing-Detail Dot + NEW Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -510,11 +548,28 @@ fun CustomerCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+
+                if (hasMissingDetails) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BlinkingOrangeDot(
+                        dotSize = 9.dp,
+                        description = "Missing details: ${missingDetails.joinToString(", ")}",
+                        modifier = Modifier.testTag("customer_missing_dot_${customer.id}")
+                    )
+                }
+
+                if (isNew) {
+                    Spacer(modifier = Modifier.width(5.dp))
+                    NewItemBadge(
+                        onClick = onDismissNew,
+                        modifier = Modifier.testTag("new_customer_badge_${customer.id}")
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Row 2: Mobile Number & Creator
+            // Row 2: Mobile Number & Creator (or Missing Detail hint)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -538,7 +593,17 @@ fun CustomerCard(
                     )
                 }
 
-                if (customer.createdBy.isNotBlank()) {
+                if (hasMissingDetails) {
+                    Text(
+                        text = "Missing: ${missingDetails.joinToString(", ")}",
+                        fontSize = 8.5.sp,
+                        color = WarningOrange,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (customer.createdBy.isNotBlank()) {
                     Text(
                         text = "By: ${customer.createdBy}",
                         fontSize = 9.sp,
@@ -670,6 +735,7 @@ fun CustomerBottleRateDialog(
     val predefinedSizes by viewModel.bottleSizes.collectAsState()
     val inventory by viewModel.inventory.collectAsState()
     val allCustomerRates by viewModel.customerRates.collectAsState()
+    val canEditCustomerRates = viewModel.hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)
     val rateOptions = remember(predefinedSizes, inventory) {
         buildDeliverySelectableOptions(predefinedSizes, inventory)
     }
@@ -774,11 +840,11 @@ fun CustomerBottleRateDialog(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = opt.displayName,
+                                        text = opt.shortName,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 11.5.sp,
                                         color = WaterNavyDark,
-                                        maxLines = 2,
+                                        maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
@@ -870,49 +936,51 @@ fun CustomerBottleRateDialog(
                                 }
 
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    if (isAssigned) {
-                                        OutlinedButton(
+                                    if (canEditCustomerRates) {
+                                        if (isAssigned) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    viewModel.removeCustomerBottleSize(customer.id, opt.rateKey)
+                                                },
+                                                shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed),
+                                                modifier = Modifier.height(30.dp)
+                                            ) {
+                                                Text(
+                                                    "Deactivate",
+                                                    fontSize = 9.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+                                        }
+
+                                        Button(
                                             onClick = {
-                                                viewModel.removeCustomerBottleSize(customer.id, opt.rateKey)
+                                                val p = inputPrice.toDoubleOrNull() ?: opt.stdRefillPrice
+                                                viewModel.assignCustomerBottleRate(
+                                                    customerId = customer.id,
+                                                    bottleSizeId = opt.rateKey,
+                                                    bottleSizeName = opt.shortName,
+                                                    rate = p,
+                                                    appliedDate = appliedDate
+                                                )
                                             },
                                             shape = RoundedCornerShape(6.dp),
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
                                             modifier = Modifier.height(30.dp)
                                         ) {
                                             Text(
-                                                "Deactivate",
+                                                if (isAssigned) "Update Rate" else "Fix Rate",
                                                 fontSize = 9.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 maxLines = 1,
                                                 softWrap = false
                                             )
                                         }
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            val p = inputPrice.toDoubleOrNull() ?: opt.stdRefillPrice
-                                            viewModel.assignCustomerBottleRate(
-                                                customerId = customer.id,
-                                                bottleSizeId = opt.rateKey,
-                                                bottleSizeName = opt.displayName,
-                                                rate = p,
-                                                appliedDate = appliedDate
-                                            )
-                                        },
-                                        shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
-                                        modifier = Modifier.height(30.dp)
-                                    ) {
-                                        Text(
-                                            if (isAssigned) "Update Rate" else "Fix Rate",
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
                                     }
                                 }
                             }
@@ -1740,7 +1808,10 @@ fun CustomerFormDialog(
                                 securityDeposit = depositAmount,
                                 bottleDeposit = depositAmount,
                                 notes = notes.trim(),
-                                active = true
+                                active = customer?.active ?: true,
+                                createdBy = customer?.createdBy ?: "",
+                                createdByUid = customer?.createdByUid ?: "",
+                                createdAt = customer?.createdAt ?: 0L
                             )
                             onConfirm(updatedOrNew)
                             onConfirmWithRate?.invoke(updatedOrNew, rate)

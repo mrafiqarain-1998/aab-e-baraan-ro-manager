@@ -52,50 +52,59 @@ fun PdfPreviewDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var renderedPages by remember(request.file.absolutePath) { mutableStateOf<List<ImageBitmap>>(emptyList()) }
-    var bitmapsToRecycle by remember(request.file.absolutePath) { mutableStateOf<List<Bitmap>>(emptyList()) }
-    var isLoading by remember(request.file.absolutePath) { mutableStateOf(true) }
-    var renderError by remember(request.file.absolutePath) { mutableStateOf<String?>(null) }
-
-    DisposableEffect(bitmapsToRecycle) {
-        onDispose {
-            bitmapsToRecycle.forEach { bmp ->
-                if (!bmp.isRecycled) bmp.recycle()
-            }
-        }
+    var renderedPages by remember(request.file.absolutePath, request.file.lastModified()) {
+        mutableStateOf<List<ImageBitmap>>(emptyList())
+    }
+    var isLoading by remember(request.file.absolutePath, request.file.lastModified()) {
+        mutableStateOf(true)
+    }
+    var renderError by remember(request.file.absolutePath, request.file.lastModified()) {
+        mutableStateOf<String?>(null)
     }
 
-    LaunchedEffect(request.file.absolutePath) {
+    LaunchedEffect(request.file.absolutePath, request.file.lastModified()) {
         isLoading = true
         renderError = null
-        val (pages, rawBitmaps, err) = withContext(Dispatchers.IO) {
+        val (pages, err) = withContext(Dispatchers.IO) {
             val outBitmaps = mutableListOf<Bitmap>()
+            var pfd: ParcelFileDescriptor? = null
+            var renderer: PdfRenderer? = null
             try {
-                ParcelFileDescriptor.open(request.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                    PdfRenderer(pfd).use { renderer ->
-                        val pageCount = renderer.pageCount
-                        for (i in 0 until pageCount) {
-                            renderer.openPage(i).use { page ->
-                                val scale = 2
-                                val width = (page.width * scale).coerceAtLeast(1)
-                                val height = (page.height * scale).coerceAtLeast(1)
-                                val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                                val canvas = Canvas(bmp)
-                                canvas.drawColor(AndroidColor.WHITE)
-                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                outBitmaps.add(bmp)
-                            }
-                        }
+                if (!request.file.exists() || request.file.length() <= 0L) {
+                    return@withContext Pair(emptyList<ImageBitmap>(), "PDF file could not be generated or is empty.")
+                }
+                pfd = ParcelFileDescriptor.open(request.file, ParcelFileDescriptor.MODE_READ_ONLY)
+                renderer = PdfRenderer(pfd)
+                val pageCount = renderer.pageCount
+                if (pageCount <= 0) {
+                    return@withContext Pair(emptyList<ImageBitmap>(), "PDF contains no pages.")
+                }
+                for (i in 0 until pageCount) {
+                    var page: PdfRenderer.Page? = null
+                    try {
+                        page = renderer.openPage(i)
+                        // Cap target width at 840px to guarantee sharp preview without OOM on any Android phone
+                        val scale = (840f / page.width.coerceAtLeast(1)).coerceIn(1.0f, 1.8f)
+                        val width = (page.width * scale).toInt().coerceAtLeast(1)
+                        val height = (page.height * scale).toInt().coerceAtLeast(1)
+                        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        val canvas = Canvas(bmp)
+                        canvas.drawColor(AndroidColor.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        outBitmaps.add(bmp)
+                    } finally {
+                        try { page?.close() } catch (_: Throwable) {}
                     }
                 }
-                Triple(outBitmaps.map { it.asImageBitmap() }, outBitmaps.toList(), null)
-            } catch (e: Exception) {
-                outBitmaps.forEach { if (!it.isRecycled) it.recycle() }
-                Triple(emptyList<ImageBitmap>(), emptyList<Bitmap>(), e.message ?: "Unable to render PDF preview")
+                Pair(outBitmaps.map { it.asImageBitmap() }, null)
+            } catch (t: Throwable) {
+                Pair(emptyList<ImageBitmap>(), t.message ?: "Unable to open PDF preview")
+            } finally {
+                try { renderer?.close() } catch (_: Throwable) {}
+                try { pfd?.close() } catch (_: Throwable) {}
             }
         }
         renderedPages = pages
-        bitmapsToRecycle = rawBitmaps
         renderError = err
         isLoading = false
     }

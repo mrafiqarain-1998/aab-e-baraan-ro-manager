@@ -34,5 +34,6 @@ data class Expense(
     val acknowledgedBy: String = "",
     val isApprovedByOwner: Boolean = true,
     val businessId: String = "aab_e_baraan_plant_01",
+    val createdByUid: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )

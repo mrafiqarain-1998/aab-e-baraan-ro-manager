@@ -556,6 +556,48 @@ class PlantDataStorage(private val context: Context) {
         }
     }
 
+    fun loadSeenRecordKeys(userKey: String): Set<String> {
+        return try {
+            val safeKey = userKey.trim().lowercase().ifBlank { "default" }
+            val prefs = context.getSharedPreferences("app_seen_records", Context.MODE_PRIVATE)
+            prefs.getStringSet("seen_$safeKey", emptySet())?.toSet() ?: emptySet()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading seen record keys", e)
+            emptySet()
+        }
+    }
+
+    fun saveSeenRecordKeys(userKey: String, keys: Set<String>) {
+        try {
+            val safeKey = userKey.trim().lowercase().ifBlank { "default" }
+            val trimmed = if (keys.size > 4000) keys.toList().takeLast(4000).toSet() else keys.toSet()
+            context.getSharedPreferences("app_seen_records", Context.MODE_PRIVATE)
+                .edit()
+                .putStringSet("seen_$safeKey", trimmed)
+                .apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving seen record keys", e)
+        }
+    }
+
+    fun getOrInitSeenBaselineMillis(userKey: String): Long {
+        return try {
+            val safeKey = userKey.trim().lowercase().ifBlank { "default" }
+            val prefs = context.getSharedPreferences("app_seen_records", Context.MODE_PRIVATE)
+            val key = "baseline_$safeKey"
+            val existing = prefs.getLong(key, 0L)
+            if (existing > 0L) {
+                existing
+            } else {
+                val now = System.currentTimeMillis()
+                prefs.edit().putLong(key, now).apply()
+                now
+            }
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+
     companion object {
         private const val TAG = "PlantDataStorage"
     }

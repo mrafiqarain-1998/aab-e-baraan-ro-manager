@@ -30,8 +30,8 @@ object SampleData {
         ),
         BottleSize(
             id = "size_12l",
-            name = "12.5 Litre Bottle",
-            capacityLitres = 12.5,
+            name = "12 Litre Bottle",
+            capacityLitres = 12.0,
             packQuantity = 1, // Single bottle
             defaultRefillPrice = 90.0,
             bottleSalePrice = 900.0,
