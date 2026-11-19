@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <resources>
     <string name="firestore_database_id" translatable="false">ai-studio-android-e454ad39-56bf-4477-a4f8-70f0a5b3b75f</string>
+    <string name="firebase_rtdb_url" translatable="false">https://aab-e-baraan-ro-manager-default-rtdb.firebaseio.com</string>
 </resources>

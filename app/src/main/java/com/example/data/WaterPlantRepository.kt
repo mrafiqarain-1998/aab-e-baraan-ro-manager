@@ -7,16 +7,13 @@ import com.example.model.*
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.DocumentSnapshot
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.FirebaseFirestoreException
-import com.google.firebase.firestore.FirebaseFirestoreSettings
-import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.MemoryCacheSettings
-import com.google.firebase.firestore.PersistentCacheSettings
-import com.google.firebase.firestore.Query
-import com.google.firebase.firestore.SetOptions
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.DatabaseReference
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.Query as RtdbQuery
+import com.google.firebase.database.ServerValue
+import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,7 +41,7 @@ enum class LoginOutcome {
 class WaterPlantRepository private constructor(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO)
-    private var firestore: FirebaseFirestore? = null
+    private var rtdb: FirebaseDatabase? = null
     private val storage = PlantDataStorage(context.applicationContext)
     val roomDatabase = WaterPlantDatabase.getDatabase(context.applicationContext)
     val deliveryDao = roomDatabase.deliveryDao()
@@ -200,7 +197,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     private val _appUpdateStatusMessage = MutableStateFlow<String?>(null)
     val appUpdateStatusMessage: StateFlow<String?> = _appUpdateStatusMessage.asStateFlow()
 
-    private val activeListeners = mutableListOf<ListenerRegistration>()
+    private val activeRtdbListeners = mutableListOf<Pair<RtdbQuery, ValueEventListener>>()
     private val pendingSyncItems = java.util.concurrent.ConcurrentHashMap<String, Triple<String, String, Any>>()
     private val pendingDeleteKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val docOwnerIds = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -335,24 +332,25 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val updated = (listOf(entry) + _auditLogs.value).take(500)
         _auditLogs.value = updated
         storage.saveAuditLogs(updated)
-        if (isFirebaseSignedIn() && firestore != null && firebaseUid != null) {
-            val payload = FirestoreSyncHelper.toFirestorePayload(
+        if (isFirebaseSignedIn() && rtdb != null && firebaseUid != null) {
+            val db = rtdb!!
+            val payload = RtdbSyncHelper.toRtdbPayload(
                 data = entry,
                 ownerId = firebaseUid,
                 memberUids = listOf(firebaseUid),
                 memberEmails = primaryAdminEmails.toList(),
                 plantId = entry.plantId
             )
-            firestore?.collection("auditLogs")?.document(entry.id)?.set(payload)
+            rtdbDocRef(db, "auditLogs", entry.id, entry.plantId).setValue(payload)
         }
     }
 
     private fun onDeviceNetworkRestored() {
-        val db = firestore ?: return
+        val db = rtdb ?: return
         if (flushJob?.isActive == true) return
         flushJob = scope.launch {
             try {
-                db.enableNetwork()
+                db.goOnline()
             } catch (_: Exception) {
             }
             if (!isFirebaseSignedIn()) {
@@ -378,7 +376,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 }
                 return@launch
             }
-            val hasNoListeners = synchronized(activeListeners) { activeListeners.isEmpty() }
+            val hasNoListeners = synchronized(activeRtdbListeners) { activeRtdbListeners.isEmpty() }
             if (hasNoListeners) {
                 startFirestoreSync()
             }
@@ -412,7 +410,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     private fun triggerQueueFlush(forceIncludeFailed: Boolean = false) {
-        val db = firestore ?: return
+        val db = rtdb ?: return
         if (!isFirebaseSignedIn()) return
         scope.launch {
             flushOfflineSyncQueue(db, forceIncludeFailed = forceIncludeFailed)
@@ -444,7 +442,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun flushOfflineSyncQueueNow() {
-        val db = firestore ?: return
+        val db = rtdb ?: return
         if (!isFirebaseSignedIn()) return
         flushJob = scope.launch {
             flushOfflineSyncQueue(db, forceIncludeFailed = true)
@@ -516,74 +514,71 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     suspend fun testBackendConnection(): Pair<Boolean, String> = staffAuthApiClient.checkHealth()
 
-    private fun scopedCollectionQuery(db: FirebaseFirestore, collection: String): Query? {
-        val user = try {
-            Firebase.auth.currentUser
-        } catch (_: Exception) {
-            null
-        } ?: return null
-        val targetPlantId = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
-        val cleanEmail = user.email?.trim()?.lowercase().orEmpty()
-        val isSuper = isCurrentAuthSuperAdmin()
-        if (collection == "staffUsers" || collection == "plants") {
-            return if (isSuper) {
-                db.collection(collection)
-            } else if (collection == "plants") {
-                db.collection(collection).whereEqualTo("id", targetPlantId)
-            } else {
-                db.collection(collection).whereEqualTo("plantId", targetPlantId)
-            }
-        }
-        if (collection == "auditLogs") {
-            return db.collection(collection)
-                .whereEqualTo("plantId", targetPlantId)
-                .limit(200)
-        }
-        if (isSuper) {
-            // Super Admin sees centralized data across active plant (plus legacy unmigrated docs when on default plant)
-            return if (targetPlantId == PermissionDefaults.DEFAULT_PLANT_ID) {
-                db.collection(collection)
-            } else {
-                db.collection(collection).whereEqualTo("plantId", targetPlantId)
-            }
-        }
-        if (isCustomStaffAuthActive || _currentUser.value.uid.isNotBlank()) {
-            return db.collection(collection).whereEqualTo("plantId", targetPlantId)
-        }
-        return if (user.isEmailVerified && cleanEmail.isNotEmpty()) {
-            db.collection(collection).whereArrayContains("memberEmails", cleanEmail)
-        } else {
-            db.collection(collection).whereArrayContains("memberUids", user.uid)
+    private fun rtdbCollectionRef(
+        db: FirebaseDatabase,
+        collection: String,
+        plantIdOverride: String? = null
+    ): DatabaseReference {
+        val plantId = RtdbSyncHelper.sanitizeKey(
+            (plantIdOverride ?: _activePlantId.value).ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
+        )
+        return when (collection) {
+            "plants" -> db.reference.child("plants")
+            "staffByEmail" -> db.reference.child("staffByEmail")
+            "appReleases" -> db.reference.child("appReleases")
+            else -> db.reference.child("plantData").child(plantId).child(RtdbSyncHelper.sanitizeKey(collection))
         }
     }
 
-    private fun rememberDocAccessMetadata(collection: String, doc: DocumentSnapshot) {
-        val key = "$collection|${doc.id}"
+    private fun rtdbDocRef(
+        db: FirebaseDatabase,
+        collection: String,
+        docId: String,
+        plantIdOverride: String? = null
+    ): DatabaseReference {
+        val key = if (collection == "staffByEmail") {
+            RtdbSyncHelper.emailToRtdbKey(docId)
+        } else {
+            RtdbSyncHelper.sanitizeKey(docId)
+        }
+        return rtdbCollectionRef(db, collection, plantIdOverride).child(key)
+    }
+
+    private fun rememberRtdbAccessMetadata(collection: String, snapshot: DataSnapshot) {
+        val docId = snapshot.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+            ?: snapshot.key.orEmpty()
+        if (docId.isBlank()) return
+        val key = "$collection|$docId"
         cloudKnownDocKeys.add(key)
-        val owner = doc.getString("ownerId")?.trim()
+        val owner = snapshot.child("ownerId").getValue(String::class.java)?.trim()
         if (!owner.isNullOrBlank()) {
             docOwnerIds[key] = owner
             if (plantOwnerUid.isNullOrBlank()) {
                 plantOwnerUid = owner
             }
         }
-        val uids = (doc.get("memberUids") as? List<*>)
-            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotEmpty() } }
-        if (!uids.isNullOrEmpty()) {
+        val uids = snapshot.child("memberUids").children
+            .mapNotNull { it.getValue(String::class.java)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+        if (uids.isNotEmpty()) {
             docMemberUids[key] = uids
         }
-        val emails = (doc.get("memberEmails") as? List<*>)
-            ?.mapNotNull { (it as? String)?.trim()?.lowercase()?.takeIf { s -> s.isNotEmpty() } }
-        if (!emails.isNullOrEmpty()) {
+        val emails = snapshot.child("memberEmails").children
+            .mapNotNull { it.getValue(String::class.java)?.trim()?.lowercase()?.takeIf { s -> s.isNotEmpty() } }
+        if (emails.isNotEmpty()) {
             docMemberEmails[key] = emails
         }
-        val updatedTs = doc.getTimestamp("updatedAt")?.toDate()?.time
-        if (updatedTs != null && updatedTs > 0L) {
+        val updatedTs = RtdbSyncHelper.extractUpdatedAtMillis(snapshot)
+        if (updatedTs > 0L) {
             docUpdatedAtMillis[key] = updatedTs
         }
     }
 
-    private fun buildCloudPayload(collection: String, docId: String, data: Any, targetPlantOverride: String? = null): MutableMap<String, Any?>? {
+    private fun buildRtdbPayload(
+        collection: String,
+        docId: String,
+        data: Any,
+        targetPlantOverride: String? = null
+    ): MutableMap<String, Any?>? {
         val user = try {
             Firebase.auth.currentUser
         } catch (_: Exception) {
@@ -614,7 +609,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             .distinct()
 
         val plantId = (targetPlantOverride ?: _activePlantId.value).ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
-        return FirestoreSyncHelper.toFirestorePayload(
+        return RtdbSyncHelper.toRtdbPayload(
             data = data,
             ownerId = resolvedOwnerId,
             memberUids = memberUids,
@@ -625,27 +620,23 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     init {
         try {
-            val customDbId = context.getString(R.string.firestore_database_id).trim()
-            require(customDbId.isNotEmpty() && customDbId != "(default)") {
-                "R.string.firestore_database_id must specify the named Firestore database ID, never (default)."
+            val rtdbUrl = context.getString(R.string.firebase_rtdb_url).trim()
+            require(rtdbUrl.startsWith("https://")) {
+                "R.string.firebase_rtdb_url must specify the Firebase Realtime Database HTTPS URL."
             }
-            val dbInstance = FirebaseFirestore.getInstance(customDbId)
+            val dbInstance = FirebaseDatabase.getInstance(rtdbUrl)
             try {
-                if (dbInstance.firestoreSettings.cacheSettings !is MemoryCacheSettings) {
-                    dbInstance.firestoreSettings = FirebaseFirestoreSettings.Builder()
-                        .setLocalCacheSettings(
-                            PersistentCacheSettings.newBuilder()
-                                .setSizeBytes(100L * 1024L * 1024L)
-                                .build()
-                        )
-                        .build()
-                }
+                dbInstance.setPersistenceEnabled(true)
             } catch (_: Exception) {
             }
-            firestore = dbInstance
-            Log.d("WaterPlantRepo", "Initialized Firestore instance (db=$customDbId)")
+            try {
+                dbInstance.setPersistenceCacheSizeBytes(100L * 1024L * 1024L)
+            } catch (_: Exception) {
+            }
+            rtdb = dbInstance
+            Log.d("WaterPlantRepo", "Initialized Firebase Realtime Database ($rtdbUrl)")
         } catch (e: Exception) {
-            Log.e("WaterPlantRepo", "Firestore named database init failed: ${e.message}", e)
+            Log.e("WaterPlantRepo", "Firebase Realtime Database init failed: ${e.message}", e)
         }
 
         // 2. Clean slate initialization for user (clears dummy stock, dummy deliveries, and dummy expenses once)
@@ -848,43 +839,53 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     private fun syncStaffAccountDocuments(acc: UserAccount, previousEmail: String = "") {
         val resolvedUid = acc.uid.ifBlank { acc.id }
-        val sanitizedMap = userAccountToMap(acc)
-        syncDocument("staffUsers", resolvedUid, sanitizedMap)
-        syncDocument("users", acc.id, sanitizedMap)
+        val defBranch = acc.defaultBranchId.ifBlank {
+            acc.assignedBranchIds.firstOrNull()?.takeIf { it.isNotBlank() }
+                ?: _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
+        }
+        val enrichedMap = RtdbSyncHelper.enrichStaffMapForRtdb(userAccountToMap(acc), acc, defBranch)
+        syncDocument("staffUsers", resolvedUid, enrichedMap)
         val cleanEmail = acc.googleEmail.trim().lowercase()
         val prevCleanEmail = previousEmail.trim().lowercase()
         if (prevCleanEmail.isNotBlank() && prevCleanEmail != cleanEmail) {
             deleteDocument("staffByEmail", prevCleanEmail)
         }
         if (cleanEmail.isNotBlank()) {
-            syncDocument("staffByEmail", cleanEmail, sanitizedMap)
+            syncDocument("staffByEmail", cleanEmail, enrichedMap)
         }
     }
 
-    private fun parseUserAccountDoc(doc: DocumentSnapshot, collectionName: String = "users"): UserAccount? {
-        rememberDocAccessMetadata(collectionName, doc)
+    private fun parseUserAccountSnapshot(snapshot: DataSnapshot, collectionName: String = "staffUsers"): UserAccount? {
+        if (!snapshot.exists()) return null
+        rememberRtdbAccessMetadata(collectionName, snapshot)
         return try {
-            val uName = doc.getString("username")?.let { normalizeUsername(it) } ?: return null
+            val map = RtdbSyncHelper.snapshotToMap(snapshot) ?: return null
+            val uName = (map["username"] as? String)?.let { normalizeUsername(it) } ?: return null
             if (uName.isEmpty()) return null
-            val roleStr = doc.getString("role") ?: "INCHARGE"
+            val roleStr = (map["role"] as? String) ?: "INCHARGE"
             val parsedRole = try { UserRole.valueOf(roleStr.uppercase()) } catch (_: Exception) { UserRole.INCHARGE }
-            val docId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
-            val docUid = doc.getString("uid")?.takeIf { it.isNotBlank() } ?: docId
-            val googleEmail = doc.getString("googleEmail")?.trim()?.lowercase() ?: ""
-            val isSuper = (doc.getBoolean("isSuperAdmin") ?: false) ||
+            val docId = (map["id"] as? String)?.takeIf { it.isNotBlank() } ?: snapshot.key.orEmpty()
+            val docUid = (map["uid"] as? String)?.takeIf { it.isNotBlank() } ?: docId
+            val googleEmail = (map["googleEmail"] as? String)?.trim()?.lowercase() ?: ""
+            val isSuper = ((map["isSuperAdmin"] as? Boolean) ?: false) ||
                 docId == "user_admin_01" ||
                 (googleEmail in primaryAdminEmails)
             val effectiveRole = if (isSuper) UserRole.ADMIN else parsedRole
 
             @Suppress("UNCHECKED_CAST")
-            val rawPerms = (doc.get("permissions") as? Map<String, Any?>)?.mapValues { (_, v) ->
+            val rawPerms = (map["permissions"] as? Map<String, Any?>)?.mapValues { (_, v) ->
                 (v as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+            } ?: (map["permissionsMap"] as? Map<String, Any?>)?.mapValues { (_, v) ->
+                (v as? Map<*, *>)?.filter { it.value == true }?.keys?.mapNotNull { it?.toString() } ?: emptyList()
             }
-            val rawBranches = (doc.get("assignedBranchIds") as? List<*>)
+            val rawBranches = (map["assignedBranchIds"] as? List<*>)
                 ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                ?: (map["assignedBranchMap"] as? Map<*, *>)
+                    ?.filter { it.value == true }
+                    ?.keys?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
                 ?: emptyList()
-            val defBranch = doc.getString("defaultBranchId")?.takeIf { it.isNotBlank() }
-                ?: doc.getString("plantId")?.takeIf { it.isNotBlank() }
+            val defBranch = (map["defaultBranchId"] as? String)?.takeIf { it.isNotBlank() }
+                ?: (map["plantId"] as? String)?.takeIf { it.isNotBlank() }
                 ?: PermissionDefaults.DEFAULT_PLANT_ID
 
             UserAccount(
@@ -894,15 +895,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 password = "",
                 passwordHash = "",
                 passwordSalt = "",
-                name = doc.getString("name") ?: uName,
-                phone = doc.getString("phone") ?: "",
+                name = (map["name"] as? String) ?: uName,
+                phone = (map["phone"] as? String) ?: "",
                 role = effectiveRole,
                 isSuperAdmin = isSuper,
                 permissions = PermissionDefaults.normalizePermissions(rawPerms, effectiveRole, isSuper),
                 assignedBranchIds = rawBranches.ifEmpty { listOf(defBranch) },
                 defaultBranchId = defBranch,
-                active = if (isSuper) true else (doc.getBoolean("active") ?: true),
-                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                active = if (isSuper) true else ((map["active"] as? Boolean) ?: true),
+                createdAt = (map["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
                 googleEmail = googleEmail
             )
         } catch (_: Exception) {
@@ -1060,8 +1061,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
         }
 
-        // 3. Fallback Cloud Firestore lookup if already Firebase-signed-in
-        val db = firestore
+        // 3. Fallback Firebase Realtime Database lookup if already Firebase-signed-in
+        val db = rtdb
         if (db == null || !isFirebaseSignedIn()) {
             return if (localByUsername != null) {
                 LoginOutcome.INVALID_CREDENTIALS to null
@@ -1074,18 +1075,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val cloudAccounts = mutableListOf<UserAccount>()
             val authUser = Firebase.auth.currentUser
             if (isCurrentAuthSuperAdmin() || hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.VIEW)) {
-                val staffSnap = scopedCollectionQuery(db, "staffUsers")?.get()?.await()
-                val legacySnap = scopedCollectionQuery(db, "users")?.get()?.await()
-                cloudAccounts.addAll(staffSnap?.documents?.mapNotNull { parseUserAccountDoc(it, "staffUsers") }.orEmpty())
-                cloudAccounts.addAll(legacySnap?.documents?.mapNotNull { parseUserAccountDoc(it, "users") }.orEmpty())
+                val staffSnap = rtdbCollectionRef(db, "staffUsers").get().await()
+                staffSnap.children.mapNotNullTo(cloudAccounts) { parseUserAccountSnapshot(it, "staffUsers") }
             } else if (authUser != null) {
                 val cleanEmail = authUser.email?.trim()?.lowercase().orEmpty()
                 if (cleanEmail.isNotBlank()) {
-                    val emailDoc = db.collection("staffByEmail").document(cleanEmail).get().await()
-                    if (emailDoc.exists()) parseUserAccountDoc(emailDoc, "staffByEmail")?.let { cloudAccounts.add(it) }
+                    val emailDoc = rtdbDocRef(db, "staffByEmail", cleanEmail).get().await()
+                    if (emailDoc.exists()) parseUserAccountSnapshot(emailDoc, "staffByEmail")?.let { cloudAccounts.add(it) }
                 }
-                val uidDoc = db.collection("staffUsers").document(authUser.uid).get().await()
-                if (uidDoc.exists()) parseUserAccountDoc(uidDoc, "staffUsers")?.let { cloudAccounts.add(it) }
+                val uidDoc = db.reference.child("staffUsers").child(RtdbSyncHelper.sanitizeKey(authUser.uid)).get().await()
+                if (uidDoc.exists()) parseUserAccountSnapshot(uidDoc, "staffUsers")?.let { cloudAccounts.add(it) }
             }
             if (cloudAccounts.isNotEmpty()) {
                 val mergedList = mergeAccountsPreservingLocalCredentials(_userAccounts.value, cloudAccounts)
@@ -1581,14 +1580,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     fun refreshCloudData() {
         val now = System.currentTimeMillis()
-        val hasNoListeners = synchronized(activeListeners) { activeListeners.isEmpty() }
+        val hasNoListeners = synchronized(activeRtdbListeners) { activeRtdbListeners.isEmpty() }
         flushOfflineSyncQueueNow()
         if (hasNoListeners || now - lastManualRefreshMillis >= 15_000L) {
             lastManualRefreshMillis = now
             startFirestoreSync(forceRestart = hasNoListeners)
         } else {
             val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-            _syncStatus.value = "Cloud Live • Synced at $time"
+            _syncStatus.value = "Realtime DB Live • Synced at $time"
         }
     }
 
@@ -5666,20 +5665,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
             try {
                 val cached = _appReleaseInfo.value ?: storage.loadAppReleaseInfo()
                 var cloudInfo: AppReleaseInfo? = null
-                val db = firestore
+                val db = rtdb
                 if (db != null && isFirebaseSignedIn()) {
                     try {
-                        val doc = db.collection("appReleases").document("latest").get().await()
-                        if (doc.exists()) {
+                        val snap = rtdbDocRef(db, "appReleases", "latest").get().await()
+                        if (snap.exists()) {
                             cloudInfo = AppReleaseInfo(
-                                versionCode = (doc.getLong("versionCode") ?: 0L).toInt(),
-                                versionName = doc.getString("versionName").orEmpty(),
-                                downloadUrl = doc.getString("downloadUrl").orEmpty(),
-                                githubRepo = AppUpdateChecker.normalizeGithubRepo(doc.getString("githubRepo").orEmpty()),
-                                releaseNotes = doc.getString("releaseNotes").orEmpty(),
-                                mandatory = doc.getBoolean("mandatory") ?: false,
-                                updatedAtMillis = doc.getLong("updatedAtMillis") ?: now,
-                                source = "firestore"
+                                versionCode = ((snap.child("versionCode").value as? Number)?.toInt()) ?: 0,
+                                versionName = snap.child("versionName").getValue(String::class.java).orEmpty(),
+                                downloadUrl = snap.child("downloadUrl").getValue(String::class.java).orEmpty(),
+                                githubRepo = AppUpdateChecker.normalizeGithubRepo(
+                                    snap.child("githubRepo").getValue(String::class.java).orEmpty()
+                                ),
+                                releaseNotes = snap.child("releaseNotes").getValue(String::class.java).orEmpty(),
+                                mandatory = snap.child("mandatory").getValue(Boolean::class.java) ?: false,
+                                updatedAtMillis = ((snap.child("updatedAtMillis").value as? Number)?.toLong()) ?: now,
+                                source = "rtdb"
                             )
                         }
                     } catch (e: Exception) {
@@ -5775,9 +5776,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             releaseNotes = releaseNotes.trim().take(800),
             mandatory = mandatory,
             updatedAtMillis = now,
-            source = "firestore"
+            source = "rtdb"
         )
-        val db = firestore
+        val db = rtdb
         if (db != null && isFirebaseSignedIn()) {
             try {
                 val payload = mapOf(
@@ -5790,9 +5791,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     "updatedAtMillis" to info.updatedAtMillis,
                     "updatedBy" to _currentUser.value.email
                 )
-                db.collection("appReleases").document("latest").set(payload).await()
+                rtdbDocRef(db, "appReleases", "latest").setValue(payload).await()
             } catch (e: Exception) {
-                return false to "Failed to publish release to Cloud: ${e.localizedMessage ?: "Permission denied"}"
+                return false to "Failed to publish release to Realtime DB: ${e.localizedMessage ?: "Permission denied"}"
             }
         }
         _appReleaseInfo.value = info
@@ -5820,25 +5821,26 @@ class WaterPlantRepository private constructor(private val context: Context) {
         activeSyncSessionKey = null
         workspaceEnsuredKey = null
         loadedCollectionsInSession.clear()
-        synchronized(activeListeners) {
-            activeListeners.forEach { reg ->
+        synchronized(activeRtdbListeners) {
+            activeRtdbListeners.forEach { (query, listener) ->
                 try {
-                    reg.remove()
+                    query.removeEventListener(listener)
                 } catch (_: Exception) {
                 }
             }
-            activeListeners.clear()
+            activeRtdbListeners.clear()
         }
     }
 
-    private fun registerListener(reg: ListenerRegistration) {
-        synchronized(activeListeners) {
-            activeListeners.add(reg)
+    private fun registerRtdbListener(query: RtdbQuery, listener: ValueEventListener) {
+        query.addValueEventListener(listener)
+        synchronized(activeRtdbListeners) {
+            activeRtdbListeners.add(query to listener)
         }
     }
 
     private fun <T> attachCollectionListener(
-        db: FirebaseFirestore,
+        db: FirebaseDatabase,
         collection: String,
         clazz: Class<T>,
         currentLocalProvider: () -> List<T>,
@@ -5847,52 +5849,20 @@ class WaterPlantRepository private constructor(private val context: Context) {
         allowEmptyOverwriteAfterLoad: Boolean = true,
         markConnectedOnSuccess: Boolean = false
     ) {
-        val query = scopedCollectionQuery(db, collection) ?: return
-        val activePlant = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
-        registerListener(
-            query.addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    handleFirestoreError(error, OperationType.LIST, collection)
-                    if (error !is FirebaseFirestoreException || error.code != FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                        _isCloudConnected.value = false
-                        _syncStatus.value = friendlyFirestoreStatusMessage(error)
-                    }
-                    return@addSnapshotListener
-                }
-                if (snapshot == null) return@addSnapshotListener
-                if (snapshot.documentChanges.isEmpty() &&
-                    loadedCollectionsInSession.contains(collection) &&
-                    !snapshot.metadata.isFromCache
-                ) {
-                    if (markConnectedOnSuccess) {
-                        _isCloudConnected.value = true
-                    }
-                    return@addSnapshotListener
-                }
+        val ref = rtdbCollectionRef(db, collection)
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
                 loadedCollectionsInSession.add(collection)
-
                 val pendingDeleteIds = offlineSyncManager.getPendingDeleteDocIds(collection)
 
-                if (!snapshot.isEmpty) {
+                if (snapshot.exists() && snapshot.childrenCount > 0L) {
                     collectionsWithCloudData.add(collection)
-                    val remoteDocsForPlant = snapshot.documents.filter { doc ->
-                        val rawDocPlant = doc.getString("plantId")
-                        if (isCurrentAuthSuperAdmin() &&
-                            activePlant == PermissionDefaults.DEFAULT_PLANT_ID &&
-                            rawDocPlant.isNullOrBlank() &&
-                            migratedPlantIdKeys.add("$collection|${doc.id}")
-                        ) {
-                            db.collection(collection).document(doc.id)
-                                .set(mapOf("plantId" to activePlant), SetOptions.merge())
-                        }
-                        val docPlant = rawDocPlant?.takeIf { it.isNotBlank() } ?: PermissionDefaults.DEFAULT_PLANT_ID
-                        docPlant == activePlant
-                    }
-                    val remoteItems = remoteDocsForPlant.mapNotNull { doc ->
-                        rememberDocAccessMetadata(collection, doc)
-                        val remoteTs = doc.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
-                        val itemId = doc.id
-                        if (itemId in pendingDeleteIds) {
+                    val remoteItems = snapshot.children.mapNotNull { child ->
+                        rememberRtdbAccessMetadata(collection, child)
+                        val remoteTs = RtdbSyncHelper.extractUpdatedAtMillis(child)
+                        val itemId = child.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                            ?: child.key.orEmpty()
+                        if (itemId.isBlank() || itemId in pendingDeleteIds) {
                             return@mapNotNull null
                         }
                         if (offlineSyncManager.hasPendingOrFailedMutation(collection, itemId)) {
@@ -5912,11 +5882,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             }
                             return@mapNotNull null
                         }
-                        FirestoreSyncHelper.fromFirestoreDocument(doc, clazz) ?: try {
-                            doc.toObject(clazz)
-                        } catch (_: Exception) {
-                            null
-                        }
+                        RtdbSyncHelper.fromDataSnapshot(child, clazz)
                     }
 
                     // Keep locally queued pending items (excluding pending deletes) from being wiped before flush
@@ -5941,7 +5907,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     if (finalList.isNotEmpty() || allowEmptyOverwriteAfterLoad) {
                         onApplyList(finalList)
                     }
-                } else if (cloudSeedChecked && !snapshot.metadata.isFromCache) {
+                } else if (cloudSeedChecked) {
                     val localPendingOnly = currentLocalProvider().filter {
                         val id = idExtractor(it)
                         id.isNotBlank() &&
@@ -5955,19 +5921,33 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     }
                 }
 
-                if (markConnectedOnSuccess || !snapshot.metadata.isFromCache) {
+                if (markConnectedOnSuccess) {
                     _isCloudConnected.value = true
                     val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-                    _syncStatus.value = "Cloud Synced at $time"
+                    _syncStatus.value = "Realtime DB Synced at $time"
                 }
             }
-        )
+
+            override fun onCancelled(error: DatabaseError) {
+                val ex = error.toException()
+                handleFirestoreError(ex, OperationType.LIST, collection)
+                if (error.code == DatabaseError.PERMISSION_DENIED) {
+                    if (!_isCloudConnected.value) {
+                        _syncStatus.value = "Permission Denied: Publish RTDB Rules in Firebase Console"
+                    }
+                } else {
+                    _isCloudConnected.value = false
+                    _syncStatus.value = friendlyFirestoreStatusMessage(ex)
+                }
+            }
+        }
+        registerRtdbListener(ref, listener)
     }
 
     fun startFirestoreSync(forceRestart: Boolean = false) {
-        val db = firestore ?: run {
+        val db = rtdb ?: run {
             _isCloudConnected.value = false
-            _syncStatus.value = "Firestore Not Configured"
+            _syncStatus.value = "Realtime DB Not Configured"
             return
         }
         val authUser = try { Firebase.auth.currentUser } catch (_: Exception) { null }
@@ -5979,9 +5959,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         val activePlant = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
         val sessionKey = "${authUser.uid}|$activePlant|${_currentUser.value.role.name}|${_currentUser.value.isSuperAdmin}"
-        val hasActiveListeners = synchronized(activeListeners) { activeListeners.isNotEmpty() }
+        val hasActiveListeners = synchronized(activeRtdbListeners) { activeRtdbListeners.isNotEmpty() }
         if (!forceRestart && activeSyncSessionKey == sessionKey && hasActiveListeners) {
-            // Listeners are already live for this exact user/plant/role — avoid tearing down & re-billing initial reads
             triggerQueueFlush(forceIncludeFailed = false)
             checkForAppUpdate(force = false)
             return
@@ -5989,20 +5968,20 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         stopFirestoreSync()
         activeSyncSessionKey = sessionKey
-        _syncStatus.value = "Connecting to Cloud..."
+        _syncStatus.value = "Connecting to Realtime DB..."
 
         syncJob = scope.launch {
             try {
-                // 0. Discover or register workspace owner metadata before reads/writes
+                // 0. Ensure primary plant branch metadata exists
                 ensurePlantWorkspace(db)
 
                 // 1. Flush any changes made offline or before Google Sign-In
                 flushPendingCloudWrites(db)
 
-                // 2. Seed initial persistent data if Cloud Firestore is empty
+                // 2. Seed initial persistent data if Realtime Database is empty
                 seedInitialCloudDataIfEmpty(db)
 
-                // 3. Attach real-time permission-gated snapshot listeners across centralized plant collections
+                // 3. Attach real-time permission-gated ValueEventListeners across centralized plant collections
                 if (hasPermission(AppModule.CUSTOMERS, PermissionAction.VIEW)) {
                     attachCollectionListener(
                         db = db,
@@ -6325,15 +6304,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 }
 
                 if (hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.VIEW)) {
-                    scopedCollectionQuery(db, "staffUsers")?.let { staffQuery ->
-                        registerListener(
-                            staffQuery.addSnapshotListener { snapshot, error ->
-                                if (error != null) {
-                                    handleFirestoreError(error, OperationType.LIST, "staffUsers")
-                                    return@addSnapshotListener
-                                }
-                                if (snapshot != null && !snapshot.isEmpty) {
-                                    val list = snapshot.documents.mapNotNull { doc -> parseUserAccountDoc(doc, "staffUsers") }
+                    val staffRef = rtdbCollectionRef(db, "staffUsers")
+                    registerRtdbListener(
+                        staffRef,
+                        object : ValueEventListener {
+                            override fun onDataChange(snapshot: DataSnapshot) {
+                                if (snapshot.exists() && snapshot.childrenCount > 0L) {
+                                    val list = snapshot.children.mapNotNull { child ->
+                                        parseUserAccountSnapshot(child, "staffUsers")
+                                    }
                                     if (list.isNotEmpty()) {
                                         val merged = mergeAccountsPreservingLocalCredentials(_userAccounts.value, list)
                                         _userAccounts.value = merged
@@ -6341,10 +6320,12 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                     }
                                 }
                             }
-                        )
-                    }
 
-                    // Legacy `users` collection listener removed to cut Spark staff reads in half (`staffUsers` is canonical)
+                            override fun onCancelled(error: DatabaseError) {
+                                handleFirestoreError(error.toException(), OperationType.LIST, "staffUsers")
+                            }
+                        }
+                    )
 
                     attachCollectionListener(
                         db = db,
@@ -6359,11 +6340,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         markConnectedOnSuccess = true
                     )
                 } else {
-                    val authUser = try { Firebase.auth.currentUser } catch (_: Exception) { null }
-                    if (authUser != null) {
-                        val applySelfDoc: (DocumentSnapshot, String) -> Unit = { doc, col ->
-                            if (doc.exists()) {
-                                parseUserAccountDoc(doc, col)?.let { updatedAcc ->
+                    val curAuthUser = try { Firebase.auth.currentUser } catch (_: Exception) { null }
+                    if (curAuthUser != null) {
+                        val applySelfSnap: (DataSnapshot, String) -> Unit = { snap, col ->
+                            if (snap.exists()) {
+                                parseUserAccountSnapshot(snap, col)?.let { updatedAcc ->
                                     val merged = mergeAccountsPreservingLocalCredentials(_userAccounts.value, listOf(updatedAcc))
                                     _userAccounts.value = merged
                                     storage.saveUserAccounts(merged)
@@ -6373,45 +6354,76 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                 }
                             }
                         }
-                        db.collection("staffUsers").document(authUser.uid).addSnapshotListener { doc, error ->
-                            if (error != null) return@addSnapshotListener
-                            if (doc != null) applySelfDoc(doc, "staffUsers")
-                        }.also { registerListener(it) }
-                        val cleanEmail = authUser.email?.trim()?.lowercase().orEmpty()
-                        if (authUser.isEmailVerified && cleanEmail.isNotBlank()) {
-                            db.collection("staffByEmail").document(cleanEmail).addSnapshotListener { doc, error ->
-                                if (error != null) return@addSnapshotListener
-                                if (doc != null) applySelfDoc(doc, "staffByEmail")
-                            }.also { registerListener(it) }
+                        val selfUidRef = db.reference.child("staffUsers").child(RtdbSyncHelper.sanitizeKey(curAuthUser.uid))
+                        registerRtdbListener(
+                            selfUidRef,
+                            object : ValueEventListener {
+                                override fun onDataChange(snapshot: DataSnapshot) = applySelfSnap(snapshot, "staffUsers")
+                                override fun onCancelled(error: DatabaseError) {}
+                            }
+                        )
+                        val cleanEmail = curAuthUser.email?.trim()?.lowercase().orEmpty()
+                        if (curAuthUser.isEmailVerified && cleanEmail.isNotBlank()) {
+                            val selfEmailRef = rtdbDocRef(db, "staffByEmail", cleanEmail)
+                            registerRtdbListener(
+                                selfEmailRef,
+                                object : ValueEventListener {
+                                    override fun onDataChange(snapshot: DataSnapshot) = applySelfSnap(snapshot, "staffByEmail")
+                                    override fun onCancelled(error: DatabaseError) {}
+                                }
+                            )
                         }
                     }
                 }
 
-                scopedCollectionQuery(db, "plants")?.let { plantsQuery ->
-                    registerListener(
-                        plantsQuery.addSnapshotListener { snapshot, error ->
-                            if (error != null) {
-                                handleFirestoreError(error, OperationType.LIST, "plants")
-                                return@addSnapshotListener
-                            }
-                            if (snapshot != null && !snapshot.isEmpty) {
-                                val list = snapshot.documents.mapNotNull { doc ->
-                                    val pid = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
-                                    val pName = doc.getString("plantName")?.takeIf { it.isNotBlank() }
-                                        ?: doc.getString("name")?.takeIf { it.isNotBlank() }
-                                        ?: return@mapNotNull null
-                                    PlantBranch(
-                                        id = pid,
-                                        name = pName,
-                                        city = doc.getString("city") ?: "",
-                                        active = doc.getBoolean("active") ?: true,
-                                        isPrimary = doc.getBoolean("isPrimary") ?: (pid == PermissionDefaults.DEFAULT_PLANT_ID)
-                                    )
-                                }
+                val parsePlantBranch: (DataSnapshot) -> PlantBranch? = { snap ->
+                    val pid = snap.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() } ?: snap.key.orEmpty()
+                    val pName = snap.child("plantName").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                        ?: snap.child("name").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                    if (pid.isBlank() || pName.isNullOrBlank()) {
+                        null
+                    } else {
+                        PlantBranch(
+                            id = pid,
+                            name = pName,
+                            city = snap.child("city").getValue(String::class.java) ?: "",
+                            active = snap.child("active").getValue(Boolean::class.java) ?: true,
+                            isPrimary = snap.child("isPrimary").getValue(Boolean::class.java) ?: (pid == PermissionDefaults.DEFAULT_PLANT_ID)
+                        )
+                    }
+                }
+                if (isCurrentAuthSuperAdmin()) {
+                    registerRtdbListener(
+                        db.reference.child("plants"),
+                        object : ValueEventListener {
+                            override fun onDataChange(snapshot: DataSnapshot) {
+                                val list = snapshot.children.mapNotNull(parsePlantBranch)
                                 if (list.isNotEmpty()) {
                                     _plantBranches.value = list
                                     storage.saveBranches(list)
                                 }
+                            }
+
+                            override fun onCancelled(error: DatabaseError) {
+                                handleFirestoreError(error.toException(), OperationType.LIST, "plants")
+                            }
+                        }
+                    )
+                } else {
+                    registerRtdbListener(
+                        db.reference.child("plants").child(RtdbSyncHelper.sanitizeKey(activePlant)),
+                        object : ValueEventListener {
+                            override fun onDataChange(snapshot: DataSnapshot) {
+                                val branch = parsePlantBranch(snapshot)
+                                if (branch != null) {
+                                    val merged = (_plantBranches.value.filterNot { it.id == branch.id } + branch)
+                                    _plantBranches.value = merged
+                                    storage.saveBranches(merged)
+                                }
+                            }
+
+                            override fun onCancelled(error: DatabaseError) {
+                                handleFirestoreError(error.toException(), OperationType.GET, "plants/$activePlant")
                             }
                         }
                     )
@@ -6420,16 +6432,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 if (hasPermission(AppModule.AUDIT_HISTORY, PermissionAction.VIEW) ||
                     hasPermission(AppModule.REPORTS, PermissionAction.VIEW)
                 ) {
-                    scopedCollectionQuery(db, "auditLogs")?.let { auditQuery ->
-                        registerListener(
-                            auditQuery.addSnapshotListener { snapshot, error ->
-                                if (error != null) {
-                                    handleFirestoreError(error, OperationType.LIST, "auditLogs")
-                                    return@addSnapshotListener
-                                }
-                                if (snapshot != null && !snapshot.isEmpty) {
-                                    val remoteLogs = snapshot.documents.mapNotNull { doc ->
-                                        FirestoreSyncHelper.fromFirestoreDocument(doc, AuditLogEntry::class.java)
+                    val auditQuery = rtdbCollectionRef(db, "auditLogs")
+                        .orderByChild("timestampMillis")
+                        .limitToLast(200)
+                    registerRtdbListener(
+                        auditQuery,
+                        object : ValueEventListener {
+                            override fun onDataChange(snapshot: DataSnapshot) {
+                                if (snapshot.exists() && snapshot.childrenCount > 0L) {
+                                    val remoteLogs = snapshot.children.mapNotNull { child ->
+                                        RtdbSyncHelper.fromDataSnapshot(child, AuditLogEntry::class.java)
                                     }
                                     val merged = (remoteLogs + _auditLogs.value)
                                         .distinctBy { it.id }
@@ -6439,8 +6451,12 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                     storage.saveAuditLogs(merged)
                                 }
                             }
-                        )
-                    }
+
+                            override fun onCancelled(error: DatabaseError) {
+                                handleFirestoreError(error.toException(), OperationType.LIST, "auditLogs")
+                            }
+                        }
+                    )
                 }
 
                 if (hasPermission(AppModule.EXPENSES, PermissionAction.VIEW)) {
@@ -6459,18 +6475,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     )
                 }
 
-                registerListener(
-                    db.collection("appSettings").document(currentAppSettingsDocId()).addSnapshotListener { doc, error ->
-                        if (error != null) {
-                            handleFirestoreError(error, OperationType.GET, "appSettings/${currentAppSettingsDocId()}")
-                            return@addSnapshotListener
+                val settingsRef = rtdbDocRef(db, "appSettings", currentAppSettingsDocId())
+                registerRtdbListener(
+                    settingsRef,
+                    object : ValueEventListener {
+                        override fun onDataChange(snapshot: DataSnapshot) {
+                            if (!snapshot.exists()) return
+                            rememberRtdbAccessMetadata("appSettings", snapshot)
+                            val dark = snapshot.child("isDarkMode").getValue(Boolean::class.java) ?: false
+                            if (_isDarkMode.value != dark) {
+                                _isDarkMode.value = dark
+                                storage.saveDarkMode(dark)
+                            }
                         }
-                        if (doc == null || !doc.exists()) return@addSnapshotListener
-                        rememberDocAccessMetadata("appSettings", doc)
-                        val dark = doc.getBoolean("isDarkMode") ?: false
-                        if (_isDarkMode.value != dark) {
-                            _isDarkMode.value = dark
-                            storage.saveDarkMode(dark)
+
+                        override fun onCancelled(error: DatabaseError) {
+                            handleFirestoreError(error.toException(), OperationType.GET, "appSettings/${currentAppSettingsDocId()}")
                         }
                     }
                 )
@@ -6487,31 +6507,30 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    private suspend fun ensurePlantWorkspace(db: FirebaseFirestore) {
+    private suspend fun ensurePlantWorkspace(db: FirebaseDatabase) {
         val user = try { Firebase.auth.currentUser } catch (_: Exception) { null } ?: return
         val activePlant = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
         val wsKey = "${user.uid}|$activePlant"
         if (workspaceEnsuredKey == wsKey) return
-        val email = user.email?.trim()?.lowercase().orEmpty()
         try {
-            // Ensure primary centralized plant document exists
-            val defaultPlantRef = db.collection("plants").document(PermissionDefaults.DEFAULT_PLANT_ID)
+            // Ensure primary centralized plant node exists in Realtime Database
+            val defaultPlantRef = rtdbDocRef(db, "plants", PermissionDefaults.DEFAULT_PLANT_ID)
             val defaultPlantSnap = defaultPlantRef.get().await()
             if (!defaultPlantSnap.exists() && isCurrentAuthSuperAdmin()) {
-                defaultPlantRef.set(
+                defaultPlantRef.setValue(
                     mapOf(
                         "id" to PermissionDefaults.DEFAULT_PLANT_ID,
                         "plantName" to "Aab-e-Baraan Main Plant",
                         "name" to "Aab-e-Baraan Main Plant",
                         "city" to "Main RO Plant",
                         "active" to true,
-                        "isPrimary" to true
-                    ),
-                    SetOptions.merge()
+                        "isPrimary" to true,
+                        "updatedAt" to ServerValue.TIMESTAMP
+                    )
                 ).await()
             }
 
-            // Bootstrap Admin claim & staffUsers doc via Cloud Functions when primary Google Admin signs in
+            // Optional custom-token admin bootstrap if staffAuthApiClient is configured
             if (isCurrentAuthSuperAdmin() && staffAuthApiClient.isConfigured()) {
                 try {
                     val token = user.getIdToken(false).await()?.token
@@ -6527,39 +6546,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 }
             }
 
-            val wsSnap = scopedCollectionQuery(db, "plantWorkspaces")?.limit(1)?.get()?.await()
-            val existingWs = wsSnap?.documents?.firstOrNull()
-            if (existingWs != null) {
-                rememberDocAccessMetadata("plantWorkspaces", existingWs)
-                workspaceEnsuredKey = wsKey
-                return
+            if (plantOwnerUid.isNullOrBlank()) {
+                plantOwnerUid = user.uid
             }
-            val wsId = "plant_${user.uid}"
-            val wsPayload = buildCloudPayload(
-                collection = "plantWorkspaces",
-                docId = wsId,
-                data = mapOf(
-                    "id" to wsId,
-                    "plantName" to "Aab-e-Baraan RO Plant",
-                    "ownerEmail" to email
-                )
-            ) ?: return
-            db.collection("plantWorkspaces").document(wsId).set(wsPayload, SetOptions.merge()).await()
-            cloudKnownDocKeys.add("plantWorkspaces|$wsId")
-            plantOwnerUid = user.uid
             workspaceEnsuredKey = wsKey
         } catch (e: Exception) {
             Log.w("WaterPlantRepo", "Workspace check notice: ${e.message}")
         }
     }
 
-    private suspend fun flushPendingCloudWrites(db: FirebaseFirestore) {
+    private suspend fun flushPendingCloudWrites(db: FirebaseDatabase) {
         flushOfflineSyncQueue(db, forceIncludeFailed = true)
         pendingSyncItems.clear()
         pendingDeleteKeys.clear()
     }
 
-    suspend fun flushOfflineSyncQueue(db: FirebaseFirestore? = firestore, forceIncludeFailed: Boolean = true) {
+    suspend fun flushOfflineSyncQueue(db: FirebaseDatabase? = rtdb, forceIncludeFailed: Boolean = true) {
         val targetDb = db ?: return
         if (!isFirebaseSignedIn()) return
         flushMutex.withLock {
@@ -6574,8 +6576,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     items.forEach { item ->
                         val snapshotUpdatedAt = offlineSyncManager.markSyncing(item.id)
                         try {
+                            val docRef = rtdbDocRef(targetDb, item.collection, item.docId, item.plantId)
                             if (item.operation == SyncOperationType.DELETE) {
-                                targetDb.collection(item.collection).document(item.docId).delete().await()
+                                docRef.removeValue().await()
+                                if (item.collection == "staffUsers") {
+                                    targetDb.reference.child("staffUsers")
+                                        .child(RtdbSyncHelper.sanitizeKey(item.docId))
+                                        .removeValue()
+                                        .await()
+                                }
                                 pendingDeleteKeys.remove(item.id)
                                 cloudKnownDocKeys.remove(item.id)
                                 lastSyncedPayloadHash.remove(item.id)
@@ -6585,7 +6594,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                 if (rawMap == null) {
                                     offlineSyncManager.markFailed(item.id, "Empty payload JSON", expectedUpdatedAtMillis = snapshotUpdatedAt)
                                 } else {
-                                    val payload = buildCloudPayload(item.collection, item.docId, rawMap, item.plantId)
+                                    val payload = buildRtdbPayload(item.collection, item.docId, rawMap, item.plantId)
                                     if (payload == null) {
                                         offlineSyncManager.markFailed(item.id, "Unauthenticated session", expectedUpdatedAtMillis = snapshotUpdatedAt)
                                     } else {
@@ -6595,31 +6604,41 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                         val extraMap = if (item.extraFieldsJson.isNotBlank()) {
                                             OfflineSyncManager.mapFromPayloadJson(item.extraFieldsJson)
                                         } else null
-                                        val docRef = targetDb.collection(item.collection).document(item.docId)
                                         if (!deltas.isNullOrEmpty()) {
-                                            val updateMap = linkedMapOf<String, Any>()
-                                            deltas.forEach { (field, num) ->
-                                                updateMap[field] = if (num is Double || num is Float) {
-                                                    FieldValue.increment(num.toDouble())
-                                                } else {
-                                                    FieldValue.increment(num.toLong())
-                                                }
+                                            val remoteExists = if (cloudKnownDocKeys.contains(item.id)) {
+                                                true
+                                            } else {
+                                                docRef.child("id").get().await().exists()
                                             }
-                                            extraMap?.forEach { (field, value) ->
-                                                if (value != null) updateMap[field] = value
-                                            }
-                                            updateMap["updatedAt"] = FieldValue.serverTimestamp()
-                                            try {
-                                                docRef.update(updateMap).await()
-                                            } catch (e: FirebaseFirestoreException) {
-                                                if (e.code == FirebaseFirestoreException.Code.NOT_FOUND) {
-                                                    docRef.set(payload, SetOptions.merge()).await()
-                                                } else {
-                                                    throw e
+                                            if (!remoteExists) {
+                                                docRef.setValue(payload).await()
+                                            } else {
+                                                val updateMap = linkedMapOf<String, Any?>()
+                                                deltas.forEach { (field, num) ->
+                                                    val safeField = RtdbSyncHelper.sanitizeKey(field)
+                                                    updateMap[safeField] = if (num is Double || num is Float) {
+                                                        ServerValue.increment(num.toDouble())
+                                                    } else {
+                                                        ServerValue.increment(num.toLong())
+                                                    }
                                                 }
+                                                extraMap?.forEach { (field, value) ->
+                                                    if (value != null) {
+                                                        updateMap[RtdbSyncHelper.sanitizeKey(field)] = value
+                                                    }
+                                                }
+                                                updateMap["updatedAt"] = ServerValue.TIMESTAMP
+                                                updateMap["updatedAtMillis"] = System.currentTimeMillis()
+                                                docRef.updateChildren(updateMap).await()
                                             }
                                         } else {
-                                            docRef.set(payload, SetOptions.merge()).await()
+                                            docRef.setValue(payload).await()
+                                            if (item.collection == "staffUsers") {
+                                                targetDb.reference.child("staffUsers")
+                                                    .child(RtdbSyncHelper.sanitizeKey(item.docId))
+                                                    .setValue(payload)
+                                                    .await()
+                                            }
                                         }
                                         if (deltas.isNullOrEmpty()) {
                                             lastSyncedPayloadHash[item.id] = "${item.plantId}|${item.payloadJson}".hashCode()
@@ -6643,7 +6662,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 val remainingActions = remainingItems.map { it.actionGroupId.ifBlank { it.id } }.distinct().size
                 if (remainingActions == 0) {
                     _isCloudConnected.value = true
-                    _syncStatus.value = "Cloud Synced at $time"
+                    _syncStatus.value = "Realtime DB Synced at $time"
                 } else {
                     val failedActions = remainingItems.filter { it.status == SyncQueueStatus.FAILED }
                         .map { it.actionGroupId.ifBlank { it.id } }.distinct().size
@@ -6659,66 +6678,69 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    private suspend fun seedInitialCloudDataIfEmpty(db: FirebaseFirestore) {
+    private suspend fun seedInitialCloudDataIfEmpty(db: FirebaseDatabase) {
         if (!isFirebaseSignedIn()) return
         if (!isCurrentAuthSuperAdmin() && !hasPermission(AppModule.SETTINGS, PermissionAction.MANAGE)) {
             cloudSeedChecked = true
             _isCloudConnected.value = true
             val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-            _syncStatus.value = "Cloud Synced at $time"
+            _syncStatus.value = "Realtime DB Synced at $time"
             return
         }
         try {
             val sizeSnap = if (hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.VIEW)) {
-                scopedCollectionQuery(db, "bottleSizes")?.limit(1)?.get()?.await()
+                rtdbCollectionRef(db, "bottleSizes").limitToFirst(1).get().await()
             } else null
             val custSnap = if (hasPermission(AppModule.CUSTOMERS, PermissionAction.VIEW)) {
-                scopedCollectionQuery(db, "customers")?.limit(1)?.get()?.await()
+                rtdbCollectionRef(db, "customers").limitToFirst(1).get().await()
             } else null
-            sizeSnap?.documents?.firstOrNull()?.let { rememberDocAccessMetadata("bottleSizes", it) }
-            custSnap?.documents?.firstOrNull()?.let { rememberDocAccessMetadata("customers", it) }
+            sizeSnap?.children?.firstOrNull()?.let { rememberRtdbAccessMetadata("bottleSizes", it) }
+            custSnap?.children?.firstOrNull()?.let { rememberRtdbAccessMetadata("customers", it) }
 
-            val cloudHasSizes = sizeSnap != null && !sizeSnap.isEmpty
-            val cloudHasCustomers = custSnap != null && !custSnap.isEmpty
+            val cloudHasSizes = sizeSnap != null && sizeSnap.exists() && sizeSnap.childrenCount > 0L
+            val cloudHasCustomers = custSnap != null && custSnap.exists() && custSnap.childrenCount > 0L
 
             if (!cloudHasSizes && !cloudHasCustomers && isCurrentAuthSuperAdmin()) {
-                Log.d("WaterPlantRepo", "Seeding initial baseline & local data to Firestore...")
-                _customers.value.forEach { if (it.id.isNotBlank()) syncDocument("customers", it.id, it) }
-                _bottleSizes.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleSizes", it.id, it) }
-                _inventory.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleInventory", it.id, it) }
-                _userAccounts.value.forEach {
-                    if (it.id.isNotBlank()) {
-                        syncStaffAccountDocuments(it)
+                Log.d("WaterPlantRepo", "Seeding initial baseline & local data to Realtime Database...")
+                withSyncAction("Initial Realtime DB Seed") {
+                    _customers.value.forEach { if (it.id.isNotBlank()) syncDocument("customers", it.id, it) }
+                    _bottleSizes.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleSizes", it.id, it) }
+                    _inventory.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleInventory", it.id, it) }
+                    _userAccounts.value.forEach {
+                        if (it.id.isNotBlank()) {
+                            syncStaffAccountDocuments(it)
+                        }
                     }
+                    _deliveries.value.forEach { if (it.id.isNotBlank()) syncDocument("deliveries", it.id, it) }
+                    _invoices.value.forEach { if (it.id.isNotBlank()) syncDocument("invoices", it.id, it) }
+                    _expenses.value.forEach { if (it.id.isNotBlank()) syncDocument("expenses", it.id, it) }
+                    _payments.value.forEach { if (it.id.isNotBlank()) syncDocument("payments", it.id, it) }
+                    _customerRates.value.forEach { if (it.id.isNotBlank()) syncDocument("customerRates", it.id, it) }
+                    _customerAllocations.value.forEach { if (it.id.isNotBlank()) syncDocument("customerBottleAllocations", it.id, it) }
+                    _securityDeposits.value.forEach { if (it.id.isNotBlank()) syncDocument("securityDeposits", it.id, it) }
+                    _bottleMovements.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
+                    _bottlePurchases.value.forEach { if (it.id.isNotBlank()) syncDocument("bottlePurchases", it.id, it) }
+                    _bottleRefills.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleRefills", it.id, it) }
+                    _bottleIssueSales.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleIssueSales", it.id, it) }
+                    _roPlantItems.value.forEach { if (it.id.isNotBlank()) syncDocument("roPlantItems", it.id, it) }
+                    _roTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("roItemTransactions", it.id, it) }
+                    _factoryMaterials.value.forEach { if (it.id.isNotBlank()) syncDocument("factoryMaterials", it.id, it) }
+                    _materialTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
+                    _bottleCostings.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
+                    _monthlyRecurringExpenses.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
+                    _cashClosings.value.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
+                    _expenseCategories.value.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
+                    syncDocument("appSettings", currentAppSettingsDocId(), mapOf("isDarkMode" to _isDarkMode.value))
                 }
-                _deliveries.value.forEach { if (it.id.isNotBlank()) syncDocument("deliveries", it.id, it) }
-                _invoices.value.forEach { if (it.id.isNotBlank()) syncDocument("invoices", it.id, it) }
-                _expenses.value.forEach { if (it.id.isNotBlank()) syncDocument("expenses", it.id, it) }
-                _payments.value.forEach { if (it.id.isNotBlank()) syncDocument("payments", it.id, it) }
-                _customerRates.value.forEach { if (it.id.isNotBlank()) syncDocument("customerRates", it.id, it) }
-                _customerAllocations.value.forEach { if (it.id.isNotBlank()) syncDocument("customerBottleAllocations", it.id, it) }
-                _securityDeposits.value.forEach { if (it.id.isNotBlank()) syncDocument("securityDeposits", it.id, it) }
-                _bottleMovements.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
-                _bottlePurchases.value.forEach { if (it.id.isNotBlank()) syncDocument("bottlePurchases", it.id, it) }
-                _bottleRefills.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleRefills", it.id, it) }
-                _bottleIssueSales.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleIssueSales", it.id, it) }
-                _roPlantItems.value.forEach { if (it.id.isNotBlank()) syncDocument("roPlantItems", it.id, it) }
-                _roTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("roItemTransactions", it.id, it) }
-                _factoryMaterials.value.forEach { if (it.id.isNotBlank()) syncDocument("factoryMaterials", it.id, it) }
-                _materialTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
-                _bottleCostings.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
-                _monthlyRecurringExpenses.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
-                _cashClosings.value.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
-                _expenseCategories.value.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
-                syncDocument("appSettings", currentAppSettingsDocId(), mapOf("isDarkMode" to _isDarkMode.value))
-                Log.d("WaterPlantRepo", "Baseline data seeded to Cloud Firestore successfully.")
+                flushOfflineSyncQueue(db, forceIncludeFailed = false)
+                Log.d("WaterPlantRepo", "Baseline data seeded to Realtime Database successfully.")
             } else {
-                Log.d("WaterPlantRepo", "Cloud Firestore already contains operational data. Syncing updates.")
+                Log.d("WaterPlantRepo", "Realtime Database already contains operational data. Syncing updates.")
             }
             cloudSeedChecked = true
             _isCloudConnected.value = true
             val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-            _syncStatus.value = "Cloud Synced at $time"
+            _syncStatus.value = "Realtime DB Synced at $time"
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.LIST, "customers")
             _isCloudConnected.value = false
@@ -6820,38 +6842,25 @@ class WaterPlantRepository private constructor(private val context: Context) {
         var existingAccount = findAuthorizedLocalAccount(uid, cleanEmail)
 
         if (!isPrimaryAdmin && existingAccount == null) {
-            val db = firestore
+            val db = rtdb
             if (db != null && isFirebaseSignedIn()) {
                 val cloudUsers = mutableListOf<UserAccount>()
                 try {
-                    val emailDoc = db.collection("staffByEmail").document(cleanEmail).get().await()
-                    if (emailDoc.exists()) {
-                        parseUserAccountDoc(emailDoc, "staffByEmail")?.let { cloudUsers.add(it) }
+                    val emailSnap = rtdbDocRef(db, "staffByEmail", cleanEmail).get().await()
+                    if (emailSnap.exists()) {
+                        parseUserAccountSnapshot(emailSnap, "staffByEmail")?.let { cloudUsers.add(it) }
                     }
                 } catch (e: Exception) {
                     Log.w("WaterPlantRepo", "staffByEmail lookup notice: ${e.message}")
                 }
                 if (cloudUsers.isEmpty()) {
                     try {
-                        val uidDoc = db.collection("staffUsers").document(uid).get().await()
-                        if (uidDoc.exists()) {
-                            parseUserAccountDoc(uidDoc, "staffUsers")?.let { cloudUsers.add(it) }
+                        val uidSnap = db.reference.child("staffUsers").child(RtdbSyncHelper.sanitizeKey(uid)).get().await()
+                        if (uidSnap.exists()) {
+                            parseUserAccountSnapshot(uidSnap, "staffUsers")?.let { cloudUsers.add(it) }
                         }
                     } catch (e: Exception) {
                         Log.w("WaterPlantRepo", "staffUsers self lookup notice: ${e.message}")
-                    }
-                }
-                if (cloudUsers.isEmpty() && isPrimaryAdmin) {
-                    try {
-                        scopedCollectionQuery(db, "plantWorkspaces")?.limit(1)?.get()?.await()?.documents?.firstOrNull()?.let {
-                            rememberDocAccessMetadata("plantWorkspaces", it)
-                        }
-                        val staffSnap = db.collection("staffUsers").get().await()
-                        val snap = scopedCollectionQuery(db, "users")?.get()?.await()
-                        cloudUsers.addAll(staffSnap.documents.mapNotNull { parseUserAccountDoc(it, "staffUsers") })
-                        cloudUsers.addAll(snap?.documents?.mapNotNull { parseUserAccountDoc(it, "users") }.orEmpty())
-                    } catch (e: Exception) {
-                        Log.w("WaterPlantRepo", "Cloud staff authorization lookup failed: ${e.message}")
                     }
                 }
                 if (cloudUsers.isNotEmpty()) {
@@ -6951,7 +6960,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     syncDocument("appSettings", currentAppSettingsDocId(), mapOf("isDarkMode" to _isDarkMode.value))
                 }
             }
-            flushOfflineSyncQueue(firestore, forceIncludeFailed = true)
+            flushOfflineSyncQueue(rtdb, forceIncludeFailed = true)
         }
     }
 
@@ -6978,10 +6987,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
             actionTitle = actionCtx?.title.orEmpty()
         )
 
-        val db = firestore
+        val db = rtdb
         if (db == null) {
             _isCloudConnected.value = false
-            _syncStatus.value = "Queued Offline (Firestore unavailable)"
+            _syncStatus.value = "Queued Offline (Realtime DB unavailable)"
             return
         }
         if (!isFirebaseSignedIn()) {
@@ -7024,10 +7033,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
             actionTitle = actionCtx?.title.orEmpty()
         )
 
-        val db = firestore
+        val db = rtdb
         if (db == null) {
             _isCloudConnected.value = false
-            _syncStatus.value = "Queued Offline (Firestore unavailable)"
+            _syncStatus.value = "Queued Offline (Realtime DB unavailable)"
             return
         }
         if (!isFirebaseSignedIn()) {
@@ -7055,7 +7064,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             actionGroupId = actionCtx?.groupId.orEmpty(),
             actionTitle = actionCtx?.title.orEmpty()
         )
-        val db = firestore
+        val db = rtdb
         if (db == null || !isFirebaseSignedIn()) {
             _isCloudConnected.value = false
             if (!isFirebaseSignedIn()) {
@@ -7168,10 +7177,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     append("${snapshot.expenses.size} Exp)")
                 }
 
-                // Sync to Cloud Firestore if authenticated and online
+                // Sync to Firebase Realtime Database if authenticated and online
                 var cloudStatus = "Local Storage Only"
-                val db = firestore
-                if (db != null && isFirebaseSignedIn() && serializedJson.length <= 900_000) {
+                val db = rtdb
+                if (db != null && isFirebaseSignedIn() && serializedJson.length <= 2_000_000) {
                     try {
                         val cloudDoc = mapOf(
                             "backupId" to snapshot.metadata.backupId,
@@ -7184,15 +7193,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             "recordCounts" to snapshot.metadata.recordCounts,
                             "totalRecords" to snapshot.metadata.totalRecords,
                             "checksumSha256" to snapshot.metadata.checksumSha256,
-                            "storageLocation" to "Cloud & Local Storage",
+                            "storageLocation" to "Realtime DB & Local Storage",
                             "notes" to snapshot.metadata.notes,
                             "jsonPayload" to serializedJson
                         )
-                        val securedDoc = buildCloudPayload("backups", snapshot.metadata.backupId, cloudDoc)
+                        val securedDoc = buildRtdbPayload("backups", snapshot.metadata.backupId, cloudDoc)
                         if (securedDoc != null) {
-                            db.collection("backups").document(snapshot.metadata.backupId).set(securedDoc).await()
+                            rtdbDocRef(db, "backups", snapshot.metadata.backupId).setValue(securedDoc).await()
                             cloudKnownDocKeys.add("backups|${snapshot.metadata.backupId}")
-                            cloudStatus = "Cloud & Local Storage"
+                            cloudStatus = "Realtime DB & Local Storage"
                         }
                     } catch (e: Exception) {
                         handleFirestoreError(e, OperationType.WRITE, "backups/${snapshot.metadata.backupId}")
@@ -7200,8 +7209,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     }
                 } else if (!isFirebaseSignedIn()) {
                     cloudStatus = "Local Only (Google Sign-In Required)"
-                } else if (serializedJson.length > 900_000) {
-                    cloudStatus = "Local Only (Exceeds 900KB Cloud Limit)"
+                } else if (serializedJson.length > 2_000_000) {
+                    cloudStatus = "Local Only (Exceeds 2MB Cloud Backup Limit)"
                 }
 
                 val historyRecord = BackupHistoryRecord(
@@ -7275,8 +7284,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 val serializedJson = storage.serializeBackupData(snapshot)
 
                 var cloudStatus = "Local Storage Only"
-                val db = firestore
-                if (db != null && isFirebaseSignedIn() && serializedJson.length <= 900_000) {
+                val db = rtdb
+                if (db != null && isFirebaseSignedIn() && serializedJson.length <= 2_000_000) {
                     try {
                         val cloudDoc = mapOf(
                             "backupId" to snapshot.metadata.backupId,
@@ -7289,15 +7298,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             "recordCounts" to snapshot.metadata.recordCounts,
                             "totalRecords" to snapshot.metadata.totalRecords,
                             "checksumSha256" to snapshot.metadata.checksumSha256,
-                            "storageLocation" to "Cloud & Local Storage",
+                            "storageLocation" to "Realtime DB & Local Storage",
                             "notes" to "Daily automated schedule",
                             "jsonPayload" to serializedJson
                         )
-                        val securedDoc = buildCloudPayload("backups", snapshot.metadata.backupId, cloudDoc)
+                        val securedDoc = buildRtdbPayload("backups", snapshot.metadata.backupId, cloudDoc)
                         if (securedDoc != null) {
-                            db.collection("backups").document(snapshot.metadata.backupId).set(securedDoc).await()
+                            rtdbDocRef(db, "backups", snapshot.metadata.backupId).setValue(securedDoc).await()
                             cloudKnownDocKeys.add("backups|${snapshot.metadata.backupId}")
-                            cloudStatus = "Cloud & Local Storage"
+                            cloudStatus = "Realtime DB & Local Storage"
                         }
                     } catch (e: Exception) {
                         handleFirestoreError(e, OperationType.WRITE, "backups/${snapshot.metadata.backupId}")
@@ -7477,36 +7486,36 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 storage.saveUserAccounts(backupData.userAccounts)
                 storage.saveBottleMovements(backupData.bottleMovements)
 
-                // 4. Synchronize ALL Restored Collections to Cloud Firestore
-                val db = firestore
+                // 4. Synchronize ALL Restored Collections to Firebase Realtime Database
+                val db = rtdb
                 if (db != null) {
                     try {
-                        backupData.customers.forEach { if (it.id.isNotBlank()) syncDocument("customers", it.id, it) }
-                        backupData.deliveries.forEach { if (it.id.isNotBlank()) syncDocument("deliveries", it.id, it) }
-                        backupData.payments.forEach { if (it.id.isNotBlank()) syncDocument("payments", it.id, it) }
-                        backupData.invoices.forEach { if (it.id.isNotBlank()) syncDocument("invoices", it.id, it) }
-                        backupData.expenses.forEach { if (it.id.isNotBlank()) syncDocument("expenses", it.id, it) }
-                        backupData.bottleSizes.forEach { if (it.id.isNotBlank()) syncDocument("bottleSizes", it.id, it) }
-                        backupData.inventory.forEach { if (it.id.isNotBlank()) syncDocument("bottleInventory", it.id, it) }
-                        backupData.bottlePurchases.forEach { if (it.id.isNotBlank()) syncDocument("bottlePurchases", it.id, it) }
-                        backupData.bottleRefills.forEach { if (it.id.isNotBlank()) syncDocument("bottleRefills", it.id, it) }
-                        backupData.bottleIssueSales.forEach { if (it.id.isNotBlank()) syncDocument("bottleIssueSales", it.id, it) }
-                        backupData.roPlantItems.forEach { if (it.id.isNotBlank()) syncDocument("roPlantItems", it.id, it) }
-                        backupData.roTransactions.forEach { if (it.id.isNotBlank()) syncDocument("roItemTransactions", it.id, it) }
-                        backupData.cashClosings.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
-                        backupData.customerAllocations.forEach { if (it.id.isNotBlank()) syncDocument("customerBottleAllocations", it.id, it) }
-                        backupData.customerRates.forEach { if (it.id.isNotBlank()) syncDocument("customerRates", it.id, it) }
-                        backupData.securityDeposits.forEach { if (it.id.isNotBlank()) syncDocument("securityDeposits", it.id, it) }
-                        backupData.expenseCategories.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
-                        backupData.userAccounts.forEach {
-                            if (it.id.isNotBlank()) {
-                                val hashed = stampAccountWithPasswordHash(it, it.password)
-                                val m = userAccountToMap(hashed)
-                                syncDocument("staffUsers", hashed.uid.ifBlank { hashed.id }, m)
-                                syncDocument("users", hashed.id, m)
+                        withSyncAction("Backup Restore Cloud Sync") {
+                            backupData.customers.forEach { if (it.id.isNotBlank()) syncDocument("customers", it.id, it) }
+                            backupData.deliveries.forEach { if (it.id.isNotBlank()) syncDocument("deliveries", it.id, it) }
+                            backupData.payments.forEach { if (it.id.isNotBlank()) syncDocument("payments", it.id, it) }
+                            backupData.invoices.forEach { if (it.id.isNotBlank()) syncDocument("invoices", it.id, it) }
+                            backupData.expenses.forEach { if (it.id.isNotBlank()) syncDocument("expenses", it.id, it) }
+                            backupData.bottleSizes.forEach { if (it.id.isNotBlank()) syncDocument("bottleSizes", it.id, it) }
+                            backupData.inventory.forEach { if (it.id.isNotBlank()) syncDocument("bottleInventory", it.id, it) }
+                            backupData.bottlePurchases.forEach { if (it.id.isNotBlank()) syncDocument("bottlePurchases", it.id, it) }
+                            backupData.bottleRefills.forEach { if (it.id.isNotBlank()) syncDocument("bottleRefills", it.id, it) }
+                            backupData.bottleIssueSales.forEach { if (it.id.isNotBlank()) syncDocument("bottleIssueSales", it.id, it) }
+                            backupData.roPlantItems.forEach { if (it.id.isNotBlank()) syncDocument("roPlantItems", it.id, it) }
+                            backupData.roTransactions.forEach { if (it.id.isNotBlank()) syncDocument("roItemTransactions", it.id, it) }
+                            backupData.cashClosings.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
+                            backupData.customerAllocations.forEach { if (it.id.isNotBlank()) syncDocument("customerBottleAllocations", it.id, it) }
+                            backupData.customerRates.forEach { if (it.id.isNotBlank()) syncDocument("customerRates", it.id, it) }
+                            backupData.securityDeposits.forEach { if (it.id.isNotBlank()) syncDocument("securityDeposits", it.id, it) }
+                            backupData.expenseCategories.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
+                            backupData.userAccounts.forEach {
+                                if (it.id.isNotBlank()) {
+                                    val hashed = stampAccountWithPasswordHash(it, it.password)
+                                    syncStaffAccountDocuments(hashed)
+                                }
                             }
+                            backupData.bottleMovements.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
                         }
-                        backupData.bottleMovements.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
                     } catch (e: Exception) {
                         Log.w("WaterPlantRepo", "Cloud post-restore sync notice: ${e.message}")
                     }
@@ -7555,37 +7564,35 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun fetchCloudBackups(onResult: (List<BackupMetadata>) -> Unit) {
-        val db = firestore
+        val db = rtdb
         if (db == null || !isFirebaseSignedIn()) {
             onResult(emptyList())
             return
         }
 
-        val query = scopedCollectionQuery(db, "backups")
-        if (query == null) {
-            onResult(emptyList())
-            return
-        }
-
-        query.get()
+        rtdbCollectionRef(db, "backups").get()
             .addOnSuccessListener { querySnap ->
-                val list = querySnap.documents.mapNotNull { doc ->
-                    rememberDocAccessMetadata("backups", doc)
+                val list = querySnap.children.mapNotNull { snap ->
+                    rememberRtdbAccessMetadata("backups", snap)
                     try {
-                        val backupId = doc.getString("backupId") ?: doc.id
-                        val createdAt = doc.getString("createdAt") ?: ""
-                        val timestampMs = doc.getLong("timestampMs") ?: 0L
-                        val appVersion = doc.getString("appVersion") ?: "1.0"
-                        val creatorEmail = doc.getString("creatorEmail") ?: ""
-                        val creatorName = doc.getString("creatorName") ?: ""
-                        val bTypeName = doc.getString("backupType") ?: "MANUAL"
+                        val backupId = snap.child("backupId").getValue(String::class.java) ?: snap.key.orEmpty()
+                        val createdAt = snap.child("createdAt").getValue(String::class.java) ?: ""
+                        val timestampMs = (snap.child("timestampMs").value as? Number)?.toLong() ?: 0L
+                        val appVersion = snap.child("appVersion").getValue(String::class.java) ?: "1.0"
+                        val creatorEmail = snap.child("creatorEmail").getValue(String::class.java) ?: ""
+                        val creatorName = snap.child("creatorName").getValue(String::class.java) ?: ""
+                        val bTypeName = snap.child("backupType").getValue(String::class.java) ?: "MANUAL"
                         val bType = try { BackupType.valueOf(bTypeName) } catch (_: Exception) { BackupType.MANUAL }
-                        val totalRecords = doc.getLong("totalRecords")?.toInt() ?: 0
-                        val checksum = doc.getString("checksumSha256") ?: ""
-                        val notes = doc.getString("notes") ?: ""
+                        val totalRecords = (snap.child("totalRecords").value as? Number)?.toInt() ?: 0
+                        val checksum = snap.child("checksumSha256").getValue(String::class.java) ?: ""
+                        val notes = snap.child("notes").getValue(String::class.java) ?: ""
 
-                        @Suppress("UNCHECKED_CAST")
-                        val counts = (doc.get("recordCounts") as? Map<String, Long>)?.mapValues { it.value.toInt() } ?: emptyMap()
+                        val counts = linkedMapOf<String, Int>()
+                        snap.child("recordCounts").children.forEach { c ->
+                            val k = c.key
+                            val v = (c.value as? Number)?.toInt()
+                            if (k != null && v != null) counts[k] = v
+                        }
 
                         BackupMetadata(
                             backupId = backupId,
@@ -7598,10 +7605,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             recordCounts = counts,
                             totalRecords = totalRecords,
                             checksumSha256 = checksum,
-                            storageLocation = "Cloud Firestore",
+                            storageLocation = "Firebase Realtime DB",
                             notes = notes
                         )
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         null
                     }
                 }.sortedByDescending { it.timestampMs }
@@ -7615,15 +7622,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun fetchCloudBackupData(backupId: String, onResult: (PlantBackupData?) -> Unit) {
-        val db = firestore
+        val db = rtdb
         if (db == null) {
             onResult(null)
             return
         }
 
-        db.collection("backups").document(backupId).get()
-            .addOnSuccessListener { doc ->
-                val payload = doc.getString("jsonPayload")
+        rtdbDocRef(db, "backups", backupId).get()
+            .addOnSuccessListener { snap ->
+                val payload = snap.child("jsonPayload").getValue(String::class.java)
                 if (!payload.isNullOrBlank()) {
                     val data = storage.deserializeBackupData(payload)
                     onResult(data)

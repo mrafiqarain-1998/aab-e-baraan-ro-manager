@@ -66,17 +66,19 @@ fun friendlyFirestoreStatusMessage(exception: Throwable): String {
     val msg = (fsEx?.message ?: exception.message ?: "").lowercase()
     return when (fsEx?.code) {
         FirebaseFirestoreException.Code.PERMISSION_DENIED ->
-            "Permission Denied: Sign in with Google / Check Firestore Rules"
+            "Permission Denied: Sign in with Google / Check Database Rules"
         FirebaseFirestoreException.Code.NOT_FOUND ->
-            "Firestore Database Not Found on Firebase Project"
+            "Cloud Database Not Found on Firebase Project"
         FirebaseFirestoreException.Code.UNAVAILABLE ->
             "Offline Mode (Auto-syncs when online)"
         FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED ->
-            "Firestore Daily Quota Exceeded"
+            "Cloud Quota Exceeded"
         else -> when {
-            msg.contains("permission") -> "Permission Denied: Sign in with Google / Check Rules"
-            msg.contains("not_found") || msg.contains("database") -> "Firestore DB Not Found"
-            msg.contains("quota") -> "Firestore Daily Quota Exceeded"
+            msg.contains("permission") -> "Permission Denied: Publish RTDB Rules in Firebase Console"
+            msg.contains("disconnected") || msg.contains("network") || msg.contains("unavailable") ->
+                "Offline Mode (Auto-syncs when online)"
+            msg.contains("not_found") || msg.contains("database") -> "Realtime DB URL Not Found"
+            msg.contains("quota") -> "Cloud Quota Exceeded"
             else -> "Cloud Sync Pending (${fsEx?.code?.name ?: "Offline"})"
         }
     }

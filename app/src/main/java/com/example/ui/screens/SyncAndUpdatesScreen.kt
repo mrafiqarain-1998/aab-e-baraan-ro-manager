@@ -240,7 +240,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                     }
 
                     Text(
-                        text = "Spark Free-Tier Saver Active • 100 MB local cache, smart dedup & 1-read staff rules",
+                        text = "Firebase Realtime DB Active • Unlimited daily reads/writes (10 GB/mo free)",
                         color = WaterSkyLight.copy(alpha = 0.85f),
                         fontSize = 9.5.sp,
                         maxLines = 1,

@@ -563,4 +563,76 @@ class MultiDeviceSyncTest {
         assertNotNull(freshRepo.availableAppUpdate.value)
         assertEquals("mrafiq/aab-e-baraan-app", freshRepo.appReleaseInfo.value?.githubRepo)
     }
+
+    @Test
+    fun `rtdb url config and helper key encoding, rbac maps, and secret stripping are valid`() {
+        val rtdbUrl = context.getString(R.string.firebase_rtdb_url).trim()
+        assertEquals("https://aab-e-baraan-ro-manager-default-rtdb.firebaseio.com", rtdbUrl)
+
+        // Email key must match database.rules.json: auth.token.email.toLowerCase().replace('.', ',')
+        assertEquals(
+            "mrafiqarain1998@gmail,com",
+            com.example.data.RtdbSyncHelper.emailToRtdbKey("  MRafiqArain1998@Gmail.COM ")
+        )
+        assertEquals("doc_a_b_c_d_e", com.example.data.RtdbSyncHelper.sanitizeKey("doc.a#b\$c[d]e"))
+
+        val staff = UserAccount(
+            id = "staff_rtdb_1",
+            uid = "staff_rtdb_1",
+            username = "driver_one",
+            password = "SecretPassword123",
+            passwordHash = "hash_abc",
+            passwordSalt = "salt_xyz",
+            name = "Driver One",
+            role = UserRole.INCHARGE,
+            permissions = mapOf(
+                "DELIVERIES" to listOf("VIEW", "ADD"),
+                "EXPENSES" to listOf("VIEW")
+            ),
+            assignedBranchIds = listOf("plant_default", "plant_north"),
+            defaultBranchId = "plant_default",
+            googleEmail = "driver.one@gmail.com"
+        )
+
+        val permMap = com.example.data.RtdbSyncHelper.permissionsToRtdbMap(staff.permissions)
+        assertEquals(true, permMap["DELIVERIES"]?.get("VIEW"))
+        assertEquals(true, permMap["DELIVERIES"]?.get("ADD"))
+        assertEquals(true, permMap["EXPENSES"]?.get("VIEW"))
+
+        val branchMap = com.example.data.RtdbSyncHelper.assignedBranchesToRtdbMap(staff.assignedBranchIds, "plant_default")
+        assertEquals(true, branchMap["plant_default"])
+        assertEquals(true, branchMap["plant_north"])
+
+        val enriched = com.example.data.RtdbSyncHelper.enrichStaffMapForRtdb(
+            baseMap = mapOf(
+                "id" to staff.id,
+                "username" to staff.username,
+                "password" to "SecretPassword123",
+                "passwordHash" to "hash_abc",
+                "passwordSalt" to "salt_xyz"
+            ),
+            account = staff,
+            plantId = "plant_default"
+        )
+        assertFalse(enriched.containsKey("password"))
+        assertFalse(enriched.containsKey("passwordHash"))
+        assertFalse(enriched.containsKey("passwordSalt"))
+        assertEquals("plant_default", enriched["plantId"])
+        assertNotNull(enriched["permissionsMap"])
+        assertNotNull(enriched["assignedBranchMap"])
+
+        val payload = com.example.data.RtdbSyncHelper.toRtdbPayload(
+            data = Customer(id = "cust_rtdb_1", name = "RTDB Shop", currentBalance = 450.0),
+            ownerId = "uid_admin",
+            memberUids = listOf("uid_admin"),
+            memberEmails = listOf("mrafiqarain1998@gmail.com"),
+            plantId = "plant_default",
+            useServerTimestamp = false
+        )
+        assertEquals("cust_rtdb_1", payload["id"])
+        assertEquals("plant_default", payload["plantId"])
+        assertEquals("uid_admin", payload["ownerId"])
+        assertTrue((payload["updatedAtMillis"] as Number).toLong() > 0L)
+        assertFalse(payload.containsKey("password"))
+    }
 }
