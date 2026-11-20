@@ -1,11 +1,16 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import com.example.util.TransactionNotificationHelper
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -70,6 +75,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        TransactionNotificationHelper.createNotificationChannel(applicationContext)
+        TransactionNotificationHelper.scheduleBackgroundSyncWorker(applicationContext)
 
         setContent {
             val context = LocalContext.current
@@ -174,7 +181,25 @@ fun MainAppScaffold(
         navigateBack()
     }
 
-    LaunchedEffect(currentUser.id) {
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            if (granted) {
+                TransactionNotificationHelper.scheduleBackgroundSyncWorker(context.applicationContext)
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !TransactionNotificationHelper.hasNotificationPermission(context)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    LaunchedEffect(currentUser.id, activePlantId) {
+        viewModel.syncNotificationUserContext()
         val hasEmail = currentUser.email.contains("@")
         val firebaseSignedIn = try {
             com.google.firebase.Firebase.auth.currentUser != null

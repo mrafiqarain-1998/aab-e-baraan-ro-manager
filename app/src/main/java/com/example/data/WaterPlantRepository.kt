@@ -30,6 +30,7 @@ import java.util.*
 import java.util.concurrent.atomic.AtomicLong
 import com.example.data.room.*
 import com.example.util.PasswordHashUtil
+import com.example.util.TransactionNotificationHelper
 
 enum class LoginOutcome {
     SUCCESS,
@@ -263,6 +264,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     private val collectionsWithCloudData = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val migratedPlantIdKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val loadedCollectionsInSession = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val notifiedCollectionsInitialized = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val lastSyncedPayloadHash = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val idSequence = AtomicLong(0L)
     private val mutationLock = Any()
@@ -5007,9 +5009,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val size = _bottleSizes.value.find { it.id == record.bottleSizeId }
             ?: return Pair(false, "Bottle size not found")
 
+        val isMultiUse = size.usageType == BottleUsageType.MULTIPLE_TIME || size.isReturnableBottle
         val totalPieces = record.labelSealTotalPieces.coerceAtLeast(1)
         val calculatedLabelCost = (record.labelSealPacketPrice / totalPieces) * record.labelSealPiecesUsedPerPack
-        val totalCost = record.bottlePurchaseRate +
+        val effectivePurchaseCost = if (isMultiUse) 0.0 else record.bottlePurchaseRate
+        val totalCost = effectivePurchaseCost +
+                record.fillingRate +
+                record.packingRate +
                 calculatedLabelCost +
                 record.cartonPolytheneCost +
                 record.capCost +
@@ -5020,10 +5026,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val profit = record.salePrice - totalCost
 
         val costingId = if (record.id.isNotBlank()) record.id else nextRecordId("cost")
-        return withSyncAction("Bottle Costing • ${size.name}") {
+        return withSyncAction("Bottle Costing • ${size.name} (${record.packingType.shortLabel})") {
             val finalRecord = record.copy(
                 id = costingId,
                 bottleSizeName = size.name,
+                isMultiTimeUse = isMultiUse,
                 labelSealCalculatedCost = calculatedLabelCost,
                 totalCostPerPackOrBottle = totalCost,
                 profitPerPackOrBottle = profit,
@@ -5032,8 +5039,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 timestamp = System.currentTimeMillis()
             )
 
-            // Save in costing list (replace if size already has costing record, or append)
-            val existingIndex = _bottleCostings.value.indexOfFirst { it.bottleSizeId == record.bottleSizeId }
+            // Replace matching entry by ID or (bottleSizeId + packingType) so Single, Packet, and Carton coexist!
+            val existingIndex = _bottleCostings.value.indexOfFirst {
+                it.id == costingId || (it.bottleSizeId == record.bottleSizeId && it.packingType == record.packingType)
+            }
             _bottleCostings.value = if (existingIndex >= 0) {
                 _bottleCostings.value.toMutableList().apply { set(existingIndex, finalRecord) }
             } else {
@@ -5042,19 +5051,25 @@ class WaterPlantRepository private constructor(private val context: Context) {
             storage.saveBottleCostings(_bottleCostings.value)
             syncDocument("bottleCostings", costingId, finalRecord)
 
-            // Also update purchase cost and refill price on bottle size
+            // Keep BottleSize reference rates updated when editing primary Single/default packing
+            val isPrimaryPack = record.packingType == CostingPackingType.SINGLE ||
+                (size.packQuantity > 1 && record.packingType == CostingPackingType.PACKET)
             val updatedSize = size.copy(
-                purchaseCost = record.bottlePurchaseRate,
-                latestPurchaseRate = record.bottlePurchaseRate,
-                refillCost = totalCost,
-                deliveryCost = record.deliveryCost,
-                defaultRefillPrice = record.salePrice
+                purchaseCost = if (record.bottlePurchaseRate > 0.0) record.bottlePurchaseRate else size.purchaseCost,
+                latestPurchaseRate = if (record.bottlePurchaseRate > 0.0) record.bottlePurchaseRate else size.latestPurchaseRate,
+                refillCost = if (isPrimaryPack) totalCost else size.refillCost,
+                deliveryCost = if (isPrimaryPack && record.deliveryCost > 0.0) record.deliveryCost else size.deliveryCost,
+                defaultRefillPrice = if (isPrimaryPack && record.salePrice > 0.0) record.salePrice else size.defaultRefillPrice
             )
             _bottleSizes.value = _bottleSizes.value.map { if (it.id == size.id) updatedSize else it }
             storage.saveBottleSizes(_bottleSizes.value)
             syncDocument("bottleSizes", size.id, updatedSize)
 
-            addNotification("Costing Saved", "Saved costing for ${size.name}: Cost Rs. ${String.format(Locale.ENGLISH, "%.2f", totalCost)}, Profit Rs. ${String.format(Locale.ENGLISH, "%.2f", profit)}.", NotificationSeverity.SUCCESS)
+            addNotification(
+                "Costing Saved",
+                "Saved ${size.name} (${record.packingType.label}): Cost Rs. ${String.format(Locale.ENGLISH, "%.2f", totalCost)}, Profit Rs. ${String.format(Locale.ENGLISH, "%.2f", profit)}.",
+                NotificationSeverity.SUCCESS
+            )
             Pair(true, "Bottle costing saved successfully (لاگت کا تخمینہ محفوظ کر لیا گیا)")
         }
     }
@@ -5096,13 +5111,249 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return Pair(true, "Recurring expense deleted.")
     }
 
+    private fun resolveItemPackingType(item: DeliveryItem): CostingPackingType {
+        val combined = "${item.variantId} ${item.bottleName}".lowercase(Locale.ENGLISH)
+        return when {
+            combined.contains("carton") -> CostingPackingType.CARTON
+            combined.contains("packet") || item.packSize > 1 -> CostingPackingType.PACKET
+            else -> CostingPackingType.SINGLE
+        }
+    }
+
+    /**
+     * Calculates Daily / Weekly / Monthly Profit & Loss Dashboard inside Costing tab:
+     * - Bottle Purchase Cost: INCLUDED ONLY for one-time-use bottles; EXCLUDED (Rs. 0) for multi-time-use returnable bottles.
+     * - Filling & Packing Cost: Calculated per bottle/packet/carton from configured BottleCostingRecord.
+     * - Period Expenses: Includes ONLY OPEX (salary, maintenance, fuel, etc.); strictly EXCLUDES CAPEX.
+     * - Monthly Fixed/Flexible Recurring Costs: Divided by days in month and prorated (x1 Daily, x7 Weekly, full Monthly).
+     */
+    fun getCostingProfitLossReport(
+        period: CostingReportPeriod,
+        referenceDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    ): CostingProfitLossReport {
+        if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.VIEW)) {
+            return CostingProfitLossReport(period = period)
+        }
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val parsedRef = try {
+            sdf.parse(referenceDate) ?: Date()
+        } catch (_: Exception) {
+            Date()
+        }
+        val cal = Calendar.getInstance().apply { time = parsedRef }
+        val refYear = cal.get(Calendar.YEAR)
+        val refMonthZeroBased = cal.get(Calendar.MONTH)
+        val monthKey = String.format(Locale.US, "%04d-%02d", refYear, refMonthZeroBased + 1)
+        val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH).coerceAtLeast(28)
+
+        val startDate: String
+        val endDate: String
+        val daysInPeriod: Int
+        val periodLabel: String
+
+        when (period) {
+            CostingReportPeriod.DAILY -> {
+                val d = sdf.format(cal.time)
+                startDate = d
+                endDate = d
+                daysInPeriod = 1
+                periodLabel = "Daily • $d"
+            }
+            CostingReportPeriod.WEEKLY -> {
+                endDate = sdf.format(cal.time)
+                val startCal = (cal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -6) }
+                startDate = sdf.format(startCal.time)
+                daysInPeriod = 7
+                periodLabel = "Weekly • $startDate to $endDate"
+            }
+            CostingReportPeriod.MONTHLY -> {
+                startDate = "$monthKey-01"
+                endDate = String.format(Locale.US, "%s-%02d", monthKey, daysInMonth)
+                daysInPeriod = daysInMonth
+                periodLabel = "Monthly • $monthKey ($daysInMonth days)"
+            }
+        }
+
+        val sizesById = _bottleSizes.value.associateBy { it.id }
+        val costings = _bottleCostings.value
+
+        val periodDeliveries = _deliveries.value.filter {
+            it.status != DeliveryStatus.CANCELLED &&
+                it.date.isNotBlank() &&
+                it.date >= startDate &&
+                it.date <= endDate
+        }
+
+        var totalUnitsSold = 0
+        var totalSalesRevenue = 0.0
+        var totalSingleUsePurchase = 0.0
+        var totalFilling = 0.0
+        var totalPacking = 0.0
+        var totalOtherUnitCost = 0.0
+
+        data class MutableLineAcc(
+            val bottleSizeId: String,
+            val bottleName: String,
+            val packingType: CostingPackingType,
+            val isMultiTimeUse: Boolean,
+            var unitsSold: Int = 0,
+            var totalBottlesSold: Int = 0,
+            var revenue: Double = 0.0,
+            var purchaseCostTotal: Double = 0.0,
+            var fillingCostTotal: Double = 0.0,
+            var packingCostTotal: Double = 0.0,
+            var otherUnitCostTotal: Double = 0.0,
+            var hasConfiguredCosting: Boolean = true
+        )
+
+        val lineMap = linkedMapOf<String, MutableLineAcc>()
+
+        periodDeliveries.forEach { delivery ->
+            if (delivery.items.isEmpty()) {
+                totalSalesRevenue += delivery.totalAmount
+            } else {
+                var deliveryItemsRevenue = 0.0
+                delivery.items.forEach { item ->
+                    if (item.quantity <= 0) return@forEach
+                    val packingType = resolveItemPackingType(item)
+                    val size = sizesById[item.bottleSizeId]
+                    val isMultiUse = size?.let {
+                        it.usageType == BottleUsageType.MULTIPLE_TIME || it.isReturnableBottle
+                    } ?: false
+
+                    val matchedCosting = costings.find {
+                        it.bottleSizeId == item.bottleSizeId && it.packingType == packingType
+                    } ?: costings.find { it.bottleSizeId == item.bottleSizeId }
+
+                    val hasCosting = matchedCosting != null
+                    val unitPurchase = if (isMultiUse) {
+                        0.0
+                    } else {
+                        matchedCosting?.bottlePurchaseRate ?: 0.0
+                    }
+                    val unitFilling = matchedCosting?.fillingRate ?: (size?.refillCost ?: 0.0)
+                    val unitPacking = matchedCosting?.packingRate ?: 0.0
+                    val unitOther = matchedCosting?.extraComponentCost ?: 0.0
+
+                    val qty = item.quantity
+                    val lineRev = if (item.lineTotal > 0.0) item.lineTotal else (qty * item.unitPrice)
+                    val linePurchase = unitPurchase * qty
+                    val lineFilling = unitFilling * qty
+                    val linePacking = unitPacking * qty
+                    val lineOther = unitOther * qty
+
+                    deliveryItemsRevenue += lineRev
+                    totalUnitsSold += qty
+                    totalSingleUsePurchase += linePurchase
+                    totalFilling += lineFilling
+                    totalPacking += linePacking
+                    totalOtherUnitCost += lineOther
+
+                    val groupKey = "${item.bottleSizeId}__${packingType.name}"
+                    val displayName = item.bottleName.ifBlank { size?.name ?: item.bottleSizeId }
+                    val acc = lineMap.getOrPut(groupKey) {
+                        MutableLineAcc(
+                            bottleSizeId = item.bottleSizeId,
+                            bottleName = displayName,
+                            packingType = packingType,
+                            isMultiTimeUse = isMultiUse,
+                            hasConfiguredCosting = hasCosting
+                        )
+                    }
+                    acc.unitsSold += qty
+                    acc.totalBottlesSold += qty * item.packSize.coerceAtLeast(1)
+                    acc.revenue += lineRev
+                    acc.purchaseCostTotal += linePurchase
+                    acc.fillingCostTotal += lineFilling
+                    acc.packingCostTotal += linePacking
+                    acc.otherUnitCostTotal += lineOther
+                    if (!hasCosting) acc.hasConfiguredCosting = false
+                }
+                // Include delivery charges if billed on top of items
+                val extraCharges = (delivery.totalAmount - deliveryItemsRevenue).coerceAtLeast(0.0)
+                totalSalesRevenue += deliveryItemsRevenue + extraCharges
+            }
+        }
+
+        val breakdownLines = lineMap.values.map { acc ->
+            val prodCost = acc.purchaseCostTotal + acc.fillingCostTotal + acc.packingCostTotal + acc.otherUnitCostTotal
+            BottleSaleCostLine(
+                bottleSizeId = acc.bottleSizeId,
+                bottleName = acc.bottleName,
+                packingType = acc.packingType,
+                isMultiTimeUse = acc.isMultiTimeUse,
+                unitsSold = acc.unitsSold,
+                totalBottlesSold = acc.totalBottlesSold,
+                revenue = acc.revenue,
+                purchaseCostTotal = acc.purchaseCostTotal,
+                fillingCostTotal = acc.fillingCostTotal,
+                packingCostTotal = acc.packingCostTotal,
+                otherUnitCostTotal = acc.otherUnitCostTotal,
+                totalProductionCost = prodCost,
+                grossMargin = acc.revenue - prodCost,
+                hasConfiguredCosting = acc.hasConfiguredCosting
+            )
+        }.sortedByDescending { it.revenue }
+
+        // Expenses in period: OPEX included, CAPEX strictly excluded!
+        val periodExpenses = _expenses.value.filter {
+            it.date.isNotBlank() && it.date >= startDate && it.date <= endDate
+        }
+        val opexExpenses = periodExpenses
+            .filter { it.expenseType == ExpenseType.OPEX }
+            .sumOf { it.amount }
+        val excludedCapex = periodExpenses
+            .filter { it.expenseType == ExpenseType.CAPEX }
+            .sumOf { it.amount }
+
+        // Monthly fixed / flexible recurring expenses divided per day
+        val monthlyRecurringTotal = _monthlyRecurringExpenses.value
+            .filter { it.month == monthKey || it.date.startsWith(monthKey) }
+            .sumOf { it.amount }
+        val dailyFixedRate = monthlyRecurringTotal / daysInMonth.toDouble()
+        val proratedFixed = when (period) {
+            CostingReportPeriod.DAILY -> dailyFixedRate
+            CostingReportPeriod.WEEKLY -> dailyFixedRate * 7.0
+            CostingReportPeriod.MONTHLY -> monthlyRecurringTotal
+        }
+
+        val totalBottleAndPacking = totalSingleUsePurchase + totalFilling + totalPacking + totalOtherUnitCost
+        val totalCost = totalBottleAndPacking + opexExpenses + proratedFixed
+        val netProfitOrLoss = totalSalesRevenue - totalCost
+
+        return CostingProfitLossReport(
+            period = period,
+            periodLabel = periodLabel,
+            startDate = startDate,
+            endDate = endDate,
+            daysInPeriod = daysInPeriod,
+            daysInReferenceMonth = daysInMonth,
+            totalDeliveries = periodDeliveries.size,
+            totalUnitsSold = totalUnitsSold,
+            totalSalesRevenue = totalSalesRevenue,
+            singleUsePurchaseCost = totalSingleUsePurchase,
+            fillingCost = totalFilling,
+            packingCost = totalPacking,
+            otherBottleUnitCost = totalOtherUnitCost,
+            totalBottleAndPackingCost = totalBottleAndPacking,
+            opexExpenses = opexExpenses,
+            excludedCapexExpenses = excludedCapex,
+            monthlyRecurringTotal = monthlyRecurringTotal,
+            dailyFixedCostRate = dailyFixedRate,
+            proratedMonthlyFixedCost = proratedFixed,
+            totalCost = totalCost,
+            netProfitOrLoss = netProfitOrLoss,
+            bottleBreakdown = breakdownLines
+        )
+    }
+
     fun getMonthlyFinancialSummary(month: String): MonthlyFinancialSummary {
         if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.VIEW)) {
             return MonthlyFinancialSummary(month = month)
         }
         val targetMonth = month.ifBlank { SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date()) }
 
-        val monthDeliveries = _deliveries.value.filter { it.date.startsWith(targetMonth) }
+        val monthDeliveries = _deliveries.value.filter { it.status != DeliveryStatus.CANCELLED && it.date.startsWith(targetMonth) }
         val totalDeliveries = monthDeliveries.size
         val totalSalesAmount = monthDeliveries.sumOf { it.totalAmount }
 
@@ -5111,7 +5362,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         val outstandingSales = (totalSalesAmount - receivedPayments).coerceAtLeast(0.0)
 
-        val monthExpenses = _expenses.value.filter { it.date.startsWith(targetMonth) }
+        // Exclude CAPEX from monthly operational expenses summary
+        val monthExpenses = _expenses.value.filter {
+            it.date.startsWith(targetMonth) && it.expenseType == ExpenseType.OPEX
+        }
         val operationalExpenses = monthExpenses.sumOf { it.amount }
 
         val recurringCosts = _monthlyRecurringExpenses.value
@@ -5743,16 +5997,38 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return true
     }
 
-    // Cash Closing
+    // Cash Closing: Deducts ONLY OPEX expenses paid from Sale (excludes CAPEX & Investment Account)
     fun getDailyCashSummary(date: String): CashClosingSummary {
-        val cashCollected = _payments.value
-            .filter { it.date == date && it.paymentMethod.isCash }
+        val dayPayments = _payments.value.filter { it.date == date }
+        val cashCollected = dayPayments
+            .filter { it.paymentMethod.isCash }
             .sumOf { it.amount }
+        val digitalCollected = dayPayments
+            .filter { !it.paymentMethod.isCash && it.paymentMethod != PaymentMethod.ADVANCE_ADJUSTMENT }
+            .sumOf { it.amount }
+        val totalReceived = cashCollected + digitalCollected
 
         val otherCashIncome = 0.0
 
-        val cashExpenses = _expenses.value
-            .filter { it.date == date && it.paymentMethod.isCash && it.paymentSource == PaymentSource.PAY_FROM_SALE }
+        val dayExpenses = _expenses.value.filter { it.date == date }
+        val cashExpenses = dayExpenses
+            .filter {
+                it.expenseType == ExpenseType.OPEX &&
+                    it.paymentSource == PaymentSource.PAY_FROM_SALE &&
+                    it.paymentMethod.isCash
+            }
+            .sumOf { it.amount }
+        val opexFromSaleExpenses = dayExpenses
+            .filter {
+                it.expenseType == ExpenseType.OPEX &&
+                    it.paymentSource == PaymentSource.PAY_FROM_SALE
+            }
+            .sumOf { it.amount }
+        val excludedCapex = dayExpenses
+            .filter { it.expenseType == ExpenseType.CAPEX }
+            .sumOf { it.amount }
+        val excludedInvestment = dayExpenses
+            .filter { it.expenseType == ExpenseType.OPEX && it.paymentSource != PaymentSource.PAY_FROM_SALE }
             .sumOf { it.amount }
 
         val cashRefunds = 0.0
@@ -5762,15 +6038,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
             .maxByOrNull { it.date }
         val openingCash = previousClosing?.actualClosingCash ?: 0.0
 
+        val dailyNetReceived = totalReceived - opexFromSaleExpenses
         val expected = openingCash + cashCollected + otherCashIncome - cashExpenses - cashRefunds
 
         return CashClosingSummary(
             date = date,
             openingCash = openingCash,
             customerCashCollected = cashCollected,
+            digitalCollected = digitalCollected,
+            totalReceivedAmount = totalReceived,
             otherCashIncome = otherCashIncome,
             cashExpenses = cashExpenses,
+            opexFromSaleExpenses = opexFromSaleExpenses,
+            excludedCapexExpenses = excludedCapex,
+            excludedInvestmentExpenses = excludedInvestment,
             cashRefunds = cashRefunds,
+            dailyNetReceivedAfterOpex = dailyNetReceived,
             expectedClosingCash = expected
         )
     }
@@ -6169,6 +6452,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         activeSyncSessionKey = null
         workspaceEnsuredKey = null
         loadedCollectionsInSession.clear()
+        notifiedCollectionsInitialized.clear()
         synchronized(activeRtdbListeners) {
             activeRtdbListeners.forEach { (query, listener) ->
                 try {
@@ -6178,6 +6462,23 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
             activeRtdbListeners.clear()
         }
+    }
+
+    fun syncNotificationUserContext() {
+        val user = _currentUser.value
+        val authUid = try { Firebase.auth.currentUser?.uid.orEmpty() } catch (_: Exception) { "" }
+        val actorId = listOf(authUid, user.id, user.username)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString("|")
+        TransactionNotificationHelper.updateActiveUserContext(
+            context = context.applicationContext,
+            plantId = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID },
+            actorUid = actorId,
+            actorName = user.name,
+            actorEmail = user.email
+        )
+        TransactionNotificationHelper.scheduleBackgroundSyncWorker(context.applicationContext)
     }
 
     private fun registerRtdbListener(query: RtdbQuery, listener: ValueEventListener) {
@@ -6333,6 +6634,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         stopFirestoreSync()
         activeSyncSessionKey = sessionKey
+        syncNotificationUserContext()
         _syncStatus.value = "Connecting to Realtime DB..."
 
         // Live Firebase Realtime DB socket presence listener (.info/connected)
@@ -6385,6 +6687,28 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _customers.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
+                            val previousIds = _customers.value.map { it.id }.toSet()
+                            val alreadyInit = !notifiedCollectionsInitialized.add("customers")
+                            if (alreadyInit) {
+                                list.filter { it.id.isNotBlank() && it.id !in previousIds }.forEach { cust ->
+                                    val byLabel = if (cust.createdBy.isNotBlank()) " • By ${cust.createdBy}" else ""
+                                    val areaPart = if (cust.area.isNotBlank()) " • ${cust.area}" else ""
+                                    TransactionNotificationHelper.notifyIfNewRemoteTransaction(
+                                        context = context.applicationContext,
+                                        type = "customer",
+                                        recordId = cust.id,
+                                        title = "New Customer Added",
+                                        body = "${cust.name}$areaPart$byLabel",
+                                        createdByUid = cust.createdByUid,
+                                        createdByName = cust.createdBy,
+                                        createdAt = cust.createdAt
+                                    )
+                                }
+                            } else {
+                                list.forEach { cust ->
+                                    TransactionNotificationHelper.markAlreadyNotified(context.applicationContext, "customer", cust.id, cust.createdAt)
+                                }
+                            }
                             _customers.value = list
                             storage.saveCustomers(list)
                         },
@@ -6400,6 +6724,28 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _deliveries.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
+                            val previousIds = _deliveries.value.map { it.id }.toSet()
+                            val alreadyInit = !notifiedCollectionsInitialized.add("deliveries")
+                            if (alreadyInit) {
+                                list.filter { it.id.isNotBlank() && it.id !in previousIds }.forEach { del ->
+                                    val actor = del.createdBy.ifBlank { del.staffName }
+                                    val byLabel = if (actor.isNotBlank()) " • By $actor" else ""
+                                    TransactionNotificationHelper.notifyIfNewRemoteTransaction(
+                                        context = context.applicationContext,
+                                        type = "delivery",
+                                        recordId = del.id,
+                                        title = "New Delivery • ${del.customerName}",
+                                        body = "Rs. ${del.totalAmount.toInt()} (${del.totalFullDelivered} bottles)$byLabel",
+                                        createdByUid = del.createdByUid,
+                                        createdByName = actor,
+                                        createdAt = del.createdAt
+                                    )
+                                }
+                            } else {
+                                list.forEach { del ->
+                                    TransactionNotificationHelper.markAlreadyNotified(context.applicationContext, "delivery", del.id, del.createdAt)
+                                }
+                            }
                             _deliveries.value = list
                             storage.saveDeliveries(list)
                         },
@@ -6415,6 +6761,27 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _payments.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
+                            val previousIds = _payments.value.map { it.id }.toSet()
+                            val alreadyInit = !notifiedCollectionsInitialized.add("payments")
+                            if (alreadyInit) {
+                                list.filter { it.id.isNotBlank() && it.id !in previousIds }.forEach { pay ->
+                                    val byLabel = if (pay.receivedBy.isNotBlank()) " • By ${pay.receivedBy}" else ""
+                                    TransactionNotificationHelper.notifyIfNewRemoteTransaction(
+                                        context = context.applicationContext,
+                                        type = "payment",
+                                        recordId = pay.id,
+                                        title = "Payment Received • ${pay.customerName}",
+                                        body = "Rs. ${pay.amount.toInt()} (${pay.paymentMethod.label})$byLabel",
+                                        createdByUid = pay.createdByUid,
+                                        createdByName = pay.receivedBy,
+                                        createdAt = pay.createdAt
+                                    )
+                                }
+                            } else {
+                                list.forEach { pay ->
+                                    TransactionNotificationHelper.markAlreadyNotified(context.applicationContext, "payment", pay.id, pay.createdAt)
+                                }
+                            }
                             _payments.value = list
                             storage.savePayments(list)
                         },
@@ -6447,6 +6814,28 @@ class WaterPlantRepository private constructor(private val context: Context) {
                         currentLocalProvider = { _expenses.value },
                         idExtractor = { it.id },
                         onApplyList = { list ->
+                            val previousIds = _expenses.value.map { it.id }.toSet()
+                            val alreadyInit = !notifiedCollectionsInitialized.add("expenses")
+                            if (alreadyInit) {
+                                list.filter { it.id.isNotBlank() && it.id !in previousIds }.forEach { exp ->
+                                    val byLabel = if (exp.enteredBy.isNotBlank()) " • By ${exp.enteredBy}" else ""
+                                    val descPart = if (exp.description.isNotBlank()) " (${exp.description})" else ""
+                                    TransactionNotificationHelper.notifyIfNewRemoteTransaction(
+                                        context = context.applicationContext,
+                                        type = "expense",
+                                        recordId = exp.id,
+                                        title = "New Expense • ${exp.categoryName}",
+                                        body = "Rs. ${exp.amount.toInt()}$descPart$byLabel",
+                                        createdByUid = exp.createdByUid,
+                                        createdByName = exp.enteredBy,
+                                        createdAt = exp.createdAt
+                                    )
+                                }
+                            } else {
+                                list.forEach { exp ->
+                                    TransactionNotificationHelper.markAlreadyNotified(context.applicationContext, "expense", exp.id, exp.createdAt)
+                                }
+                            }
                             _expenses.value = list
                             storage.saveExpenses(list)
                         },

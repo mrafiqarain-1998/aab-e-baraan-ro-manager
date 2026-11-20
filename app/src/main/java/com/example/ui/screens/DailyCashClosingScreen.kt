@@ -99,10 +99,133 @@ fun DailyCashClosingScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "Formula: Expected = Opening + Cash Collected - Cash Expenses",
-                        color = WaterSkyLight.copy(alpha = 0.8f),
+                        text = "Formula: Daily Net = Daily Received − OPEX Expenses (Pay from Sale only)",
+                        color = WaterSkyLight.copy(alpha = 0.9f),
                         fontSize = 10.sp
                     )
+                }
+            }
+        }
+
+        // 1.5 Daily Received vs OPEX (From Sale) Net Summary Card
+        item {
+            val isDailyPositive = cashSummary.dailyNetReceivedAfterOpex >= 0.0
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Daily Received vs OPEX (From Sale)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = WaterNavyPrimary
+                            )
+                            Text(
+                                text = "روزانہ وصولی منفی صرف آپریٹنگ (سیل سے) اخراجات",
+                                fontSize = 9.5.sp,
+                                color = TextSecondaryDark
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = WaterSkyLight
+                        ) {
+                            Text(
+                                text = "OPEX • SALE ONLY",
+                                fontSize = 8.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = WaterNavyPrimary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    CalculationRow(
+                        label = "Daily Received Amount (آج کی کل وصولی)",
+                        amount = cashSummary.totalReceivedAmount,
+                        isPositive = true,
+                        icon = Icons.Default.Payments,
+                        color = SuccessGreen
+                    )
+
+                    if (cashSummary.digitalCollected > 0.0) {
+                        Text(
+                            text = "   Cash: Rs. ${cashSummary.customerCashCollected.toInt()}  •  Online/Bank: Rs. ${cashSummary.digitalCollected.toInt()}",
+                            fontSize = 9.5.sp,
+                            color = TextMuted
+                        )
+                    }
+
+                    CalculationRow(
+                        label = "- Daily Expenses (OPEX • From Sale Only)",
+                        amount = cashSummary.opexFromSaleExpenses,
+                        isPositive = false,
+                        icon = Icons.Default.RemoveCircle,
+                        color = ErrorRed
+                    )
+
+                    if (cashSummary.excludedCapexExpenses > 0.0 || cashSummary.excludedInvestmentExpenses > 0.0) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFF8FAFC),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val parts = buildList {
+                                if (cashSummary.excludedCapexExpenses > 0.0) {
+                                    add("CAPEX: Rs. ${cashSummary.excludedCapexExpenses.toInt()}")
+                                }
+                                if (cashSummary.excludedInvestmentExpenses > 0.0) {
+                                    add("Investment: Rs. ${cashSummary.excludedInvestmentExpenses.toInt()}")
+                                }
+                            }.joinToString(" • ")
+                            Text(
+                                text = "Excluded from Daily Closing: $parts",
+                                fontSize = 9.5.sp,
+                                color = TextMuted,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Net Daily Balance (Received − Expense)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = WaterNavyPrimary
+                            )
+                            Text(
+                                text = "آج کی خالص بچت (وصولی منفی OPEX سیل خرچ)",
+                                fontSize = 9.5.sp,
+                                color = TextSecondaryDark
+                            )
+                        }
+                        Text(
+                            text = "${if (isDailyPositive) "" else "-"}Rs. ${kotlin.math.abs(cashSummary.dailyNetReceivedAfterOpex).toInt()}",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.5.sp,
+                            color = if (isDailyPositive) SuccessGreen else ErrorRed
+                        )
+                    }
                 }
             }
         }
@@ -117,7 +240,7 @@ fun DailyCashClosingScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Cash Calculation (حساب کی تفصیل)",
+                        text = "Cash Drawer Closing (دراز کیش حساب)",
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp,
                         color = WaterNavyPrimary
@@ -140,7 +263,7 @@ fun DailyCashClosingScreen(
                     )
 
                     CalculationRow(
-                        label = "- Cash Expenses (روزمرہ نقد خرچ)",
+                        label = "- Cash OPEX Expenses (From Sale Only)",
                         amount = cashSummary.cashExpenses,
                         isPositive = false,
                         icon = Icons.Default.RemoveCircle,
@@ -162,7 +285,7 @@ fun DailyCashClosingScreen(
                                 color = WaterNavyPrimary
                             )
                             Text(
-                                text = "حساب کے مطابق کیش ہونا چاہیے",
+                                text = "حساب کے مطابق دراز میں کیش ہونا چاہیے",
                                 fontSize = 10.sp,
                                 color = TextSecondaryDark
                             )

@@ -1496,6 +1496,17 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     fun getMonthlyFinancialSummary(month: String): MonthlyFinancialSummary {
         return repository.getMonthlyFinancialSummary(month)
     }
+
+    fun getCostingProfitLossReport(
+        period: CostingReportPeriod,
+        referenceDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    ): CostingProfitLossReport {
+        return repository.getCostingProfitLossReport(period, referenceDate)
+    }
+
+    fun syncNotificationUserContext() {
+        repository.syncNotificationUserContext()
+    }
 }
 
 data class DashboardStats(

@@ -800,8 +800,10 @@ class WaterPlantBusinessLogicTest {
         val saleExp = repository.expenses.value.first()
         assertEquals(2500.0, saleExp.amount, 0.01)
         assertEquals(PaymentSource.PAY_FROM_SALE, saleExp.paymentSource)
-        // Daily Cash Drawer deducts Cash + PAY_FROM_SALE expenses
-        assertEquals(baselineDrawer.cashExpenses + 2500.0, repository.getDailyCashSummary(testDate).cashExpenses, 0.01)
+        // Daily Cash Closing deducts ONLY OPEX + PAY_FROM_SALE expenses (CAPEX bottle purchase is excluded!)
+        assertEquals(ExpenseType.CAPEX, saleExp.expenseType)
+        assertEquals(baselineDrawer.cashExpenses, repository.getDailyCashSummary(testDate).cashExpenses, 0.01)
+        assertEquals(baselineDrawer.excludedCapexExpenses + 7500.0, repository.getDailyCashSummary(testDate).excludedCapexExpenses, 0.01)
 
         // Single-use Add Stock must ALSO increase Plant Empty (not Plant Full)
         val singleSize = repository.bottleSizes.value.first { it.usageType == BottleUsageType.ONE_TIME }
@@ -2337,5 +2339,229 @@ class WaterPlantBusinessLogicTest {
         assertFalse("Completed customer profile must NOT show missing details indicator", completed.hasMissingDetails)
         assertTrue(completed.missingDetailLabels().isEmpty())
     }
+
+    @Test
+    fun testCostingProfitLossDashboardDailyWeeklyMonthlyRules() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val testDate = "2026-11-15" // November 2026 has exactly 30 days
+        val testMonth = "2026-11"
+
+        // 1. Configure Multi-Time Use 19L bottle (Purchase = 800 MUST BE EXCLUDED in P&L)
+        val save19L = repository.saveBottleCosting(
+            BottleCostingRecord(
+                bottleSizeId = "size_19l",
+                packingType = CostingPackingType.SINGLE,
+                bottlePurchaseRate = 800.0,
+                fillingRate = 20.0,
+                packingRate = 5.0,
+                packQty = 1,
+                salePrice = 120.0,
+                date = testDate
+            )
+        )
+        assertTrue(save19L.first)
+
+        // 2. Configure One-Time Use 500ml Packet AND 500ml Carton side-by-side (both must coexist!)
+        val singleSize = repository.bottleSizes.value.first { it.usageType == BottleUsageType.ONE_TIME }
+        val savePacket = repository.saveBottleCosting(
+            BottleCostingRecord(
+                bottleSizeId = singleSize.id,
+                packingType = CostingPackingType.PACKET,
+                bottlePurchaseRate = 120.0,
+                fillingRate = 30.0,
+                packingRate = 25.0,
+                packQty = 12,
+                salePrice = 300.0,
+                date = testDate
+            )
+        )
+        assertTrue(savePacket.first)
+
+        val saveCarton = repository.saveBottleCosting(
+            BottleCostingRecord(
+                bottleSizeId = singleSize.id,
+                packingType = CostingPackingType.CARTON,
+                bottlePurchaseRate = 240.0,
+                fillingRate = 60.0,
+                packingRate = 50.0,
+                packQty = 24,
+                salePrice = 600.0,
+                date = testDate
+            )
+        )
+        assertTrue(saveCarton.first)
+
+        val savedForSingle = repository.bottleCostings.value.filter { it.bottleSizeId == singleSize.id }
+        assertEquals("Packet and Carton costing records for same bottle size must coexist", 2, savedForSingle.size)
+
+        // 3. Record deliveries on testDate:
+        //    - 10 x 19L Single @ Rs.120 = 1200 rev; Cost: Purchase=0 (multi-use!), Filling=200, Packing=50 => 250
+        //    - 2 x Packet @ Rs.300 = 600 rev; Cost: Purchase=240, Filling=60, Packing=50 => 350
+        //    - 1 x Carton @ Rs.600 = 600 rev; Cost: Purchase=240, Filling=60, Packing=50 => 350
+        //    Total Revenue = 2400; Total Single-Use Purchase = 480; Filling = 320; Packing = 150; Total Bottle+Pack = 950
+        repository.adjustBottleStock("size_19l", fullChange = 50, reason = "Test stock")
+        repository.adjustBottleStock(singleSize.id, fullChange = 100, reason = "Test stock")
+        val custId = repository.addCustomer(Customer(name = "PnL Test Customer", phone = "03001112233"))
+        repository.recordDelivery(
+            customerId = custId,
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_19l",
+                    variantId = "",
+                    packSize = 1,
+                    bottleName = "19 Litre Bottle",
+                    quantity = 10,
+                    unitPrice = 120.0,
+                    emptyCollected = 10,
+                    lineTotal = 1200.0
+                ),
+                DeliveryItem(
+                    bottleSizeId = singleSize.id,
+                    variantId = "${singleSize.id}__12_PACKET",
+                    packSize = 12,
+                    bottleName = "${singleSize.name} Packet",
+                    quantity = 2,
+                    unitPrice = 300.0,
+                    emptyCollected = 0,
+                    lineTotal = 600.0
+                ),
+                DeliveryItem(
+                    bottleSizeId = singleSize.id,
+                    variantId = "${singleSize.id}__24_CARTON",
+                    packSize = 24,
+                    bottleName = "${singleSize.name} Carton",
+                    quantity = 1,
+                    unitPrice = 600.0,
+                    emptyCollected = 0,
+                    lineTotal = 600.0
+                )
+            ),
+            assignedStaffName = "Admin",
+            notes = "",
+            deliveryDate = testDate
+        )
+
+        // 4. Add OPEX expense (500 -> INCLUDED) and CAPEX expense (15000 -> EXCLUDED)
+        repository.addExpense(
+            categoryId = "cat_maint",
+            categoryName = "Plant Maintenance",
+            description = "Valve repair",
+            amount = 500.0,
+            method = PaymentMethod.CASH,
+            payee = "Tech",
+            notes = "",
+            type = ExpenseType.OPEX,
+            expenseDate = testDate,
+            paymentSource = PaymentSource.PAY_FROM_SALE
+        )
+        repository.addExpense(
+            categoryId = "cat_asset_machinery",
+            categoryName = "Asset / Machinery",
+            description = "Heavy RO Motor",
+            amount = 15000.0,
+            method = PaymentMethod.CASH,
+            payee = "Vendor",
+            notes = "",
+            type = ExpenseType.CAPEX,
+            expenseDate = testDate,
+            paymentSource = PaymentSource.PAY_FROM_INVESTMENT
+        )
+
+        // 5. Add Monthly Fixed Cost (30,000 for 30-day Nov => 1,000/day, 7,000/week, 30,000/month)
+        val recSave = repository.addMonthlyRecurringExpense(
+            MonthlyRecurringExpense(
+                category = MonthlyCostCategory.STAFF_SALARIES,
+                description = "Monthly Staff Salaries",
+                amount = 30000.0,
+                month = testMonth,
+                date = testDate
+            )
+        )
+        assertTrue(recSave.first)
+
+        // Verify DAILY P&L:
+        val daily = repository.getCostingProfitLossReport(CostingReportPeriod.DAILY, testDate)
+        assertEquals(30, daily.daysInReferenceMonth)
+        assertEquals(1, daily.daysInPeriod)
+        assertEquals(2400.0, daily.totalSalesRevenue, 0.01)
+        assertEquals(480.0, daily.singleUsePurchaseCost, 0.01) // 19L purchase (800*10) strictly excluded!
+        assertEquals(320.0, daily.fillingCost, 0.01)
+        assertEquals(150.0, daily.packingCost, 0.01)
+        assertEquals(950.0, daily.totalBottleAndPackingCost, 0.01)
+        assertEquals(500.0, daily.opexExpenses, 0.01) // CAPEX 15000 excluded!
+        assertEquals(15000.0, daily.excludedCapexExpenses, 0.01)
+        assertEquals(1000.0, daily.dailyFixedCostRate, 0.01)
+        assertEquals(1000.0, daily.proratedMonthlyFixedCost, 0.01)
+        // Total Daily Cost = 950 + 500 + 1000 = 2450 => Net Loss = 2400 - 2450 = -50
+        assertEquals(2450.0, daily.totalCost, 0.01)
+        assertEquals(-50.0, daily.netProfitOrLoss, 0.01)
+
+        // Verify WEEKLY P&L: prorated fixed = 1000 * 7 = 7000
+        val weekly = repository.getCostingProfitLossReport(CostingReportPeriod.WEEKLY, testDate)
+        assertEquals(7, weekly.daysInPeriod)
+        assertEquals(7000.0, weekly.proratedMonthlyFixedCost, 0.01)
+
+        // Verify MONTHLY P&L: prorated fixed = full 30000
+        val monthly = repository.getCostingProfitLossReport(CostingReportPeriod.MONTHLY, testDate)
+        assertEquals(30, monthly.daysInPeriod)
+        assertEquals(30000.0, monthly.proratedMonthlyFixedCost, 0.01)
+    }
+
+    @Test
+    fun testDailyCashClosingDeductsOnlyOpexFromSale() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val testDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+        val baseline = repository.getDailyCashSummary(testDate)
+        val custId = repository.addCustomer(Customer(name = "Closing Filter Customer", currentBalance = 5000.0))
+
+        // Received: Cash 2000 + Bank Transfer 1000 = 3000 Total Received
+        repository.recordPayment(custId, 2000.0, PaymentMethod.CASH, notes = "Cash pay")
+        repository.recordPayment(custId, 1000.0, PaymentMethod.BANK_TRANSFER, notes = "Bank pay")
+
+        // Expenses on testDate:
+        // 1. OPEX + PAY_FROM_SALE (Cash) = 400 -> INCLUDED
+        repository.addExpense("cat_fuel", "Fuel", "Diesel", 400.0, PaymentMethod.CASH, "Pump", "", ExpenseType.OPEX, testDate, PaymentSource.PAY_FROM_SALE)
+        // 2. OPEX + PAY_FROM_INVESTMENT (Cash) = 600 -> EXCLUDED
+        repository.addExpense("cat_maint", "Maintenance", "Extra repair", 600.0, PaymentMethod.CASH, "Shop", "", ExpenseType.OPEX, testDate, PaymentSource.PAY_FROM_INVESTMENT)
+        // 3. CAPEX + PAY_FROM_SALE (Cash) = 5000 -> EXCLUDED
+        repository.addExpense("cat_asset", "Machinery", "Pump motor", 5000.0, PaymentMethod.CASH, "Vendor", "", ExpenseType.CAPEX, testDate, PaymentSource.PAY_FROM_SALE)
+
+        val summary = repository.getDailyCashSummary(testDate)
+        assertEquals(baseline.customerCashCollected + 2000.0, summary.customerCashCollected, 0.01)
+        assertEquals(baseline.digitalCollected + 1000.0, summary.digitalCollected, 0.01)
+        assertEquals(baseline.totalReceivedAmount + 3000.0, summary.totalReceivedAmount, 0.01)
+        assertEquals(baseline.cashExpenses + 400.0, summary.cashExpenses, 0.01)
+        assertEquals(baseline.opexFromSaleExpenses + 400.0, summary.opexFromSaleExpenses, 0.01)
+        assertEquals(baseline.excludedCapexExpenses + 5000.0, summary.excludedCapexExpenses, 0.01)
+        assertEquals(baseline.excludedInvestmentExpenses + 600.0, summary.excludedInvestmentExpenses, 0.01)
+        assertEquals(baseline.dailyNetReceivedAfterOpex + 2600.0, summary.dailyNetReceivedAfterOpex, 0.01)
+    }
+
+    @Test
+    fun testNotificationSelfSuppressionAndGithubRepoNormalization() {
+        // Self-suppression: same UID or same name returns true
+        assertTrue(
+            com.example.util.TransactionNotificationHelper.isOwnTransaction(
+                createdByUid = "uid_123",
+                createdByName = "Staff Ali",
+                currentActorUid = "uid_123|staff_1",
+                currentActorName = "Admin"
+            )
+        )
+        assertFalse(
+            com.example.util.TransactionNotificationHelper.isOwnTransaction(
+                createdByUid = "uid_999",
+                createdByName = "Staff Bilal",
+                currentActorUid = "uid_123|admin_1",
+                currentActorName = "Admin"
+            )
+        )
+
+        // GitHub URL normalization handles www, /releases, .git, and API URLs
+        assertEquals("owner/repo", com.example.data.AppUpdateChecker.normalizeGithubRepo("https://www.github.com/owner/repo/releases"))
+        assertEquals("owner/repo", com.example.data.AppUpdateChecker.normalizeGithubRepo("https://github.com/owner/repo.git"))
+        assertEquals("owner/repo", com.example.data.AppUpdateChecker.normalizeGithubRepo("https://api.github.com/repos/owner/repo/releases/latest"))
+    }
 }
+
 

@@ -156,14 +156,27 @@ data class MaterialTransaction(
 )
 
 /**
- * Costing record per bottle size (Admin Only)
+ * Packing mode for bottle costing: Single Bottle, Packet, or Carton
+ */
+enum class CostingPackingType(val label: String, val shortLabel: String, val urduLabel: String) {
+    SINGLE("Single Bottle", "Single", "سنگل بوتل"),
+    PACKET("Packet", "Packet", "پیکٹ"),
+    CARTON("Carton", "Carton", "کارٹن")
+}
+
+/**
+ * Costing record per bottle size & packing type (Admin Only)
  */
 @JsonClass(generateAdapter = true)
 data class BottleCostingRecord(
     val id: String = "",
     val bottleSizeId: String = "",
     val bottleSizeName: String = "",
+    val packingType: CostingPackingType = CostingPackingType.SINGLE,
+    val isMultiTimeUse: Boolean = false,
     val bottlePurchaseRate: Double = 0.0,
+    val fillingRate: Double = 0.0,
+    val packingRate: Double = 0.0,
     val packQty: Int = 1,
     val labelSealPacketPrice: Double = 0.0,
     val labelSealTotalPieces: Int = 1,
@@ -182,6 +195,76 @@ data class BottleCostingRecord(
     val notes: String = "",
     val updatedBy: String = "Admin",
     val timestamp: Long = System.currentTimeMillis()
+) {
+    val extraComponentCost: Double
+        get() = labelSealCalculatedCost + cartonPolytheneCost + capCost + waterCost + labourCost + electricityCost + deliveryCost
+
+    fun effectivePurchaseCostForPnl(forceMultiUse: Boolean = isMultiTimeUse): Double =
+        if (forceMultiUse) 0.0 else bottlePurchaseRate
+
+    fun effectiveUnitCostForPnl(forceMultiUse: Boolean = isMultiTimeUse): Double =
+        effectivePurchaseCostForPnl(forceMultiUse) + fillingRate + packingRate + extraComponentCost
+}
+
+/**
+ * Period filter for Costing Profit & Loss Dashboard
+ */
+enum class CostingReportPeriod(val label: String, val urduLabel: String) {
+    DAILY("Daily", "روزانہ"),
+    WEEKLY("Weekly", "ہفتہ وار"),
+    MONTHLY("Monthly", "ماہانہ")
+}
+
+/**
+ * Per-bottle sold cost and revenue breakdown inside Costing P&L report
+ */
+data class BottleSaleCostLine(
+    val bottleSizeId: String = "",
+    val bottleName: String = "",
+    val packingType: CostingPackingType = CostingPackingType.SINGLE,
+    val isMultiTimeUse: Boolean = false,
+    val unitsSold: Int = 0,
+    val totalBottlesSold: Int = 0,
+    val revenue: Double = 0.0,
+    val purchaseCostTotal: Double = 0.0,
+    val fillingCostTotal: Double = 0.0,
+    val packingCostTotal: Double = 0.0,
+    val otherUnitCostTotal: Double = 0.0,
+    val totalProductionCost: Double = 0.0,
+    val grossMargin: Double = 0.0,
+    val hasConfiguredCosting: Boolean = true
+)
+
+/**
+ * Complete Daily / Weekly / Monthly Profit & Loss Dashboard Report
+ * - Excludes bottle purchasing cost for multi-time-use (returnable) bottles
+ * - Excludes CAPEX expenses
+ * - Includes OPEX expenses (salary, maintenance, fuel, etc.)
+ * - Divides monthly fixed/flexible recurring expenses per day and prorates to selected period
+ */
+data class CostingProfitLossReport(
+    val period: CostingReportPeriod = CostingReportPeriod.DAILY,
+    val periodLabel: String = "",
+    val startDate: String = "",
+    val endDate: String = "",
+    val daysInPeriod: Int = 1,
+    val daysInReferenceMonth: Int = 30,
+    val totalDeliveries: Int = 0,
+    val totalUnitsSold: Int = 0,
+    val totalSalesRevenue: Double = 0.0,
+    val singleUsePurchaseCost: Double = 0.0,
+    val fillingCost: Double = 0.0,
+    val packingCost: Double = 0.0,
+    val otherBottleUnitCost: Double = 0.0,
+    val totalBottleAndPackingCost: Double = 0.0,
+    val opexExpenses: Double = 0.0,
+    val excludedCapexExpenses: Double = 0.0,
+    val monthlyRecurringTotal: Double = 0.0,
+    val dailyFixedCostRate: Double = 0.0,
+    val proratedMonthlyFixedCost: Double = 0.0,
+    val totalCost: Double = 0.0,
+    val netProfitOrLoss: Double = 0.0,
+    val bottleBreakdown: List<BottleSaleCostLine> = emptyList()
 )
 
 /**

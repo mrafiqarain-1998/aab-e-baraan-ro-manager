@@ -53,11 +53,32 @@ fun CostingSubTab(
     val bottleSizes by viewModel.bottleSizes.collectAsState()
     val bottleCostings by viewModel.bottleCostings.collectAsState()
     val monthlyRecurringExpenses by viewModel.monthlyRecurringExpenses.collectAsState()
+    val deliveries by viewModel.deliveries.collectAsState()
+    val expenses by viewModel.expenses.collectAsState()
+    val payments by viewModel.payments.collectAsState()
 
     var showAddCostingDialog by remember { mutableStateOf(false) }
+    var costingToEdit by remember { mutableStateOf<BottleCostingRecord?>(null) }
     var showAddRecurringCostDialog by remember { mutableStateOf(false) }
     var costingToDelete by remember { mutableStateOf<BottleCostingRecord?>(null) }
     var recurringToDelete by remember { mutableStateOf<MonthlyRecurringExpense?>(null) }
+
+    // Daily / Weekly / Monthly Profit & Loss Dashboard State
+    val todayDate = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
+    var selectedPnlPeriod by remember { mutableStateOf(CostingReportPeriod.DAILY) }
+    var pnlReferenceDate by remember { mutableStateOf(todayDate) }
+
+    val pnlReport = remember(
+        selectedPnlPeriod,
+        pnlReferenceDate,
+        deliveries,
+        expenses,
+        bottleSizes,
+        bottleCostings,
+        monthlyRecurringExpenses
+    ) {
+        viewModel.getCostingProfitLossReport(selectedPnlPeriod, pnlReferenceDate)
+    }
 
     // Month Selector for Financial Report & Recurring Costs
     val currentMonth = remember { SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date()) }
@@ -65,7 +86,7 @@ fun CostingSubTab(
     var showMonthPickerDialog by remember { mutableStateOf(false) }
 
     // Financial summary for selected month
-    val financialSummary = remember(selectedMonth, monthlyRecurringExpenses) {
+    val financialSummary = remember(selectedMonth, deliveries, payments, expenses, monthlyRecurringExpenses) {
         viewModel.getMonthlyFinancialSummary(selectedMonth)
     }
 
@@ -124,7 +145,25 @@ fun CostingSubTab(
         }
 
         // =========================================================
-        // SECTION 1: BOTTLE COSTING
+        // DAILY / WEEKLY / MONTHLY PROFIT & LOSS DASHBOARD
+        // =========================================================
+        item {
+            CostingProfitLossDashboard(
+                selectedPeriod = selectedPnlPeriod,
+                onPeriodSelected = { selectedPnlPeriod = it },
+                referenceDate = pnlReferenceDate,
+                onReferenceDateChanged = { newDate ->
+                    pnlReferenceDate = newDate
+                    if (newDate.length >= 7) {
+                        selectedMonth = newDate.take(7)
+                    }
+                },
+                report = pnlReport
+            )
+        }
+
+        // =========================================================
+        // SECTION 1: BOTTLE COSTING (SINGLE / PACKET / CARTON)
         // =========================================================
         item {
             Row(
@@ -132,21 +171,26 @@ fun CostingSubTab(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text("Section 1: Bottle Costing Breakdown", fontWeight = FontWeight.Bold, fontSize = 12.5.sp, color = WaterNavyPrimary)
-                    Text("سائز و پیکٹ کے حساب سے لاگت و متوقع منافع", fontSize = 10.sp, color = TextSecondaryDark)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Section 1: Bottle Costing Rates", fontWeight = FontWeight.Bold, fontSize = 12.5.sp, color = WaterNavyPrimary)
+                    Text("خرید، فلنگ، پیکنگ (سنگل/پیکٹ/کارٹن) اور فروخت ریٹ", fontSize = 10.sp, color = TextSecondaryDark)
                 }
 
                 Button(
-                    onClick = { showAddCostingDialog = true },
+                    onClick = {
+                        costingToEdit = null
+                        showAddCostingDialog = true
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.height(34.dp)
+                    modifier = Modifier
+                        .height(34.dp)
+                        .testTag("add_bottle_costing_btn")
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Add Costing", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Add Rate", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -159,7 +203,7 @@ fun CostingSubTab(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "No bottle costing calculations added yet. Click 'Add Costing' to create one.",
+                        "No bottle costing rates added yet. Tap 'Add Rate' to set Purchase, Filling, Single/Packet/Carton Packing, and Sale rates for each bottle.",
                         fontSize = 10.5.sp,
                         color = TextMuted,
                         modifier = Modifier.padding(20.dp)
@@ -168,8 +212,17 @@ fun CostingSubTab(
             }
         } else {
             items(bottleCostings, key = { it.id }) { costing ->
+                val matchedSize = bottleSizes.find { it.id == costing.bottleSizeId }
+                val isMultiUse = matchedSize?.let {
+                    it.usageType == BottleUsageType.MULTIPLE_TIME || it.isReturnableBottle
+                } ?: costing.isMultiTimeUse
                 BottleCostingCard(
                     costing = costing,
+                    isMultiTimeUse = isMultiUse,
+                    onEditClick = {
+                        costingToEdit = costing
+                        showAddCostingDialog = true
+                    },
                     onDeleteClick = { costingToDelete = costing }
                 )
             }
@@ -423,15 +476,22 @@ fun CostingSubTab(
 
     // --- DIALOGS ---
 
-    // Add Bottle Costing Dialog
+    // Add / Edit Bottle Costing Dialog
     if (showAddCostingDialog) {
         AddBottleCostingDialog(
             bottleSizes = bottleSizes.filter { it.active },
-            onDismiss = { showAddCostingDialog = false },
+            existingRecord = costingToEdit,
+            onDismiss = {
+                showAddCostingDialog = false
+                costingToEdit = null
+            },
             onSave = { record ->
                 viewModel.saveBottleCosting(record) { success, msg ->
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                    if (success) showAddCostingDialog = false
+                    if (success) {
+                        showAddCostingDialog = false
+                        costingToEdit = null
+                    }
                 }
             }
         )
@@ -522,27 +582,63 @@ fun CostingSubTab(
 @Composable
 fun BottleCostingCard(
     costing: BottleCostingRecord,
+    isMultiTimeUse: Boolean = costing.isMultiTimeUse,
+    onEditClick: () -> Unit = {},
     onDeleteClick: () -> Unit
 ) {
+    val effectiveCost = costing.effectiveUnitCostForPnl(isMultiTimeUse)
+    val effectiveProfit = costing.salePrice - effectiveCost
+
     Card(
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(costing.bottleSizeName, fontWeight = FontWeight.Bold, fontSize = 13.5.sp, color = WaterNavyPrimary)
-                    Text("Calculated: ${costing.date} • By: ${costing.updatedBy}", fontSize = 10.sp, color = TextSecondaryDark)
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(costing.bottleSizeName, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary)
+                        Surface(
+                            shape = RoundedCornerShape(5.dp),
+                            color = WaterNavyPrimary.copy(alpha = 0.1f)
+                        ) {
+                            Text(
+                                text = if (costing.packQty > 1) "${costing.packingType.shortLabel} (${costing.packQty})" else costing.packingType.label,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = WaterNavyPrimary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (isMultiTimeUse) {
+                        Text(
+                            text = "Multi-Time Reusable • Bottle Purchase Excluded in P&L",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SuccessGreen
+                        )
+                    } else {
+                        Text("Updated: ${costing.date} • By: ${costing.updatedBy}", fontSize = 9.5.sp, color = TextSecondaryDark)
+                    }
                 }
 
-                IconButton(onClick = onDeleteClick, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = TextMuted)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onEditClick, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit Costing", tint = WaterBlueDeep, modifier = Modifier.size(18.dp))
+                    }
+                    IconButton(onClick = onDeleteClick, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(18.dp))
+                    }
                 }
             }
 
@@ -559,8 +655,8 @@ fun BottleCostingCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Total Cost", fontSize = 9.5.sp, color = TextMuted)
-                        Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", costing.totalCostPerPackOrBottle)}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = WaterNavyPrimary)
+                        Text("P&L Cost", fontSize = 9.5.sp, color = TextMuted)
+                        Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", effectiveCost)}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = WaterNavyPrimary)
                     }
                 }
 
@@ -570,19 +666,19 @@ fun BottleCostingCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Sale Price", fontSize = 9.5.sp, color = TextMuted)
+                        Text("Sale Rate", fontSize = 9.5.sp, color = TextMuted)
                         Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", costing.salePrice)}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = TextPrimaryDark)
                     }
                 }
 
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = SuccessGreenLight,
+                    color = if (effectiveProfit >= 0) SuccessGreenLight else ErrorRedLight,
                     modifier = Modifier.weight(1f)
                 ) {
                     Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Expected Profit", fontSize = 9.5.sp, color = SuccessGreen)
-                        Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", costing.profitPerPackOrBottle)}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = SuccessGreen)
+                        Text("Unit Margin", fontSize = 9.5.sp, color = if (effectiveProfit >= 0) SuccessGreen else ErrorRed)
+                        Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", effectiveProfit)}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = if (effectiveProfit >= 0) SuccessGreen else ErrorRed)
                     }
                 }
             }
@@ -596,7 +692,24 @@ fun BottleCostingCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ComponentCostText("Bottle Purchase / Amortization", costing.bottlePurchaseRate)
+                    if (isMultiTimeUse) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Bottle Purchase Rate (Reusable)", fontSize = 10.sp, color = TextMuted)
+                            Text(
+                                text = if (costing.bottlePurchaseRate > 0.0) "Rs. ${String.format(Locale.ENGLISH, "%.0f", costing.bottlePurchaseRate)} (Excluded)" else "Rs. 0.00 (Excluded)",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SuccessGreen
+                            )
+                        }
+                    } else {
+                        ComponentCostText("Bottle Purchase Rate", costing.bottlePurchaseRate)
+                    }
+                    ComponentCostText("Filling Rate", costing.fillingRate)
+                    ComponentCostText("${costing.packingType.label} Packing Rate", costing.packingRate)
                     ComponentCostText("Label & Shrink Seal", costing.labelSealCalculatedCost)
                     ComponentCostText("Carton / Polythene Wrap", costing.cartonPolytheneCost)
                     ComponentCostText("Bottle Cap", costing.capCost)
@@ -624,41 +737,101 @@ fun ComponentCostText(name: String, cost: Double) {
 }
 
 // -------------------------------------------------------------
-// ADD BOTTLE COSTING DIALOG (WITH LIVE FORMULA)
+// ADD / EDIT BOTTLE COSTING DIALOG (SINGLE / PACKET / CARTON)
 // -------------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddBottleCostingDialog(
     bottleSizes: List<BottleSize>,
+    existingRecord: BottleCostingRecord? = null,
     onDismiss: () -> Unit,
     onSave: (BottleCostingRecord) -> Unit
 ) {
-    var selectedSize by remember { mutableStateOf(bottleSizes.firstOrNull()) }
-    var bottlePurchaseRate by remember { mutableStateOf(selectedSize?.latestPurchaseRate?.toString() ?: "0") }
-    var packQty by remember { mutableStateOf(selectedSize?.packQuantity?.toString() ?: "1") }
+    var selectedSize by remember {
+        mutableStateOf(
+            existingRecord?.let { rec -> bottleSizes.find { it.id == rec.bottleSizeId } }
+                ?: bottleSizes.firstOrNull()
+        )
+    }
 
-    // Label & Seal dynamic formula fields: (packetPrice / totalPieces) * piecesPerPack
-    var labelPacketPrice by remember { mutableStateOf("1700") }
-    var labelTotalPieces by remember { mutableStateOf("1000") }
-    var labelPiecesUsed by remember { mutableStateOf("1") }
+    fun defaultPackingForSize(size: BottleSize?): CostingPackingType {
+        if (size == null) return CostingPackingType.SINGLE
+        return if (size.packQuantity > 1) CostingPackingType.PACKET else CostingPackingType.SINGLE
+    }
 
-    var cartonPolytheneCost by remember { mutableStateOf("0") }
-    var capCost by remember { mutableStateOf("3.5") }
-    var waterCost by remember { mutableStateOf("6") }
-    var labourCost by remember { mutableStateOf("12") }
-    var electricityCost by remember { mutableStateOf("10") }
-    var deliveryCost by remember { mutableStateOf("20") }
-    var salePrice by remember { mutableStateOf(selectedSize?.defaultRefillPrice?.toString() ?: "120") }
-    var notes by remember { mutableStateOf("") }
+    fun defaultPackQty(size: BottleSize?, mode: CostingPackingType): Int {
+        if (mode == CostingPackingType.SINGLE) return 1
+        val cap = size?.capacityLitres ?: 0.0
+        return when {
+            mode == CostingPackingType.CARTON && cap in 0.4..0.6 -> 24
+            mode == CostingPackingType.PACKET && cap in 0.4..0.6 -> 12
+            mode == CostingPackingType.CARTON && cap in 1.4..1.6 -> 12
+            mode == CostingPackingType.PACKET && cap in 1.4..1.6 -> 6
+            else -> (size?.packQuantity ?: 1).coerceAtLeast(1)
+        }
+    }
 
-    // Live calculation of Label & Seal Cost
+    var packingType by remember {
+        mutableStateOf(existingRecord?.packingType ?: defaultPackingForSize(selectedSize))
+    }
+    var bottlePurchaseRate by remember {
+        mutableStateOf(
+            existingRecord?.bottlePurchaseRate?.toString()
+                ?: (selectedSize?.latestPurchaseRate?.toString() ?: "0")
+        )
+    }
+    var fillingRate by remember {
+        mutableStateOf(
+            existingRecord?.fillingRate?.toString()
+                ?: (selectedSize?.refillCost?.takeIf { it > 0.0 }?.toString() ?: "0")
+        )
+    }
+    var packingRate by remember {
+        mutableStateOf(existingRecord?.packingRate?.toString() ?: "0")
+    }
+    var packQty by remember {
+        mutableStateOf(
+            existingRecord?.packQty?.toString()
+                ?: defaultPackQty(selectedSize, packingType).toString()
+        )
+    }
+    var salePrice by remember {
+        mutableStateOf(
+            existingRecord?.salePrice?.toString()
+                ?: (selectedSize?.defaultRefillPrice?.toString() ?: "0")
+        )
+    }
+    var notes by remember { mutableStateOf(existingRecord?.notes ?: "") }
+
+    // Optional extra components (collapsed by default for clean, fast entry)
+    var showOptionalExtras by remember {
+        mutableStateOf(existingRecord != null && existingRecord.extraComponentCost > 0.0)
+    }
+    var labelPacketPrice by remember { mutableStateOf(existingRecord?.labelSealPacketPrice?.toString() ?: "0") }
+    var labelTotalPieces by remember { mutableStateOf((existingRecord?.labelSealTotalPieces ?: 1).coerceAtLeast(1).toString()) }
+    var labelPiecesUsed by remember { mutableStateOf((existingRecord?.labelSealPiecesUsedPerPack ?: 0).toString()) }
+    var cartonPolytheneCost by remember { mutableStateOf(existingRecord?.cartonPolytheneCost?.toString() ?: "0") }
+    var capCost by remember { mutableStateOf(existingRecord?.capCost?.toString() ?: "0") }
+    var waterCost by remember { mutableStateOf(existingRecord?.waterCost?.toString() ?: "0") }
+    var labourCost by remember { mutableStateOf(existingRecord?.labourCost?.toString() ?: "0") }
+    var electricityCost by remember { mutableStateOf(existingRecord?.electricityCost?.toString() ?: "0") }
+    var deliveryCost by remember { mutableStateOf(existingRecord?.deliveryCost?.toString() ?: "0") }
+
+    val isMultiUse = selectedSize?.let {
+        it.usageType == BottleUsageType.MULTIPLE_TIME || it.isReturnableBottle
+    } ?: false
+
     val packetPriceVal = labelPacketPrice.toDoubleOrNull() ?: 0.0
     val totalPiecesVal = (labelTotalPieces.toIntOrNull() ?: 1).coerceAtLeast(1)
-    val piecesUsedVal = labelPiecesUsed.toIntOrNull() ?: 1
-    val calculatedLabelSealCost = (packetPriceVal / totalPiecesVal) * piecesUsedVal
+    val piecesUsedVal = labelPiecesUsed.toIntOrNull() ?: 0
+    val calculatedLabelSealCost = if (packetPriceVal > 0.0 && piecesUsedVal > 0) {
+        (packetPriceVal / totalPiecesVal) * piecesUsedVal
+    } else 0.0
 
-    // Live total cost
     val bRate = bottlePurchaseRate.toDoubleOrNull() ?: 0.0
+    val effectivePurchaseInPnl = if (isMultiUse) 0.0 else bRate
+    val fillVal = fillingRate.toDoubleOrNull() ?: 0.0
+    val packVal = packingRate.toDoubleOrNull() ?: 0.0
     val cartonCost = cartonPolytheneCost.toDoubleOrNull() ?: 0.0
     val cap = capCost.toDoubleOrNull() ?: 0.0
     val water = waterCost.toDoubleOrNull() ?: 0.0
@@ -667,13 +840,19 @@ fun AddBottleCostingDialog(
     val delivery = deliveryCost.toDoubleOrNull() ?: 0.0
     val sPrice = salePrice.toDoubleOrNull() ?: 0.0
 
-    val calculatedTotalCost = bRate + calculatedLabelSealCost + cartonCost + cap + water + labour + electric + delivery
+    val calculatedTotalCost = effectivePurchaseInPnl + fillVal + packVal + calculatedLabelSealCost + cartonCost + cap + water + labour + electric + delivery
     val calculatedProfit = sPrice - calculatedTotalCost
 
+    val unitSuffix = when (packingType) {
+        CostingPackingType.SINGLE -> "Per Bottle"
+        CostingPackingType.PACKET -> "Per Packet"
+        CostingPackingType.CARTON -> "Per Carton"
+    }
+
     MobileFormDialog(
-        title = "Bottle Costing Matrix",
-        subtitle = "پروڈکشن اور ڈیلیوری کی فی یونٹ لاگت و منافع",
-        hasUnsavedChanges = notes.isNotBlank() || cartonPolytheneCost != "0",
+        title = if (existingRecord == null) "Add Bottle Costing Rate" else "Edit Bottle Costing Rate",
+        subtitle = "خرید، فلنگ، پیکنگ (سنگل / پیکٹ / کارٹن) اور فروخت ریٹ",
+        hasUnsavedChanges = notes.isNotBlank() || fillVal > 0.0 || packVal > 0.0,
         onDismiss = onDismiss,
         footerContent = {
             TextButton(onClick = onDismiss) {
@@ -683,10 +862,15 @@ fun AddBottleCostingDialog(
                 onClick = {
                     val size = selectedSize ?: return@Button
                     val record = BottleCostingRecord(
+                        id = existingRecord?.id ?: "",
                         bottleSizeId = size.id,
                         bottleSizeName = size.name,
+                        packingType = packingType,
+                        isMultiTimeUse = isMultiUse,
                         bottlePurchaseRate = bRate,
-                        packQty = packQty.toIntOrNull() ?: 1,
+                        fillingRate = fillVal,
+                        packingRate = packVal,
+                        packQty = (packQty.toIntOrNull() ?: 1).coerceAtLeast(1),
                         labelSealPacketPrice = packetPriceVal,
                         labelSealTotalPieces = totalPiecesVal,
                         labelSealPiecesUsedPerPack = piecesUsedVal,
@@ -701,7 +885,7 @@ fun AddBottleCostingDialog(
                         salePrice = sPrice,
                         profitPerPackOrBottle = calculatedProfit,
                         date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
-                        notes = notes
+                        notes = notes.trim()
                     )
                     onSave(record)
                 },
@@ -709,7 +893,7 @@ fun AddBottleCostingDialog(
                 enabled = selectedSize != null && sPrice > 0.0,
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text("Save Costing", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(if (existingRecord == null) "Save Rate" else "Update Rate", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
     ) {
@@ -717,148 +901,266 @@ fun AddBottleCostingDialog(
             label = "Select Bottle Size*",
             selectedText = selectedSize?.name ?: "",
             options = bottleSizes,
-            optionLabel = { "${it.name} (Pack: ${it.packQuantity})" },
+            optionLabel = { size ->
+                val tag = if (size.usageType == BottleUsageType.MULTIPLE_TIME || size.isReturnableBottle) "Multi-Use" else "Single-Use"
+                "${size.name} ($tag)"
+            },
             onOptionSelected = { size ->
                 selectedSize = size
+                val newMode = defaultPackingForSize(size)
+                packingType = newMode
+                packQty = defaultPackQty(size, newMode).toString()
                 bottlePurchaseRate = size.latestPurchaseRate.toString()
-                packQty = size.packQuantity.toString()
+                fillingRate = size.refillCost.takeIf { it > 0.0 }?.toString() ?: "0"
                 salePrice = size.defaultRefillPrice.toString()
-                labelPiecesUsed = size.packQuantity.toString()
             }
         )
 
+        // Packing Mode Selector: Single Bottle / Packet / Carton
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "Packing Type (پیکنگ کی قسم)*",
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = WaterNavyPrimary
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CostingPackingType.values().forEach { mode ->
+                    val isSel = mode == packingType
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSel) WaterNavyPrimary else Color(0xFFF1F5F9),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                packingType = mode
+                                packQty = defaultPackQty(selectedSize, mode).toString()
+                            }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = mode.shortLabel,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSel) Color.White else WaterNavyPrimary
+                            )
+                            Text(
+                                text = mode.urduLabel,
+                                fontSize = 8.5.sp,
+                                color = if (isSel) WaterCyanBright else TextSecondaryDark
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isMultiUse) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = SuccessGreenLight,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Autorenew, contentDescription = null, tint = SuccessGreen, modifier = Modifier.size(18.dp))
+                    Text(
+                        text = "Multi-Time Reusable Bottle: Purchase rate is NOT counted in Daily/Weekly/Monthly P&L (بار بار استعمال ہونے والی بوتل کی خرید لاگت نفع/نقصان میں شامل نہیں ہوگی)",
+                        fontSize = 9.5.sp,
+                        color = SuccessGreen,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // Core 4 Rates Grid: Purchase, Filling, Packing (Single/Packet/Carton), Sale
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = bottlePurchaseRate,
                 onValueChange = { bottlePurchaseRate = it },
-                label = { Text("Purchase (Rs)", fontSize = 10.sp) },
+                label = { Text(if (isMultiUse) "Purchase (Ref Only)" else "Purchase ($unitSuffix)", fontSize = 9.5.sp) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f),
                 singleLine = true
             )
             OutlinedTextField(
-                value = packQty,
-                onValueChange = { packQty = it },
-                label = { Text("Pack Qty", fontSize = 10.sp) },
+                value = fillingRate,
+                onValueChange = { fillingRate = it },
+                label = { Text("Filling Rate ($unitSuffix)*", fontSize = 9.5.sp) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f),
                 singleLine = true
             )
         }
 
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = packingRate,
+                onValueChange = { packingRate = it },
+                label = { Text("${packingType.shortLabel} Packing Rate*", fontSize = 9.5.sp) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = salePrice,
+                onValueChange = { salePrice = it },
+                label = { Text("Sale Rate ($unitSuffix)*", fontSize = 9.5.sp) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+        }
+
+        if (packingType != CostingPackingType.SINGLE) {
+            OutlinedTextField(
+                value = packQty,
+                onValueChange = { packQty = it },
+                label = { Text("Bottles inside 1 ${packingType.label} (بوتلوں کی تعداد)", fontSize = 10.sp) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+        }
+
+        // Collapsible Optional Extra Components
         Surface(
             shape = RoundedCornerShape(8.dp),
-            color = Color(0xFFF1F5F9),
-            modifier = Modifier.fillMaxWidth()
+            color = Color(0xFFF8FAFC),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { showOptionalExtras = !showOptionalExtras }
         ) {
-            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    "Label & Seal Formula: (Pkt Price / Total Pcs) * Used",
+                    text = "Optional Extra Costs (Label, Cap, Labour, Delivery)",
                     fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = WaterNavyPrimary
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedTextField(
-                        value = labelPacketPrice,
-                        onValueChange = { labelPacketPrice = it },
-                        label = { Text("Pkt Rs", fontSize = 9.5.sp) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = labelTotalPieces,
-                        onValueChange = { labelTotalPieces = it },
-                        label = { Text("Total Pcs", fontSize = 9.5.sp) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = labelPiecesUsed,
-                        onValueChange = { labelPiecesUsed = it },
-                        label = { Text("Used", fontSize = 9.5.sp) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                }
-                Text(
-                    "Calculated Label & Seal: Rs. ${String.format(Locale.ENGLISH, "%.2f", calculatedLabelSealCost)} per pack",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.sp,
-                    color = WaterBlueDeep
+                Icon(
+                    imageVector = if (showOptionalExtras) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    tint = WaterNavyPrimary,
+                    modifier = Modifier.size(18.dp)
                 )
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = cartonPolytheneCost,
-                onValueChange = { cartonPolytheneCost = it },
-                label = { Text("Carton/Poly", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-            OutlinedTextField(
-                value = capCost,
-                onValueChange = { capCost = it },
-                label = { Text("Cap Cost", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
+        if (showOptionalExtras) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFFF1F5F9),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Label & Seal Formula: (Pkt Price / Total Pcs) × Used",
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WaterNavyPrimary
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedTextField(
+                            value = labelPacketPrice,
+                            onValueChange = { labelPacketPrice = it },
+                            label = { Text("Pkt Rs", fontSize = 9.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = labelTotalPieces,
+                            onValueChange = { labelTotalPieces = it },
+                            label = { Text("Total Pcs", fontSize = 9.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = labelPiecesUsed,
+                            onValueChange = { labelPiecesUsed = it },
+                            label = { Text("Used", fontSize = 9.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = cartonPolytheneCost,
+                            onValueChange = { cartonPolytheneCost = it },
+                            label = { Text("Extra Wrap", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = capCost,
+                            onValueChange = { capCost = it },
+                            label = { Text("Cap Cost", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = waterCost,
+                            onValueChange = { waterCost = it },
+                            label = { Text("Water", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = labourCost,
+                            onValueChange = { labourCost = it },
+                            label = { Text("Labour", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = electricityCost,
+                            onValueChange = { electricityCost = it },
+                            label = { Text("Electricity", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = deliveryCost,
+                            onValueChange = { deliveryCost = it },
+                            label = { Text("Delivery", fontSize = 9.5.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                }
+            }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = waterCost,
-                onValueChange = { waterCost = it },
-                label = { Text("Water Treatment", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-            OutlinedTextField(
-                value = labourCost,
-                onValueChange = { labourCost = it },
-                label = { Text("Labour Cost", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = electricityCost,
-                onValueChange = { electricityCost = it },
-                label = { Text("Electricity", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-            OutlinedTextField(
-                value = deliveryCost,
-                onValueChange = { deliveryCost = it },
-                label = { Text("Delivery Cost", fontSize = 10.sp) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-        }
-
-        OutlinedTextField(
-            value = salePrice,
-            onValueChange = { salePrice = it },
-            label = { Text("Selling Price (فروخت قیمت)*", fontSize = 10.5.sp) },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
+        // Live P&L Cost & Margin Preview
         Surface(
             shape = RoundedCornerShape(10.dp),
             color = WaterSkyLight,
@@ -869,15 +1171,15 @@ fun AddBottleCostingDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Total Cost:", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+                    Text("Total Cost in P&L ($unitSuffix):", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
                     Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", calculatedTotalCost)}", fontSize = 11.5.sp, fontWeight = FontWeight.ExtraBold, color = WaterNavyPrimary)
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Expected Profit:", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SuccessGreen)
-                    Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", calculatedProfit)}", fontSize = 11.5.sp, fontWeight = FontWeight.ExtraBold, color = SuccessGreen)
+                    Text("Expected Unit Margin:", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = if (calculatedProfit >= 0) SuccessGreen else ErrorRed)
+                    Text("Rs. ${String.format(Locale.ENGLISH, "%.2f", calculatedProfit)}", fontSize = 11.5.sp, fontWeight = FontWeight.ExtraBold, color = if (calculatedProfit >= 0) SuccessGreen else ErrorRed)
                 }
             }
         }

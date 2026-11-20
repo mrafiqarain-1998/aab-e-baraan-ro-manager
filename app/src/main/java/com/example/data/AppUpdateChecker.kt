@@ -28,13 +28,19 @@ object AppUpdateChecker {
 
     fun normalizeGithubRepo(input: String): String {
         val trimmed = input.trim()
+            .removePrefix("https://www.github.com/")
+            .removePrefix("http://www.github.com/")
+            .removePrefix("www.github.com/")
+            .removePrefix("https://api.github.com/repos/")
             .removePrefix("https://github.com/")
             .removePrefix("http://github.com/")
             .removePrefix("github.com/")
-            .removeSuffix(".git")
             .trim('/')
         val parts = trimmed.split("/").filter { it.isNotBlank() }
-        return if (parts.size >= 2) "${parts[0]}/${parts[1]}" else ""
+        if (parts.size < 2) return ""
+        val owner = parts[0].trim()
+        val repo = parts[1].trim().removeSuffix(".git")
+        return if (owner.isNotBlank() && repo.isNotBlank()) "$owner/$repo" else ""
     }
 
     fun isUpdateNewer(
@@ -180,9 +186,15 @@ object AppUpdateChecker {
                     )
                 } catch (_: Exception) {}
             }
+            val (repoCode, _) = request("https://api.github.com/repos/$repo")
+            val message = if (repoCode in 200..299) {
+                "GitHub repo '$repo' is public, but no APK Release is published yet (404). Open GitHub -> Actions -> Build & Publish Release APK -> Run workflow."
+            } else {
+                "Could not access GitHub repo '$repo' (404). Either this GitHub repo is PRIVATE (change to Public in GitHub Settings -> Danger Zone -> Change visibility) or the owner/repo name is incorrect."
+            }
             return@withContext GitHubReleaseFetchResult(
                 httpCode = 404,
-                errorMessage = "Could not access GitHub repo '$repo' (404). Make sure the repo name is right AND the GitHub repo is set to PUBLIC (Private repos block free app update checks)."
+                errorMessage = message
             )
         }
 
