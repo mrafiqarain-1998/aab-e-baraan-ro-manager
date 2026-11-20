@@ -67,12 +67,14 @@ fun CustomerDetailScreen(
     val customerDeliveries = allDeliveries.filter { it.customerId == currentCust.id }
     val thisCustAllocations = allCustomerAllocations.filter { it.customerId == currentCust.id }
     val currentUser by viewModel.currentUser.collectAsState()
-    val isAdmin = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.DELETE) ||
-        viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.MANAGE)
+    val canEditCustomer = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT)
+    val canDeleteCustomer = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.DELETE)
+    val canManageCustomer = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.MANAGE)
+    val canAddDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD)
+    val canReceivePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
     val canEditCustomerRates = viewModel.hasPermission(AppModule.CUSTOMER_RATES, PermissionAction.EDIT)
-    val isViewOnly = !viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT) &&
-        !viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD) &&
-        !viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
+    val isAdmin = canDeleteCustomer || canManageCustomer
+    val isViewOnly = !canEditCustomer && !canAddDelivery && !canReceivePayment
 
     // Only check if customer has pending debt/balance or unreturned empty bottles
     val hasPendingObligations = currentCust.currentBalance > 0.0 || currentCust.emptyBottlesOwed > 0
@@ -96,21 +98,21 @@ fun CustomerDetailScreen(
                     }
                 },
                 actions = {
-                    if (!isViewOnly) {
+                    if (canEditCustomer) {
                         IconButton(onClick = { showEditDialog = true }) {
                             Icon(Icons.Default.Edit, contentDescription = "Edit Customer", tint = Color.White)
                         }
-                        IconButton(onClick = {
-                            val statement = viewModel.generateCustomerStatement(currentCust)
-                            val sendIntent = Intent().apply {
-                                action = Intent.ACTION_SEND
-                                putExtra(Intent.EXTRA_TEXT, statement)
-                                type = "text/plain"
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, "Send Statement"))
-                        }) {
-                            Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        val statement = viewModel.generateCustomerStatement(currentCust)
+                        val sendIntent = Intent().apply {
+                            action = Intent.ACTION_SEND
+                            putExtra(Intent.EXTRA_TEXT, statement)
+                            type = "text/plain"
                         }
+                        context.startActivity(Intent.createChooser(sendIntent, "Send Statement"))
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = WaterNavyPrimary)
@@ -228,7 +230,7 @@ fun CustomerDetailScreen(
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     }
-                                    if (!isViewOnly) {
+                                    if (canEditCustomer) {
                                         Spacer(modifier = Modifier.width(6.dp))
                                         TextButton(
                                             onClick = { showEditDialog = true },
@@ -259,7 +261,7 @@ fun CustomerDetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(3.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (!isViewOnly) {
+                            if (canAddDelivery) {
                                 CustomerActionIconButton(
                                     icon = Icons.Default.LocalShipping,
                                     label = "Deliver",
@@ -270,7 +272,9 @@ fun CustomerDetailScreen(
                                     modifier = Modifier.weight(1f),
                                     testTag = "customer_deliver_btn"
                                 )
+                            }
 
+                            if (canReceivePayment) {
                                 CustomerActionIconButton(
                                     icon = Icons.Default.Payments,
                                     label = "Pay",
@@ -281,24 +285,26 @@ fun CustomerDetailScreen(
                                     modifier = Modifier.weight(1f),
                                     testTag = "customer_pay_btn"
                                 )
+                            }
 
-                                CustomerActionIconButton(
-                                    icon = Icons.Default.Chat,
-                                    label = "WhatsApp",
-                                    contentDescription = "WhatsApp message to ${currentCust.name}",
-                                    containerColor = SuccessGreenLight,
-                                    contentColor = SuccessGreen,
-                                    onClick = {
-                                        val cleanNum = (if (currentCust.whatsapp.isNotBlank()) currentCust.whatsapp else currentCust.phone)
-                                            .replace("-", "").replace(" ", "").replace("+", "")
-                                        val text = viewModel.generateCustomerStatement(currentCust)
-                                        val uri = Uri.parse("https://wa.me/$cleanNum?text=" + Uri.encode(text))
-                                        try { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (_: Exception) {}
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    testTag = "customer_whatsapp_btn"
-                                )
+                            CustomerActionIconButton(
+                                icon = Icons.Default.Chat,
+                                label = "WhatsApp",
+                                contentDescription = "WhatsApp message to ${currentCust.name}",
+                                containerColor = SuccessGreenLight,
+                                contentColor = SuccessGreen,
+                                onClick = {
+                                    val cleanNum = (if (currentCust.whatsapp.isNotBlank()) currentCust.whatsapp else currentCust.phone)
+                                        .replace("-", "").replace(" ", "").replace("+", "")
+                                    val text = viewModel.generateCustomerStatement(currentCust)
+                                    val uri = Uri.parse("https://wa.me/$cleanNum?text=" + Uri.encode(text))
+                                    try { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (_: Exception) {}
+                                },
+                                modifier = Modifier.weight(1f),
+                                testTag = "customer_whatsapp_btn"
+                            )
 
+                            if (canEditCustomer) {
                                 CustomerActionIconButton(
                                     icon = Icons.Default.Edit,
                                     label = "Edit",
@@ -325,7 +331,7 @@ fun CustomerDetailScreen(
                                 testTag = "customer_call_btn"
                             )
 
-                            if (isAdmin) {
+                            if (canManageCustomer) {
                                 CustomerActionIconButton(
                                     icon = if (currentCust.active) Icons.Default.Block else Icons.Default.CheckCircle,
                                     label = if (currentCust.active) "Inactive" else "Active",
@@ -336,7 +342,9 @@ fun CustomerDetailScreen(
                                     modifier = Modifier.weight(1f),
                                     testTag = "customer_toggle_active_btn"
                                 )
+                            }
 
+                            if (canDeleteCustomer) {
                                 CustomerActionIconButton(
                                     icon = Icons.Default.Delete,
                                     label = "Delete",

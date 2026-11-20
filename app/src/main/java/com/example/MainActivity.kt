@@ -143,12 +143,61 @@ fun MainAppScaffold(
     val activeBranchName = remember(plantBranches, activePlantId) {
         plantBranches.find { it.id == activePlantId }?.name.orEmpty()
     }
+    val canViewDashboard = viewModel.hasPermission(com.example.model.AppModule.DASHBOARD, com.example.model.PermissionAction.VIEW)
+    val canViewDeliveries = viewModel.hasPermission(com.example.model.AppModule.DELIVERIES, com.example.model.PermissionAction.VIEW)
+    val canViewCustomers = viewModel.hasPermission(com.example.model.AppModule.CUSTOMERS, com.example.model.PermissionAction.VIEW)
+    val canViewExpenses = viewModel.hasPermission(com.example.model.AppModule.EXPENSES, com.example.model.PermissionAction.VIEW)
+    val canViewStock = viewModel.hasPermission(com.example.model.AppModule.BOTTLE_STOCK, com.example.model.PermissionAction.VIEW) ||
+        viewModel.hasPermission(com.example.model.AppModule.FACTORY_MATERIALS, com.example.model.PermissionAction.VIEW) ||
+        viewModel.hasPermission(com.example.model.AppModule.BOTTLE_ISSUE, com.example.model.PermissionAction.VIEW) ||
+        viewModel.hasPermission(com.example.model.AppModule.REFILL_BATCHES, com.example.model.PermissionAction.VIEW)
+    val canViewReports = viewModel.hasPermission(com.example.model.AppModule.REPORTS, com.example.model.PermissionAction.VIEW)
+    val canAddDelivery = viewModel.hasPermission(com.example.model.AppModule.DELIVERIES, com.example.model.PermissionAction.ADD)
+    val canViewPayments = viewModel.hasPermission(com.example.model.AppModule.PAYMENTS_BALANCES, com.example.model.PermissionAction.VIEW)
+    val canAddPayment = viewModel.hasPermission(com.example.model.AppModule.PAYMENTS_BALANCES, com.example.model.PermissionAction.ADD)
+    val canManageSizes = viewModel.hasPermission(com.example.model.AppModule.BOTTLE_STOCK, com.example.model.PermissionAction.MANAGE)
     val canManageStaff = viewModel.hasPermission(com.example.model.AppModule.STAFF_MANAGEMENT, com.example.model.PermissionAction.VIEW)
     val canManageBackup = viewModel.hasPermission(com.example.model.AppModule.SETTINGS, com.example.model.PermissionAction.VIEW)
     val canViewAudit = viewModel.hasPermission(com.example.model.AppModule.AUDIT_HISTORY, com.example.model.PermissionAction.VIEW)
+    val notificationsEnabled by viewModel.notificationsEnabled.collectAsState()
 
-    var currentScreen by remember { mutableStateOf(AppScreen.DASHBOARD) }
-    var screenStack by remember { mutableStateOf(listOf(AppScreen.DASHBOARD)) }
+    val permittedNavItems = remember(
+        currentUser,
+        canViewDashboard,
+        canViewDeliveries,
+        canViewCustomers,
+        canViewExpenses,
+        canViewStock
+    ) {
+        buildList {
+            if (canViewDashboard) add(AppScreen.DASHBOARD)
+            if (canViewDeliveries) add(AppScreen.DELIVERIES)
+            if (canViewCustomers) add(AppScreen.CUSTOMERS)
+            if (canViewExpenses) add(AppScreen.EXPENSES)
+            if (canViewStock) add(AppScreen.STOCK)
+        }
+    }
+
+    fun isScreenPermitted(screen: AppScreen): Boolean = when (screen) {
+        AppScreen.DASHBOARD -> canViewDashboard
+        AppScreen.DELIVERIES -> canViewDeliveries
+        AppScreen.CUSTOMERS, AppScreen.CUSTOMER_DETAIL -> canViewCustomers
+        AppScreen.EXPENSES -> canViewExpenses
+        AppScreen.STOCK -> canViewStock
+        AppScreen.REPORTS -> canViewReports
+        AppScreen.NEW_DELIVERY -> canAddDelivery
+        AppScreen.RECEIVE_PAYMENT -> canAddPayment
+        AppScreen.CASH_CLOSING -> canViewPayments || canAddPayment
+        AppScreen.BOTTLE_SIZES -> canManageSizes
+        AppScreen.USER_MANAGEMENT -> canManageStaff
+        AppScreen.BACKUP_RESTORE -> canManageBackup
+        AppScreen.AUDIT_HISTORY -> canViewAudit
+        AppScreen.SYNC_CENTER -> true
+    }
+
+    val initialTab = permittedNavItems.firstOrNull() ?: AppScreen.SYNC_CENTER
+    var currentScreen by remember { mutableStateOf(initialTab) }
+    var screenStack by remember { mutableStateOf(listOf(initialTab)) }
     var activeCustomerForAction by remember { mutableStateOf<Customer?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -161,6 +210,7 @@ fun MainAppScaffold(
     }
 
     fun navigateTo(screen: AppScreen) {
+        if (!isScreenPermitted(screen)) return
         if (currentScreen != screen) {
             screenStack = screenStack + screen
             currentScreen = screen
@@ -170,11 +220,16 @@ fun MainAppScaffold(
     fun navigateBack() {
         if (screenStack.size > 1) {
             val newStack = screenStack.dropLast(1)
-            screenStack = newStack
-            currentScreen = newStack.last()
-        } else {
-            currentScreen = AppScreen.DASHBOARD
+            val target = newStack.last()
+            if (isScreenPermitted(target)) {
+                screenStack = newStack
+                currentScreen = target
+                return
+            }
         }
+        val fallback = permittedNavItems.firstOrNull() ?: AppScreen.SYNC_CENTER
+        screenStack = listOf(fallback)
+        currentScreen = fallback
     }
 
     BackHandler(enabled = screenStack.size > 1) {
@@ -184,14 +239,15 @@ fun MainAppScaffold(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { granted ->
-            if (granted) {
+            if (granted && notificationsEnabled) {
                 TransactionNotificationHelper.scheduleBackgroundSyncWorker(context.applicationContext)
             }
         }
     )
 
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+    LaunchedEffect(notificationsEnabled) {
+        if (notificationsEnabled &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             !TransactionNotificationHelper.hasNotificationPermission(context)
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -219,13 +275,11 @@ fun MainAppScaffold(
         }
     }
 
-    LaunchedEffect(currentUser) {
-        val deniedStaff = currentScreen == AppScreen.USER_MANAGEMENT && !canManageStaff
-        val deniedBackup = currentScreen == AppScreen.BACKUP_RESTORE && !canManageBackup
-        val deniedAudit = currentScreen == AppScreen.AUDIT_HISTORY && !canViewAudit
-        if (deniedStaff || deniedBackup || deniedAudit) {
-            screenStack = listOf(AppScreen.DASHBOARD)
-            currentScreen = AppScreen.DASHBOARD
+    LaunchedEffect(currentUser, currentScreen, permittedNavItems) {
+        if (!isScreenPermitted(currentScreen)) {
+            val fallback = permittedNavItems.firstOrNull() ?: AppScreen.SYNC_CENTER
+            screenStack = listOf(fallback)
+            currentScreen = fallback
         }
     }
 
@@ -283,6 +337,8 @@ fun MainAppScaffold(
                     pendingSyncCount = pendingSyncCount,
                     isDeviceOnline = isDeviceOnline,
                     activeBranchName = activeBranchName,
+                    notificationsEnabled = notificationsEnabled,
+                    onToggleNotifications = { viewModel.setNotificationsEnabled(it) },
                     onLogout = onLogout,
                     navigationIcon = if (isSubScreen) {
                         {
@@ -296,23 +352,25 @@ fun MainAppScaffold(
                         }
                     } else null,
                     actions = {
-                        TooltipBox(
-                            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                            tooltip = { PlainTooltip { Text("Share Report / Analytics") } },
-                            state = rememberTooltipState()
-                        ) {
-                            IconButton(
-                                onClick = { navigateTo(AppScreen.REPORTS) },
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .testTag("topbar_share_report_btn")
+                        if (canViewReports) {
+                            TooltipBox(
+                                positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                                tooltip = { PlainTooltip { Text("Share Report / Analytics") } },
+                                state = rememberTooltipState()
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Assessment,
-                                    contentDescription = "Share Report",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                                IconButton(
+                                    onClick = { navigateTo(AppScreen.REPORTS) },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .testTag("topbar_share_report_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Assessment,
+                                        contentDescription = "Share Report",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -320,20 +378,12 @@ fun MainAppScaffold(
             }
         },
         bottomBar = {
-            if (!isSubScreen) {
+            if (!isSubScreen && permittedNavItems.isNotEmpty()) {
                 NavigationBar(
                     containerColor = Color.White,
                     tonalElevation = 6.dp
                 ) {
-                    val navItems = listOf(
-                        AppScreen.DASHBOARD,
-                        AppScreen.DELIVERIES,
-                        AppScreen.CUSTOMERS,
-                        AppScreen.EXPENSES,
-                        AppScreen.STOCK
-                    )
-
-                    navItems.forEach { screen ->
+                    permittedNavItems.forEach { screen ->
                         NavigationBarItem(
                             selected = currentScreen == screen,
                             alwaysShowLabel = true,

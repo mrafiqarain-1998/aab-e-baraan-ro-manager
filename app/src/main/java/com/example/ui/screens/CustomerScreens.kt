@@ -61,10 +61,9 @@ fun CustomerListScreen(
     val customers by viewModel.customers.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
     val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
-    val isAdmin = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.DELETE) ||
-        viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.MANAGE)
-    val isViewOnly = !viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.ADD) &&
-        !viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT)
+    val canAddCustomer = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.ADD)
+    val canAddDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD)
+    val isViewOnly = !canAddDelivery
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearchOpen by remember { mutableStateOf(false) }
@@ -163,7 +162,7 @@ fun CustomerListScreen(
                                 }
                             }
 
-                            if (!isViewOnly) {
+                            if (canAddCustomer) {
                                 Button(
                                     onClick = { showAddDialog = true },
                                     colors = waterPrimaryButtonColors(),
@@ -659,52 +658,30 @@ fun CustomerCard(
                             Icon(Icons.Default.Call, contentDescription = "Call Customer", tint = WaterNavyPrimary, modifier = Modifier.size(15.dp))
                         }
                     }
-
-                    if (!isViewOnly) {
-                        Surface(
-                            shape = RoundedCornerShape(7.dp),
-                            color = WaterSkySurface,
-                            modifier = Modifier
-                                .size(30.dp)
-                                .clickable(onClick = onEdit)
-                                .testTag("edit_customer_${customer.id}")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Customer", tint = WaterNavyPrimary, modifier = Modifier.size(15.dp))
-                            }
-                        }
-                    }
                 }
 
+                // Edit, Delete, and Pay Now are inside Customer Detail view (tap customer card)
                 if (!isViewOnly) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilledTonalButton(
-                            onClick = onReceivePayment,
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = SuccessGreenLight,
-                                contentColor = SuccessGreen
-                            ),
-                            shape = RoundedCornerShape(7.dp),
-                            modifier = Modifier.height(30.dp).testTag("customer_pay_${customer.id}")
-                        ) {
-                            Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(13.dp))
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text("Pay", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                        }
-
-                        Button(
-                            onClick = onDeliver,
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                            colors = waterPrimaryButtonColors(),
-                            shape = RoundedCornerShape(7.dp),
-                            modifier = Modifier.height(30.dp).testTag("customer_deliver_${customer.id}")
-                        ) {
-                            Icon(Icons.Default.LocalShipping, contentDescription = null, modifier = Modifier.size(13.dp))
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text("Deliver", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                        }
+                    Button(
+                        onClick = onDeliver,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        colors = waterPrimaryButtonColors(),
+                        shape = RoundedCornerShape(7.dp),
+                        modifier = Modifier.height(30.dp).testTag("customer_deliver_${customer.id}")
+                    ) {
+                        Icon(Icons.Default.LocalShipping, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("Deliver", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     }
+                } else {
+                    Text(
+                        text = "Tap for details ›",
+                        fontSize = 8.5.sp,
+                        color = TextMuted,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
@@ -1771,6 +1748,44 @@ fun CustomerFormDialog(
                         )
                     }
 
+                    var pendingEditCustomerConfirm by remember { mutableStateOf<Pair<Customer, Double>?>(null) }
+
+                    if (pendingEditCustomerConfirm != null) {
+                        val (candCust, candRate) = pendingEditCustomerConfirm!!
+                        AlertDialog(
+                            onDismissRequest = { pendingEditCustomerConfirm = null },
+                            containerColor = Color.White,
+                            icon = { Icon(Icons.Default.EditNote, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(30.dp)) },
+                            title = { Text("Confirm Edit Customer?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
+                            text = {
+                                Text(
+                                    text = "Save updated details for ${candCust.name} (${candCust.phone})?\n\nکیا آپ واقعی گاہک کی تفصیل میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
+                                    fontSize = 11.sp,
+                                    color = TextPrimaryDark
+                                )
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        pendingEditCustomerConfirm = null
+                                        onConfirm(candCust)
+                                        onConfirmWithRate?.invoke(candCust, candRate)
+                                    },
+                                    colors = waterPrimaryButtonColors(),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.testTag("confirm_edit_customer_dialog_btn")
+                                ) {
+                                    Text("Yes, Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { pendingEditCustomerConfirm = null }) {
+                                    Text("Cancel", color = TextSecondaryDark)
+                                }
+                            }
+                        )
+                    }
+
                     Button(
                         onClick = {
                             val cleanName = name.trim()
@@ -1810,8 +1825,12 @@ fun CustomerFormDialog(
                                 createdByUid = customer?.createdByUid ?: "",
                                 createdAt = customer?.createdAt ?: 0L
                             )
-                            onConfirm(updatedOrNew)
-                            onConfirmWithRate?.invoke(updatedOrNew, rate)
+                            if (isEditMode) {
+                                pendingEditCustomerConfirm = updatedOrNew to rate
+                            } else {
+                                onConfirm(updatedOrNew)
+                                onConfirmWithRate?.invoke(updatedOrNew, rate)
+                            }
                         },
                         colors = waterPrimaryButtonColors(),
                         shape = RoundedCornerShape(8.dp),

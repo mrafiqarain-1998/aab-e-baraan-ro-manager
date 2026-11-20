@@ -67,10 +67,12 @@ fun DeliveriesListScreen(
     val payments by viewModel.payments.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
     val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
-    val isAdmin = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.DELETE) ||
-        viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.MANAGE)
-    val isViewOnly = !viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD) &&
-        !viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.EDIT)
+    val canAddDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD)
+    val canEditDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.EDIT)
+    val canDeleteDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.DELETE)
+    val canReceivePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
+    val canApprovePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)
+    val isViewOnly = !canAddDelivery && !canEditDelivery
     val context = LocalContext.current
 
     var searchQuery by remember { mutableStateOf("") }
@@ -305,7 +307,7 @@ fun DeliveriesListScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (!isViewOnly) {
+                    if (canAddDelivery) {
                         Button(
                             onClick = onNewDeliveryClick,
                             colors = ButtonDefaults.buttonColors(
@@ -439,7 +441,7 @@ fun DeliveriesListScreen(
                     delivery = delivery,
                     bottleSizes = bottleSizes,
                     relatedPayments = cardPayments,
-                    isAdmin = isAdmin,
+                    isAdmin = canApprovePayment,
                     isViewOnly = isViewOnly,
                     isNew = isNewDelivery,
                     onDismissNew = { viewModel.markRecordSeen("delivery", delivery.id) },
@@ -522,117 +524,115 @@ fun DeliveriesListScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (!isViewOnly) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            DetailIconActionButton(
-                                icon = Icons.Default.Chat,
-                                label = "WhatsApp",
-                                containerColor = SuccessGreen,
-                                contentColor = Color.White,
-                                onClick = {
-                                    val itemsStr = del.items.joinToString("\n") { item ->
-                                        val size = bottleSizes.find { it.id == item.bottleSizeId }
-                                        val isRet = size?.isReturnableBottle ?: (item.bottleSizeId in listOf("size_19l", "size_12l"))
-                                        val retTxt = if (isRet) " (Empty Ret: ${item.emptyCollected})" else ""
-                                        "• ${item.bottleName}: ${item.quantity} x Rs.${item.unitPrice.toInt()} = Rs.${item.lineTotal.toInt()}$retTxt"
-                                    }
-                                    val payStr = if (relatedPayments.isNotEmpty()) {
-                                        relatedPayments.mapIndexed { idx, p ->
-                                            val matched = p.allocations.find {
-                                                (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
-                                                    it.invoiceId == del.id ||
-                                                    it.invoiceId == "inv_${del.id}"
-                                            }?.allocatedAmount ?: p.amount
-                                            "${idx + 1}. ${p.date}: Rs.${matched.toInt()} (${p.paymentMethod.label})"
-                                        }.joinToString("\n")
-                                    } else if (totalPaid > 0) {
-                                        "Paid Rs.${totalPaid.toInt()} (${del.paymentMethod})"
-                                    } else {
-                                        "Credit / Unpaid"
-                                    }
-                                    val msg = """
-                                        *AAB E BARAAN RO PLANT*
-                                        Voucher: ${del.deliveryNumber}
-                                        Customer: ${del.customerName}
-                                        Date: ${del.date} ${del.time}
-                                        
-                                        *Items:*
-                                        $itemsStr
-                                        
-                                        Total Bill: Rs. ${del.totalAmount.toInt()}
-                                        Paid: Rs. ${totalPaid.toInt()}
-                                        Due: Rs. ${outstandingBal.toInt()}
-                                        
-                                        *Payments:*
-                                        $payStr
-                                    """.trimIndent()
-                                    val cleanNum = del.customerPhone.replace("-", "").replace(" ", "").replace("+", "")
-                                    if (cleanNum.isNotBlank()) {
-                                        try {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$cleanNum?text=${Uri.encode(msg)}")))
-                                        } catch (_: Exception) {
-                                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                                putExtra(Intent.EXTRA_TEXT, msg)
-                                                type = "text/plain"
-                                            }
-                                            context.startActivity(Intent.createChooser(sendIntent, "Share via WhatsApp"))
-                                        }
-                                    } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        DetailIconActionButton(
+                            icon = Icons.Default.Chat,
+                            label = "WhatsApp",
+                            containerColor = SuccessGreen,
+                            contentColor = Color.White,
+                            onClick = {
+                                val itemsStr = del.items.joinToString("\n") { item ->
+                                    val size = bottleSizes.find { it.id == item.bottleSizeId }
+                                    val isRet = size?.isReturnableBottle ?: (item.bottleSizeId in listOf("size_19l", "size_12l"))
+                                    val retTxt = if (isRet) " (Empty Ret: ${item.emptyCollected})" else ""
+                                    "• ${item.bottleName}: ${item.quantity} x Rs.${item.unitPrice.toInt()} = Rs.${item.lineTotal.toInt()}$retTxt"
+                                }
+                                val payStr = if (relatedPayments.isNotEmpty()) {
+                                    relatedPayments.mapIndexed { idx, p ->
+                                        val matched = p.allocations.find {
+                                            (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
+                                                it.invoiceId == del.id ||
+                                                it.invoiceId == "inv_${del.id}"
+                                        }?.allocatedAmount ?: p.amount
+                                        "${idx + 1}. ${p.date}: Rs.${matched.toInt()} (${p.paymentMethod.label})"
+                                    }.joinToString("\n")
+                                } else if (totalPaid > 0) {
+                                    "Paid Rs.${totalPaid.toInt()} (${del.paymentMethod})"
+                                } else {
+                                    "Credit / Unpaid"
+                                }
+                                val msg = """
+                                    *AAB E BARAAN RO PLANT*
+                                    Voucher: ${del.deliveryNumber}
+                                    Customer: ${del.customerName}
+                                    Date: ${del.date} ${del.time}
+                                    
+                                    *Items:*
+                                    $itemsStr
+                                    
+                                    Total Bill: Rs. ${del.totalAmount.toInt()}
+                                    Paid: Rs. ${totalPaid.toInt()}
+                                    Due: Rs. ${outstandingBal.toInt()}
+                                    
+                                    *Payments:*
+                                    $payStr
+                                """.trimIndent()
+                                val cleanNum = del.customerPhone.replace("-", "").replace(" ", "").replace("+", "")
+                                if (cleanNum.isNotBlank()) {
+                                    try {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$cleanNum?text=${Uri.encode(msg)}")))
+                                    } catch (_: Exception) {
                                         val sendIntent = Intent(Intent.ACTION_SEND).apply {
                                             putExtra(Intent.EXTRA_TEXT, msg)
                                             type = "text/plain"
                                         }
                                         context.startActivity(Intent.createChooser(sendIntent, "Share via WhatsApp"))
                                     }
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("whatsapp_share_delivery_btn")
-                            )
-
-                            DetailIconActionButton(
-                                icon = Icons.Default.PictureAsPdf,
-                                label = "PDF",
-                                containerColor = WaterSkyLight,
-                                contentColor = WaterNavyPrimary,
-                                onClick = {
-                                    try {
-                                        val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
-                                            context = context,
-                                            delivery = del,
-                                            payments = relatedPayments,
-                                            bottleSizes = bottleSizes
-                                        )
-                                        previewPdfRequest = PdfPreviewRequest(
-                                            file = pdfFile,
-                                            title = "Delivery Slip #${del.deliveryNumber}",
-                                            chooserTitle = "Share Delivery PDF #${del.deliveryNumber}",
-                                            whatsAppCaption = "Delivery Voucher #${del.deliveryNumber} - ${del.customerName}"
-                                        )
-                                    } catch (t: Throwable) {
-                                        Toast.makeText(context, "Unable to open PDF: ${t.message ?: "Error"}", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        putExtra(Intent.EXTRA_TEXT, msg)
+                                        type = "text/plain"
                                     }
-                                },
+                                    context.startActivity(Intent.createChooser(sendIntent, "Share via WhatsApp"))
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("whatsapp_share_delivery_btn")
+                        )
+
+                        DetailIconActionButton(
+                            icon = Icons.Default.PictureAsPdf,
+                            label = "PDF",
+                            containerColor = WaterSkyLight,
+                            contentColor = WaterNavyPrimary,
+                            onClick = {
+                                try {
+                                    val pdfFile = PdfGenerator.generateDeliveryVoucherPdf(
+                                        context = context,
+                                        delivery = del,
+                                        payments = relatedPayments,
+                                        bottleSizes = bottleSizes
+                                    )
+                                    previewPdfRequest = PdfPreviewRequest(
+                                        file = pdfFile,
+                                        title = "Delivery Slip #${del.deliveryNumber}",
+                                        chooserTitle = "Share Delivery PDF #${del.deliveryNumber}",
+                                        whatsAppCaption = "Delivery Voucher #${del.deliveryNumber} - ${del.customerName}"
+                                    )
+                                } catch (t: Throwable) {
+                                    Toast.makeText(context, "Unable to open PDF: ${t.message ?: "Error"}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("pdf_share_delivery_btn")
+                        )
+
+                        if (outstandingBal > 0.0 && canReceivePayment) {
+                            DetailIconActionButton(
+                                icon = Icons.Default.Payments,
+                                label = "Pay Now",
+                                containerColor = WaterSkyButton,
+                                contentColor = WaterSkyButtonContent,
+                                onClick = { deliveryForDirectPayment = del },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .testTag("pdf_share_delivery_btn")
+                                    .testTag("direct_receive_payment_btn")
                             )
-
-                            if (outstandingBal > 0.0) {
-                                DetailIconActionButton(
-                                    icon = Icons.Default.Payments,
-                                    label = "Pay Now",
-                                    containerColor = WaterSkyButton,
-                                    contentColor = WaterSkyButtonContent,
-                                    onClick = { deliveryForDirectPayment = del },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("direct_receive_payment_btn")
-                                )
-                            }
                         }
                     }
 
@@ -640,7 +640,7 @@ fun DeliveriesListScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (isAdmin) {
+                        if (canEditDelivery) {
                             DetailIconActionButton(
                                 icon = Icons.Default.Edit,
                                 label = "Edit",
@@ -654,7 +654,9 @@ fun DeliveriesListScreen(
                                     .weight(1f)
                                     .testTag("admin_edit_delivery_btn")
                             )
+                        }
 
+                        if (canDeleteDelivery) {
                             DetailIconActionButton(
                                 icon = Icons.Default.Delete,
                                 label = "Delete",
@@ -791,7 +793,7 @@ fun DeliveriesListScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Payment Records (وصولی تفصیل):", fontWeight = FontWeight.Bold, fontSize = 10.5.sp, color = WaterNavyDark)
-                if (unsettledRelated.isNotEmpty() && isAdmin) {
+                if (unsettledRelated.isNotEmpty() && canApprovePayment) {
                     Surface(
                         onClick = { viewModel.acknowledgePayments(unsettledRelated.map { it.id }) },
                         shape = RoundedCornerShape(6.dp),
@@ -995,11 +997,47 @@ fun EditDeliveryDialog(
     }
     var notesText by remember { mutableStateOf(delivery.notes) }
     var showAddSizeDropdown by remember { mutableStateOf(false) }
+    var pendingSaveConfirm by remember { mutableStateOf<Delivery?>(null) }
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
 
     val subtotal = remember(items) { items.sumOf { it.lineTotal } }
     val currentTotal = remember(subtotal, deliveryChargesText) {
         subtotal + (deliveryChargesText.toDoubleOrNull() ?: 0.0)
+    }
+
+    if (pendingSaveConfirm != null) {
+        val candidate = pendingSaveConfirm!!
+        AlertDialog(
+            onDismissRequest = { pendingSaveConfirm = null },
+            containerColor = Color.White,
+            icon = { Icon(Icons.Default.EditNote, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(30.dp)) },
+            title = { Text("Confirm Edit Changes?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
+            text = {
+                Text(
+                    text = "Save edited Delivery ${candidate.deliveryNumber} for ${candidate.customerName} (Total: Rs. ${candidate.totalAmount.toInt()}, Paid: Rs. ${candidate.paymentCollected.toInt()})?\n\nکیا آپ واقعی اس ڈیلیوری میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
+                    fontSize = 11.sp,
+                    color = TextPrimaryDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingSaveConfirm = null
+                        onSave(candidate)
+                    },
+                    colors = waterPrimaryButtonColors(),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("confirm_edit_delivery_dialog_btn")
+                ) {
+                    Text("Yes, Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSaveConfirm = null }) {
+                    Text("Cancel", color = TextSecondaryDark)
+                }
+            }
+        )
     }
 
     MobileFormDialog(
@@ -1043,7 +1081,7 @@ fun EditDeliveryDialog(
                         paymentMethod = methodStr,
                         notes = notesText
                     )
-                    onSave(updated)
+                    pendingSaveConfirm = updated
                 },
                 enabled = items.any { it.quantity > 0 },
                 colors = waterPrimaryButtonColors(),
@@ -1549,46 +1587,13 @@ private fun DeliveryCardItem(
                 }
             }
 
-            // Row 3: Compact Inline Badges & Actions (Unsettle/Clear + PDF + Pay + Edit/Delete)
-            if (!isViewOnly || hasUnsettledPayment || allPaymentsCleared) {
+            // Row 3: Status Symbols Only (Unsettle / Clear / Credit — Edit, Delete & Pay Now are inside Detail View)
+            if (hasUnsettledPayment || allPaymentsCleared || isCredit) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!isViewOnly) {
-                        CardSmallIconButton(
-                            icon = Icons.Default.PictureAsPdf,
-                            label = "PDF",
-                            containerColor = WaterSkyLight,
-                            contentColor = WaterNavyPrimary,
-                            onClick = onSharePdf,
-                            modifier = Modifier.testTag("card_pdf_btn_${delivery.id}")
-                        )
-
-                        if (isCredit) {
-                            CardSmallIconButton(
-                                icon = Icons.Default.Payments,
-                                label = "Pay",
-                                containerColor = SuccessGreenLight,
-                                contentColor = SuccessGreen,
-                                onClick = { onReceivePayment(delivery) },
-                                modifier = Modifier.testTag("pay_delivery_btn_${delivery.id}")
-                            )
-                        }
-
-                        if (isAdmin && hasUnsettledPayment) {
-                            CardSmallIconButton(
-                                icon = Icons.Default.DoneAll,
-                                label = "Clear",
-                                containerColor = SuccessGreen,
-                                contentColor = Color.White,
-                                onClick = onMarkClear,
-                                modifier = Modifier.testTag("clear_delivery_payment_btn_${delivery.id}")
-                            )
-                        }
-                    }
-
                     if (hasUnsettledPayment) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
@@ -1596,7 +1601,7 @@ private fun DeliveryCardItem(
                             modifier = Modifier.testTag("badge_delivery_unsettle_${delivery.id}")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -1605,7 +1610,7 @@ private fun DeliveryCardItem(
                                     tint = WarningOrange,
                                     modifier = Modifier.size(10.dp)
                                 )
-                                Spacer(modifier = Modifier.width(2.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = "Unsettle",
                                     fontSize = 8.sp,
@@ -1623,7 +1628,7 @@ private fun DeliveryCardItem(
                             modifier = Modifier.testTag("badge_delivery_clear_${delivery.id}")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -1632,7 +1637,7 @@ private fun DeliveryCardItem(
                                     tint = SuccessGreen,
                                     modifier = Modifier.size(10.dp)
                                 )
-                                Spacer(modifier = Modifier.width(2.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = "Clear",
                                     fontSize = 8.sp,
@@ -1647,32 +1652,14 @@ private fun DeliveryCardItem(
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    if (isAdmin && !isViewOnly) {
-                        Surface(
-                            shape = RoundedCornerShape(5.dp),
-                            color = WaterSkyLight,
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clickable { onEdit(delivery) }
-                                .testTag("card_edit_delivery_${delivery.id}")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Delivery", tint = WaterNavyPrimary, modifier = Modifier.size(13.dp))
-                            }
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(5.dp),
-                            color = ErrorRedLight,
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clickable { onDelete(delivery) }
-                                .testTag("card_delete_delivery_${delivery.id}")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete Delivery", tint = ErrorRed, modifier = Modifier.size(13.dp))
-                            }
-                        }
-                    }
+                    Text(
+                        text = "Tap for details ›",
+                        fontSize = 8.sp,
+                        color = TextMuted,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
@@ -1762,6 +1749,45 @@ fun DirectReceivePaymentDialog(
     var selectedMethod by remember { mutableStateOf(PaymentMethod.CASH) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var isSubmitting by remember { mutableStateOf(false) }
+    var pendingPayConfirm by remember { mutableStateOf<Pair<Double, PaymentMethod>?>(null) }
+
+    if (pendingPayConfirm != null) {
+        val (confirmAmt, confirmMethod) = pendingPayConfirm!!
+        AlertDialog(
+            onDismissRequest = { pendingPayConfirm = null },
+            containerColor = Color.White,
+            icon = { Icon(Icons.Default.Payments, contentDescription = null, tint = SuccessGreen, modifier = Modifier.size(30.dp)) },
+            title = { Text("Confirm Payment?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = SuccessGreen) },
+            text = {
+                Text(
+                    text = "Receive Rs. ${confirmAmt.toInt()} (${if (confirmMethod == PaymentMethod.CASH) "Cash" else "Online"}) from ${delivery.customerName} for Delivery ${delivery.deliveryNumber}?\n\nکیا آپ واقعی Rs. ${confirmAmt.toInt()} وصولی کی تصدیق کرتے ہیں؟",
+                    fontSize = 11.sp,
+                    color = TextPrimaryDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (!isSubmitting) {
+                            isSubmitting = true
+                            pendingPayConfirm = null
+                            onConfirm(confirmAmt, confirmMethod)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("confirm_pay_now_dialog_btn")
+                ) {
+                    Text("Yes, Confirm Pay", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPayConfirm = null }) {
+                    Text("Cancel", color = TextSecondaryDark)
+                }
+            }
+        )
+    }
 
     MobileFormDialog(
         title = "Pay Now (وصولی)",
@@ -1782,8 +1808,7 @@ fun DirectReceivePaymentDialog(
                     } else if (amt > remainingDue) {
                         errorMsg = "Amount cannot exceed due Rs. ${remainingDue.toInt()}"
                     } else {
-                        isSubmitting = true
-                        onConfirm(amt, selectedMethod)
+                        pendingPayConfirm = amt to selectedMethod
                     }
                 },
                 enabled = !isSubmitting,

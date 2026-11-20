@@ -52,8 +52,39 @@ object TransactionNotificationHelper {
     private const val KEY_ACTOR_EMAIL = "actor_email"
     private const val KEY_LAST_CHECK_TS = "last_check_ts"
     private const val KEY_NOTIFIED_KEYS = "notified_keys"
+    private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
+    private const val KEY_RESTRICT_OWN_DATA = "restrict_own_data"
     private const val WORK_NAME = "aab_bg_tx_alerts"
     private const val MAX_STORED_KEYS = 250
+
+    fun isNotificationsEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATIONS_ENABLED, true)
+    }
+
+    fun setNotificationsEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled).apply()
+        if (!enabled) {
+            try {
+                NotificationManagerCompat.from(context).cancelAll()
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to cancel active notifications: ${e.message}")
+            }
+            try {
+                WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to cancel background notification worker: ${e.message}")
+            }
+        } else {
+            scheduleBackgroundSyncWorker(context)
+        }
+    }
+
+    fun isRestrictOwnDataEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_RESTRICT_OWN_DATA, false)
+    }
 
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -82,7 +113,8 @@ object TransactionNotificationHelper {
         plantId: String,
         actorUid: String,
         actorName: String,
-        actorEmail: String
+        actorEmail: String,
+        restrictToOwnDataOnly: Boolean = false
     ) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val editor = prefs.edit()
@@ -90,6 +122,7 @@ object TransactionNotificationHelper {
             .putString(KEY_ACTOR_UID, actorUid.trim())
             .putString(KEY_ACTOR_NAME, actorName.trim())
             .putString(KEY_ACTOR_EMAIL, actorEmail.trim().lowercase())
+            .putBoolean(KEY_RESTRICT_OWN_DATA, restrictToOwnDataOnly)
         if (!prefs.contains(KEY_LAST_CHECK_TS)) {
             editor.putLong(KEY_LAST_CHECK_TS, System.currentTimeMillis())
         }
@@ -208,6 +241,10 @@ object TransactionNotificationHelper {
         createdAt: Long
     ): Boolean {
         if (recordId.isBlank()) return false
+        if (!isNotificationsEnabled(context) || isRestrictOwnDataEnabled(context)) {
+            markAlreadyNotified(context, type, recordId, createdAt)
+            return false
+        }
         val actorUid = getActorUid(context)
         val actorName = getActorName(context)
         val actorEmail = getActorEmail(context)
@@ -223,6 +260,10 @@ object TransactionNotificationHelper {
 
     fun notifyGroupedTransactions(context: Context, alerts: List<PendingTxAlert>): Int {
         if (alerts.isEmpty()) return 0
+        if (!isNotificationsEnabled(context) || isRestrictOwnDataEnabled(context)) {
+            alerts.forEach { markAlreadyNotified(context, it.type, it.recordId, it.createdAt) }
+            return 0
+        }
         val fresh = alerts.filter { it.recordId.isNotBlank() && !isAlreadyNotified(context, it.type, it.recordId) }
         if (fresh.isEmpty()) return 0
 
@@ -257,7 +298,7 @@ object TransactionNotificationHelper {
         title: String,
         body: String
     ): Boolean {
-        if (!hasNotificationPermission(context)) return false
+        if (!isNotificationsEnabled(context) || !hasNotificationPermission(context)) return false
         createNotificationChannel(context)
         return try {
             val launchIntent = Intent(context, MainActivity::class.java).apply {
@@ -298,6 +339,13 @@ object TransactionNotificationHelper {
     }
 
     fun scheduleBackgroundSyncWorker(context: Context) {
+        if (!isNotificationsEnabled(context)) {
+            try {
+                WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+            } catch (_: Exception) {
+            }
+            return
+        }
         try {
             createNotificationChannel(context)
             val constraints = Constraints.Builder()

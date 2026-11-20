@@ -28,8 +28,8 @@ class WaterPlantRepositoryRuleTest : FirestoreEmulatorTestBase() {
 
         WaterPlantRepository.resetInstanceForTesting()
         val repoPhoneA = WaterPlantRepository.getInstance(appContext)
-        val adminProfile = repoPhoneA.authenticate("admin", "admin123")
-        assertNotNull("Default Admin should authenticate on Phone A", adminProfile)
+        val adminSignedIn = repoPhoneA.handleGoogleAuthSuccess(ownerUid, "mrafiqarain1998@gmail.com", "Admin")
+        assertTrue("Super Admin should authenticate on Phone A", adminSignedIn)
 
         val staffUsername = "rashid_$runSuffix"
         val staffAccount = UserAccount(
@@ -92,7 +92,7 @@ class WaterPlantRepositoryRuleTest : FirestoreEmulatorTestBase() {
 
         WaterPlantRepository.resetInstanceForTesting()
         val repoOwner = WaterPlantRepository.getInstance(appContext)
-        repoOwner.authenticate("admin", "admin123")
+        repoOwner.handleGoogleAuthSuccess(ownerUid, "mrafiqarain1998@gmail.com", "Admin")
         withTimeout(DEFAULT_TIMEOUT_MS) {
             repoOwner.createUserAccount(
                 UserAccount(

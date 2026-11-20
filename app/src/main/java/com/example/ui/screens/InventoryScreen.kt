@@ -45,24 +45,29 @@ fun InventoryScreen(
     onManageSizesClick: () -> Unit
 ) {
     val currentUser by viewModel.currentUser.collectAsState()
-    val isAdmin = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT) ||
+    val canViewBottles = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.VIEW) ||
+        viewModel.hasPermission(AppModule.BOTTLE_ISSUE, PermissionAction.VIEW) ||
+        viewModel.hasPermission(AppModule.REFILL_BATCHES, PermissionAction.VIEW)
+    val canViewMaterials = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.VIEW)
+    val canViewCosting = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT) ||
         viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.MANAGE)
+    val canViewStaffTab = viewModel.hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.VIEW)
     val canManageSizes = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.MANAGE)
 
-    var activeTab by remember { mutableStateOf(StockCostSubTab.BOTTLE_STOCK) }
-
-    // If active tab was COSTING and user switches to non-admin, force back to BOTTLE_STOCK
-    LaunchedEffect(isAdmin) {
-        if (!isAdmin && activeTab == StockCostSubTab.COSTING) {
-            activeTab = StockCostSubTab.BOTTLE_STOCK
+    val availableTabs = remember(currentUser, canViewBottles, canViewMaterials, canViewCosting, canViewStaffTab) {
+        buildList {
+            if (canViewBottles) add(StockCostSubTab.BOTTLE_STOCK)
+            if (canViewMaterials) add(StockCostSubTab.OTHER_MATERIALS)
+            if (canViewCosting) add(StockCostSubTab.COSTING)
+            if (canViewStaffTab) add(StockCostSubTab.STAFF)
         }
     }
 
-    val availableTabs = remember(isAdmin) {
-        if (isAdmin) {
-            StockCostSubTab.values().toList()
-        } else {
-            StockCostSubTab.values().filterNot { it.adminOnly }
+    var activeTab by remember { mutableStateOf(availableTabs.firstOrNull() ?: StockCostSubTab.BOTTLE_STOCK) }
+
+    LaunchedEffect(availableTabs) {
+        if (availableTabs.isNotEmpty() && activeTab !in availableTabs) {
+            activeTab = availableTabs.first()
         }
     }
 
@@ -203,25 +208,29 @@ fun InventoryScreen(
                 StockCostSubTab.BOTTLE_STOCK -> {
                     BottleStockSubTab(
                         viewModel = viewModel,
-                        isAdmin = isAdmin
+                        isAdmin = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT) ||
+                            viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.DELETE)
                     )
                 }
                 StockCostSubTab.OTHER_MATERIALS -> {
                     OtherMaterialStockSubTab(
                         viewModel = viewModel,
-                        isAdmin = isAdmin
+                        isAdmin = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.EDIT) ||
+                            viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.DELETE)
                     )
                 }
                 StockCostSubTab.COSTING -> {
                     CostingSubTab(
                         viewModel = viewModel,
-                        isAdmin = isAdmin
+                        isAdmin = canViewCosting
                     )
                 }
                 StockCostSubTab.STAFF -> {
                     StaffManagementSubTab(
                         viewModel = viewModel,
-                        isAdmin = isAdmin
+                        isAdmin = viewModel.hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.ADD) ||
+                            viewModel.hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.EDIT) ||
+                            viewModel.hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.MANAGE)
                     )
                 }
             }

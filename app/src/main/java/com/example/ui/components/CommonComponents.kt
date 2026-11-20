@@ -393,6 +393,8 @@ fun AabTopAppBar(
     pendingSyncCount: Int = 0,
     isDeviceOnline: Boolean = true,
     activeBranchName: String = "",
+    notificationsEnabled: Boolean = true,
+    onToggleNotifications: ((Boolean) -> Unit)? = null,
     onLogout: (() -> Unit)? = null,
     navigationIcon: @Composable (() -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {}
@@ -702,7 +704,7 @@ fun AabTopAppBar(
                                     }
                                 )
 
-                                if ((canManageStaff || currentRole == UserRole.ADMIN) && onNavigateToUserManagement != null) {
+                                if (canManageStaff && onNavigateToUserManagement != null) {
                                     HorizontalDivider()
                                     DropdownMenuItem(
                                         text = {
@@ -731,6 +733,52 @@ fun AabTopAppBar(
                                                 tint = WaterNavyPrimary
                                             )
                                         }
+                                    )
+                                }
+
+                                if (onToggleNotifications != null) {
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                                    Text(
+                                                        text = if (notificationsEnabled) "Notifications: ON" else "Notifications: OFF",
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (notificationsEnabled) WaterNavyPrimary else ErrorRed,
+                                                        fontSize = 11.5.sp
+                                                    )
+                                                    Text(
+                                                        text = if (notificationsEnabled) "نوٹیفکیشنز آن ہیں (بند کرنے کیلئے کلک کریں)" else "نوٹیفکیشنز بند ہیں (آن کرنے کیلئے کلک کریں)",
+                                                        fontSize = 9.sp,
+                                                        color = TextSecondaryDark
+                                                    )
+                                                }
+                                                Switch(
+                                                    checked = notificationsEnabled,
+                                                    onCheckedChange = { onToggleNotifications(it) },
+                                                    colors = SwitchDefaults.colors(
+                                                        checkedThumbColor = Color.White,
+                                                        checkedTrackColor = SuccessGreen,
+                                                        uncheckedThumbColor = Color.White,
+                                                        uncheckedTrackColor = ErrorRed.copy(alpha = 0.55f)
+                                                    )
+                                                )
+                                            }
+                                        },
+                                        onClick = { onToggleNotifications(!notificationsEnabled) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = if (notificationsEnabled) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,
+                                                contentDescription = "Toggle Notifications",
+                                                tint = if (notificationsEnabled) SuccessGreen else ErrorRed
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("menu_toggle_notifications")
                                     )
                                 }
 
@@ -765,7 +813,7 @@ fun AabTopAppBar(
                                     )
                                 }
 
-                                if ((canViewAudit || currentRole == UserRole.ADMIN) && onNavigateToAuditHistory != null) {
+                                if (canViewAudit && onNavigateToAuditHistory != null) {
                                     DropdownMenuItem(
                                         text = {
                                             Column {
@@ -796,7 +844,7 @@ fun AabTopAppBar(
                                     )
                                 }
 
-                                if ((canManageBackup || currentRole == UserRole.ADMIN) && onNavigateToBackupRestore != null) {
+                                if (canManageBackup && onNavigateToBackupRestore != null) {
                                     DropdownMenuItem(
                                         text = {
                                             Column {

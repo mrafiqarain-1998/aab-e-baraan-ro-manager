@@ -201,7 +201,8 @@ object PermissionDefaults {
     fun normalizePermissions(
         input: Map<String, List<String>>?,
         role: UserRole,
-        isSuperAdmin: Boolean = false
+        isSuperAdmin: Boolean = false,
+        explicitMode: Boolean = false
     ): Map<String, List<String>> {
         if (isSuperAdmin || role == UserRole.ADMIN) {
             return fullAdminPermissions()
@@ -209,11 +210,12 @@ object PermissionDefaults {
         val fallback = defaultPermissionsForRole(role)
         val validActionNames = PermissionAction.entries.map { it.name }.toSet()
         val out = linkedMapOf<String, List<String>>()
+        val treatMissingAsDenied = explicitMode || (input != null && input.isNotEmpty())
 
         AppModule.entries.forEach { mod ->
             val raw = when {
-                input == null || input.isEmpty() -> fallback[mod.name].orEmpty()
-                mod.name in input -> input[mod.name].orEmpty()
+                input != null && mod.name in input -> input[mod.name].orEmpty()
+                treatMissingAsDenied -> emptyList()
                 else -> fallback[mod.name].orEmpty()
             }
             val cleaned = raw.map { it.trim().uppercase() }
@@ -235,7 +237,7 @@ object PermissionDefaults {
     ): Boolean {
         if (!profile.active) return false
         if (profile.isSuperAdmin || profile.role == UserRole.ADMIN) return true
-        val effectiveMap = if (profile.permissions.isEmpty()) {
+        val effectiveMap = if (!profile.hasExplicitPermissions && profile.permissions.isEmpty()) {
             defaultPermissionsForRole(profile.role)
         } else {
             profile.permissions

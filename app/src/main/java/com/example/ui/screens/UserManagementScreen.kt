@@ -611,6 +611,7 @@ fun UserManagementScreen(
                                 googleEmail = cleanEmail,
                                 role = selectedRole,
                                 permissions = customPerms,
+                                hasExplicitPermissions = true,
                                 assignedBranchIds = branchList,
                                 defaultBranchId = branchList.first(),
                                 active = true,
@@ -1021,6 +1022,7 @@ fun UserManagementScreen(
                                 role = finalRole,
                                 isSuperAdmin = isPrimaryAdmin,
                                 permissions = finalPerms,
+                                hasExplicitPermissions = true,
                                 assignedBranchIds = branchList,
                                 defaultBranchId = branchList.first(),
                                 restrictToOwnDataOnly = if (isPrimaryAdmin) false else restrictToOwnDataOnly,
@@ -1387,13 +1389,32 @@ private fun PermissionMatrixEditor(
                 Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AppModule.entries.forEach { module ->
                         val currentActions = permissions[module.name].orEmpty().toSet()
+                        val isHidden = currentActions.isEmpty()
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                text = module.title,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = WaterNavyDark
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${module.title} (${module.urduTitle})",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isHidden) ErrorRed else WaterNavyDark
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (isHidden) ErrorRedLight else SuccessGreenLight
+                                ) {
+                                    Text(
+                                        text = if (isHidden) "Hidden (بند)" else "Visible (${currentActions.size})",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isHidden) ErrorRed else SuccessGreen,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1405,10 +1426,15 @@ private fun PermissionMatrixEditor(
                                     FilterChip(
                                         selected = checked,
                                         onClick = {
-                                            val next = if (checked) currentActions - action.name else currentActions + action.name
+                                            val nextSet = when {
+                                                // Unchecking VIEW hides the entire module completely (clears all actions)
+                                                checked && action == PermissionAction.VIEW -> emptySet()
+                                                checked -> currentActions - action.name
+                                                // Checking any action automatically grants VIEW too
+                                                else -> currentActions + action.name + PermissionAction.VIEW.name
+                                            }
                                             val updatedMap = permissions.toMutableMap()
-                                            // Keep explicit emptyList() so blocked modules stay blocked after normalization
-                                            updatedMap[module.name] = next.toList()
+                                            updatedMap[module.name] = nextSet.toList()
                                             onPermissionsChanged(updatedMap)
                                         },
                                         label = {

@@ -708,6 +708,9 @@ class WaterPlantBusinessLogicTest {
             )
         )
 
+        // Ensure Admin has a custom strong password (default admin123 is permanently retired)
+        assertTrue(repository.changeUserPassword("user_admin_01", "AdminStrong@99"))
+
         // Missing password or wrong password rejected
         assertFalse(repository.switchUserByCredentials("driver_ali", "").first)
         assertFalse(repository.switchUserByCredentials("driver_ali", "wrong").first)
@@ -720,7 +723,7 @@ class WaterPlantBusinessLogicTest {
 
         // Deactivate user as Admin -> switching into inactive user rejected
         val adminAcc = repository.userAccounts.value.first { it.id == "user_admin_01" }
-        assertTrue(repository.switchUserByCredentials(adminAcc.username, adminAcc.password).first)
+        assertTrue(repository.switchUserByCredentials(adminAcc.username, "AdminStrong@99").first)
         val toggled = repository.toggleUserAccountActive("staff_switch_1")
         assertTrue(toggled.first)
         val inactiveSwitch = repository.switchUserByCredentials("driver_ali", "secret99")
@@ -750,8 +753,9 @@ class WaterPlantBusinessLogicTest {
 
         // Change own password checks current password first
         val adminAcc = repository.userAccounts.value.first { it.id == "user_admin_01" }
+        assertTrue(repository.changeUserPassword("user_admin_01", "InitialAdmin@88"))
         assertFalse(repository.changeOwnPassword("wrong_curr", "newpass12").first)
-        assertTrue(repository.changeOwnPassword(adminAcc.password, "newAdmin99").first)
+        assertTrue(repository.changeOwnPassword("InitialAdmin@88", "newAdmin99").first)
         assertTrue(repository.switchUserByCredentials(adminAcc.username, "newAdmin99").first)
     }
 
@@ -1722,7 +1726,8 @@ class WaterPlantBusinessLogicTest {
 
         val run1Repo = WaterPlantRepository.getInstance(context)
         assertFalse(run1Repo.isUserLoggedIn())
-        assertNotNull(run1Repo.authenticate("admin", "admin123"))
+        assertNull("Retired admin123 default password must never log in", run1Repo.authenticate("admin", "admin123"))
+        assertTrue(run1Repo.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
 
         // Create a staff user in Run 1 with leading '@' & whitespace edge cases + Gmail
         val staffId = run1Repo.createUserAccount(
@@ -1765,7 +1770,7 @@ class WaterPlantBusinessLogicTest {
         assertTrue(run2Repo.isUserLoggedIn())
 
         // Inactive user returns INACTIVE_ACCOUNT
-        assertNotNull(run2Repo.authenticate("admin", "admin123"))
+        assertTrue(run2Repo.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
         assertTrue(run2Repo.toggleUserAccountActive(staffId).first)
         val inactiveOutcome = runBlocking { run2Repo.authenticateWithOutcome("rashidstaff", "pass9988") }
         assertEquals(LoginOutcome.INACTIVE_ACCOUNT, inactiveOutcome.first)
@@ -1942,8 +1947,9 @@ class WaterPlantBusinessLogicTest {
     @Test
     fun testCrossDevicePasswordVerifierSyncRejectsDefaultAdminPassword() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        // Phone A: Admin logs in with default password and changes it to a new password
-        assertNotNull(repository.authenticate("admin", "admin123"))
+        // Phone A: Admin signs in via authorized Super Admin Google account and sets a custom strong password
+        assertNull("Default admin123 must be permanently blocked", repository.authenticate("admin", "admin123"))
+        assertTrue(repository.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
         val changed = repository.changeUserPassword("user_admin_01", "MyNewAdmin@789")
         assertTrue("Admin password change must succeed", changed)
         val adminOnPhoneA = repository.userAccounts.value.first { it.username == "admin" }
@@ -2013,7 +2019,7 @@ class WaterPlantBusinessLogicTest {
         assertTrue("Blocked staff must not add new bottle sizes", newSizeId.isBlank())
 
         // Admin grants all 3 controls back -> operations succeed
-        assertNotNull(repository.authenticate("admin", "admin123"))
+        assertTrue(repository.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
         val staffAccount = repository.userAccounts.value.first { it.id == staffId }
         val allowedPerms = staffAccount.permissions.toMutableMap()
         allowedPerms[AppModule.CUSTOMER_RATES.name] = listOf(
@@ -2823,6 +2829,202 @@ class WaterPlantBusinessLogicTest {
         assertEquals(listOf("e1"), repository.filterVisibleExpenses(sampleExpenses, staffBoth, today).map { it.id })
         assertEquals(listOf("d1"), repository.filterVisibleDeliveries(sampleDeliveries, staffBoth, today).map { it.id })
         assertEquals(listOf("p1"), repository.filterVisiblePayments(samplePayments, staffBoth, today).map { it.id })
+
+        // Cash closings also obey own-data & today-only filters
+        val sampleClosings = listOf(
+            CashClosing(id = "c1", date = today, closedBy = "Ali Rider"),
+            CashClosing(id = "c2", date = yesterday, closedBy = "Ali Rider"),
+            CashClosing(id = "c3", date = today, closedBy = "Bilal Staff")
+        )
+        assertEquals(3, repository.filterVisibleCashClosings(sampleClosings, adminUser, today).size)
+        assertEquals(listOf("c1", "c2"), repository.filterVisibleCashClosings(sampleClosings, staffOwnOnly, today).map { it.id })
+        assertEquals(listOf("c1", "c3"), repository.filterVisibleCashClosings(sampleClosings, staffTodayOnly, today).map { it.id })
+        assertEquals(listOf("c1"), repository.filterVisibleCashClosings(sampleClosings, staffBoth, today).map { it.id })
+    }
+
+    @Test
+    fun testRetiredAdminDefaultPasswordsAreBlockedEverywhereAndScrubbedFromOldCaches() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Neither admin123 nor Admin@123 can authenticate, verifyRolePassword, or switchUserByCredentials
+        assertNull(repository.authenticate("admin", "admin123"))
+        assertNull(repository.authenticate("admin", "Admin@123"))
+        assertFalse(repository.verifyRolePassword(UserRole.ADMIN, "admin123"))
+        assertFalse(repository.verifyRolePassword(UserRole.ADMIN, "Admin@123"))
+        assertEquals(LoginOutcome.INVALID_CREDENTIALS, repository.authenticateWithOutcome("admin", "admin123").first)
+        assertFalse(repository.switchUserByCredentials("admin", "admin123").first)
+
+        // 2. Admin cannot re-assign admin123 / Admin@123 via resetUserPassword, changeUserPassword, or changeOwnPassword
+        assertTrue(repository.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
+        assertFalse(repository.changeUserPassword("user_admin_01", "admin123"))
+        assertFalse(repository.changeUserPassword("user_admin_01", "Admin@123"))
+        assertFalse(repository.resetUserPassword("user_admin_01", "admin123"))
+        assertFalse(repository.changeOwnPassword("admin123", "admin123").first)
+
+        // 3. Setting a strong custom password works, and admin123 remains rejected
+        assertTrue(repository.changeUserPassword("user_admin_01", "PlantBoss@2026"))
+        assertNull(repository.authenticate("admin", "admin123"))
+        assertNotNull(repository.authenticate("admin", "PlantBoss@2026"))
+
+        // 4. Simulate an OLD device cache containing a legacy admin123 PBKDF2 hash -> startup MUST scrub it!
+        val legacySalt = com.example.util.PasswordHashUtil.generateSalt()
+        val legacyHash = com.example.util.PasswordHashUtil.hashPassword("admin123", legacySalt)
+        val oldCachedAdmin = UserAccount(
+            id = "user_admin_01",
+            username = "admin",
+            password = "",
+            passwordHash = legacyHash,
+            passwordSalt = legacySalt,
+            name = "Admin",
+            role = UserRole.ADMIN,
+            active = true,
+            isSuperAdmin = true
+        )
+        com.example.data.PlantDataStorage(context).saveUserAccounts(listOf(oldCachedAdmin))
+        WaterPlantRepository.resetInstanceForTesting()
+        val oldDeviceRepo = WaterPlantRepository.getInstance(context)
+
+        assertNull("Old device cached admin123 hash must be scrubbed on startup", oldDeviceRepo.authenticate("admin", "admin123"))
+        assertEquals(LoginOutcome.INVALID_CREDENTIALS, oldDeviceRepo.authenticateWithOutcome("admin", "admin123").first)
+        val scrubbedAdmin = oldDeviceRepo.userAccounts.value.first { it.id == "user_admin_01" }
+        assertTrue("Scrubbed admin must have empty hash", scrubbedAdmin.passwordHash.isBlank())
+        assertTrue("Scrubbed admin must have empty plaintext password", scrubbedAdmin.password.isBlank())
+    }
+
+    @Test
+    fun testStrictGranularPermissionsHideDeniedModulesAndEnforceExpenseApproval() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(repository.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
+
+        // Create staff user with ONLY DELIVERIES (VIEW) enabled — DASHBOARD, EXPENSES, CUSTOMERS etc. explicitly denied!
+        val minimalPerms = mapOf(
+            AppModule.DELIVERIES.name to listOf(PermissionAction.VIEW.name)
+        )
+        val staffId = repository.createUserAccount(
+            UserAccount(
+                username = "strict_view_rider",
+                password = "RiderPass@99",
+                name = "Strict Rider",
+                role = UserRole.INCHARGE,
+                active = true,
+                permissions = minimalPerms,
+                hasExplicitPermissions = true
+            )
+        )
+        assertTrue(staffId.isNotBlank())
+
+        // Even when RTDB strips empty lists, normalizePermissions(explicitMode = true) MUST keep missing modules denied!
+        val normalizedExplicit = PermissionDefaults.normalizePermissions(
+            role = UserRole.INCHARGE,
+            input = emptyMap(),
+            explicitMode = true
+        )
+        assertTrue(
+            "When explicitMode=true and map is empty, DASHBOARD must remain empty (DENIED)",
+            normalizedExplicit[AppModule.DASHBOARD.name].isNullOrEmpty()
+        )
+
+        // Log in as strict_view_rider -> DASHBOARD must be hidden, DELIVERIES VIEW allowed, DELIVERIES ADD/EDIT/DELETE denied
+        assertNotNull(repository.authenticate("strict_view_rider", "RiderPass@99"))
+        assertTrue(repository.currentUser.value.hasExplicitPermissions)
+        assertFalse("Denied DASHBOARD must return false", repository.hasPermission(AppModule.DASHBOARD, PermissionAction.VIEW))
+        assertFalse("Denied CUSTOMERS must return false", repository.hasPermission(AppModule.CUSTOMERS, PermissionAction.VIEW))
+        assertFalse("Denied EXPENSES must return false", repository.hasPermission(AppModule.EXPENSES, PermissionAction.VIEW))
+        assertTrue("Granted DELIVERIES VIEW must return true", repository.hasPermission(AppModule.DELIVERIES, PermissionAction.VIEW))
+        assertFalse("Denied DELIVERIES ADD must return false", repository.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD))
+        assertFalse("Denied DELIVERIES EDIT must return false", repository.hasPermission(AppModule.DELIVERIES, PermissionAction.EDIT))
+        assertFalse("Denied DELIVERIES DELETE must return false", repository.hasPermission(AppModule.DELIVERIES, PermissionAction.DELETE))
+
+        // Persist and restart -> explicit denied permissions MUST survive restart!
+        WaterPlantRepository.resetInstanceForTesting()
+        val restartedRepo = WaterPlantRepository.getInstance(context)
+        assertFalse("Denied DASHBOARD must remain denied after restart", restartedRepo.hasPermission(AppModule.DASHBOARD, PermissionAction.VIEW))
+        assertTrue("Granted DELIVERIES VIEW must remain granted after restart", restartedRepo.hasPermission(AppModule.DELIVERIES, PermissionAction.VIEW))
+
+        // Verify acknowledgeExpense enforces EXPENSES: APPROVE
+        assertTrue(restartedRepo.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
+        val expNoApproveId = restartedRepo.createUserAccount(
+            UserAccount(
+                username = "exp_editor_only",
+                password = "ExpPass@11",
+                name = "Expense Clerk",
+                role = UserRole.INCHARGE,
+                active = true,
+                permissions = mapOf(
+                    AppModule.EXPENSES.name to listOf(PermissionAction.VIEW.name, PermissionAction.ADD.name)
+                ),
+                hasExplicitPermissions = true
+            )
+        )
+        assertTrue(expNoApproveId.isNotBlank())
+        assertNotNull(restartedRepo.authenticate("exp_editor_only", "ExpPass@11"))
+        val createdVoucher = restartedRepo.addExpense(
+            categoryId = "cat_fuel",
+            categoryName = "Fuel",
+            description = "Generator fuel",
+            amount = 1500.0,
+            method = PaymentMethod.CASH,
+            payee = "PSO",
+            notes = "",
+            expenseDate = "2026-11-20"
+        )
+        assertTrue(createdVoucher.isNotBlank())
+        val savedExp = restartedRepo.expenses.value.first { it.voucherNumber == createdVoucher }
+        assertFalse("Non-admin expense starts unverified", savedExp.isAcknowledged)
+
+        // Attempt to acknowledge without APPROVE permission -> MUST be blocked
+        restartedRepo.acknowledgeExpense(savedExp.id)
+        assertFalse(
+            "Staff without EXPENSES:APPROVE must not be able to verify expense",
+            restartedRepo.expenses.value.first { it.id == savedExp.id }.isAcknowledged
+        )
+
+        // Admin verifies -> succeeds
+        assertTrue(restartedRepo.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
+        restartedRepo.acknowledgeExpense(savedExp.id)
+        assertTrue(
+            "Admin must be able to verify expense",
+            restartedRepo.expenses.value.first { it.id == savedExp.id }.isAcknowledged
+        )
+    }
+
+    @Test
+    fun testInAppNotificationToggleAndOwnDataNotificationSuppression() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // Default is enabled
+        repository.setNotificationsEnabled(true)
+        assertTrue(repository.notificationsEnabled.value)
+        assertTrue(com.example.util.TransactionNotificationHelper.isNotificationsEnabled(context))
+
+        // Turn OFF via repository -> persists in TransactionNotificationHelper and StateFlow
+        repository.toggleNotifications()
+        assertFalse(repository.notificationsEnabled.value)
+        assertFalse(com.example.util.TransactionNotificationHelper.isNotificationsEnabled(context))
+
+        // Turn back ON
+        repository.setNotificationsEnabled(true)
+        assertTrue(repository.notificationsEnabled.value)
+        assertTrue(com.example.util.TransactionNotificationHelper.isNotificationsEnabled(context))
+
+        // When staff has restrictToOwnDataOnly = true, active notification context records restrictOwnData = true
+        assertTrue(repository.handleGoogleAuthSuccess("uid_admin", "mrafiqarain1998@gmail.com", "Admin"))
+        val ownOnlyId = repository.createUserAccount(
+            UserAccount(
+                username = "private_staff",
+                password = "PrivPass@123",
+                name = "Private Staff",
+                role = UserRole.INCHARGE,
+                active = true,
+                restrictToOwnDataOnly = true
+            )
+        )
+        assertTrue(ownOnlyId.isNotBlank())
+        assertNotNull(repository.authenticate("private_staff", "PrivPass@123"))
+        assertTrue(
+            "Restrict-own-data user must propagate flag to notification helper so remote alerts for other users are suppressed",
+            com.example.util.TransactionNotificationHelper.isRestrictOwnDataEnabled(context)
+        )
     }
 }
 

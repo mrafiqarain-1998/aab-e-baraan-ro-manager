@@ -63,8 +63,11 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     val bottleCostings = repository.bottleCostings
     val monthlyRecurringExpenses = repository.monthlyRecurringExpenses
     val plantWorkers = repository.plantWorkers
-    val cashClosings = repository.cashClosings
+    val cashClosings: StateFlow<List<CashClosing>> = combine(repository.cashClosings, repository.currentUser) { list, user ->
+        repository.filterVisibleCashClosings(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleCashClosings(repository.cashClosings.value, repository.currentUser.value))
     val notifications = repository.notifications
+    val notificationsEnabled = repository.notificationsEnabled
     val syncStatus = repository.syncStatus
     val isCloudConnected = repository.isCloudConnected
     val cloudUserEmail = repository.cloudUserEmail
@@ -109,6 +112,14 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
 
     fun hasPermission(module: AppModule, action: PermissionAction): Boolean {
         return repository.hasPermission(module, action)
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        repository.setNotificationsEnabled(enabled)
+    }
+
+    fun toggleNotifications() {
+        repository.toggleNotifications()
     }
 
     // Room Database Reactive Flows (Customer deliveries, outstanding balances, daily plant expenses, and stock items)

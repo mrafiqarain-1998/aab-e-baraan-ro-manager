@@ -29,6 +29,11 @@ class TransactionNotificationWorker(
     }
 
     override suspend fun doWork(): Result {
+        if (!TransactionNotificationHelper.isNotificationsEnabled(applicationContext) ||
+            TransactionNotificationHelper.isRestrictOwnDataEnabled(applicationContext)
+        ) {
+            return Result.success()
+        }
         val authUser = try {
             Firebase.auth.currentUser
         } catch (_: Exception) {

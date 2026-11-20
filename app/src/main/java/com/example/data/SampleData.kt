@@ -201,15 +201,16 @@ object SampleData {
     val initialDeliveries: List<Delivery> = emptyList()
     val initialExpenses: List<Expense> = emptyList()
 
-    // User Accounts - Only primary Admin preserved; user can add new supervisors/riders
+    // User Accounts - Primary Admin uses Google Sign-In or Admin's custom cloud-synced password (default admin123 permanently retired)
     val initialUserAccounts = listOf(
         UserAccount(
             id = "user_admin_01",
             username = "admin",
-            password = "admin123",
+            password = "",
             name = "Muhammad Rafiq (Admin)",
             phone = "0300-1234567",
-            role = UserRole.ADMIN
+            role = UserRole.ADMIN,
+            isSuperAdmin = true
         )
     )
 }

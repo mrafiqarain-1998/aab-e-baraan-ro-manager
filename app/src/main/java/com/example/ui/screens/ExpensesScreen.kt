@@ -169,9 +169,12 @@ fun ExpensesScreen(
     val totalFromSale = periodExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_SALE }.sumOf { it.amount }
     val totalFromInvestment = periodExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_INVESTMENT }.sumOf { it.amount }
 
-    val isAdmin = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE) ||
-        viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)
-    val isViewOnly = !viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.ADD)
+    val canAddExpense = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.ADD)
+    val canEditExpense = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.EDIT)
+    val canDeleteExpense = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)
+    val canApproveExpense = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE)
+    val isAdmin = canApproveExpense || canDeleteExpense
+    val isViewOnly = !canAddExpense
     val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
 
     fun shareExpensePdf(exp: Expense) {
@@ -863,12 +866,14 @@ fun ExpensesScreen(
         }
     }
 
-    // Expense Detail Dialog (with Admin Edit/Delete Icons & Share PDF)
+    // Expense Detail Dialog (with Granular Edit/Delete/Verify Actions & Share PDF)
     if (selectedExpenseForDetail != null) {
         val currentExp = expenses.find { it.id == selectedExpenseForDetail!!.id } ?: selectedExpenseForDetail!!
         ExpenseDetailDialog(
             expense = currentExp,
-            isAdmin = isAdmin,
+            canEdit = canEditExpense,
+            canDelete = canDeleteExpense,
+            canApprove = canApproveExpense,
             onDismiss = { selectedExpenseForDetail = null },
             onSharePdf = { shareExpensePdf(currentExp) },
             onEdit = {
@@ -1275,67 +1280,25 @@ fun ExpenseItemCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(5.dp),
-                        color = WaterSkyLight,
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clickable(onClick = onSharePdf)
-                            .testTag("share_expense_pdf_${expense.id}")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                Icons.Default.PictureAsPdf,
-                                contentDescription = "Share Expense PDF",
-                                tint = WaterNavyPrimary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                        }
-                    }
-
-                    if (isAdmin) {
-                        IconButton(
-                            onClick = onEdit,
-                            modifier = Modifier.size(24.dp).testTag("edit_expense_${expense.id}")
-                        ) {
-                            Icon(
-                                Icons.Default.Edit,
-                                contentDescription = "Edit Expense",
-                                tint = WaterNavyPrimary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = onDelete,
-                            modifier = Modifier.size(24.dp).testTag("delete_expense_${expense.id}")
-                        ) {
-                            Icon(
-                                Icons.Default.DeleteOutline,
-                                contentDescription = "Delete Expense",
-                                tint = ErrorRed,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-                    }
-
                     if (expense.isAcknowledged) {
                         Surface(
                             shape = RoundedCornerShape(5.dp),
                             color = SuccessGreenLight,
-                            modifier = Modifier.height(22.dp)
+                            modifier = Modifier
+                                .height(22.dp)
+                                .testTag("badge_expense_verified_${expense.id}")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 5.dp),
+                                modifier = Modifier.padding(horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     Icons.Default.CheckCircle,
-                                    contentDescription = null,
+                                    contentDescription = "Verified",
                                     tint = SuccessGreen,
                                     modifier = Modifier.size(11.dp)
                                 )
-                                Spacer(modifier = Modifier.width(2.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = "Verified",
                                     fontSize = 8.5.sp,
@@ -1346,29 +1309,13 @@ fun ExpenseItemCard(
                                 )
                             }
                         }
-                    } else if (isAdmin) {
-                        Button(
-                            onClick = onAcknowledge,
-                            colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
-                            shape = RoundedCornerShape(5.dp),
-                            contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
-                            modifier = Modifier.height(22.dp)
-                        ) {
-                            Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(11.dp))
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Text(
-                                text = "Verify",
-                                fontSize = 8.5.sp,
-                                maxLines = 1,
-                                softWrap = false,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
                     } else {
                         Surface(
                             shape = RoundedCornerShape(5.dp),
                             color = WarningOrangeLight,
-                            modifier = Modifier.height(22.dp)
+                            modifier = Modifier
+                                .height(22.dp)
+                                .testTag("badge_expense_unsettle_${expense.id}")
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 6.dp),
@@ -1376,14 +1323,14 @@ fun ExpenseItemCard(
                             ) {
                                 Icon(
                                     Icons.Default.HourglassTop,
-                                    contentDescription = null,
+                                    contentDescription = "Unsettle",
                                     tint = WarningOrange,
-                                    modifier = Modifier.size(12.dp)
+                                    modifier = Modifier.size(11.dp)
                                 )
                                 Spacer(modifier = Modifier.width(3.dp))
                                 Text(
-                                    text = "Pending",
-                                    fontSize = 9.sp,
+                                    text = "Unsettle",
+                                    fontSize = 8.5.sp,
                                     maxLines = 1,
                                     softWrap = false,
                                     fontWeight = FontWeight.Bold,
@@ -1401,7 +1348,9 @@ fun ExpenseItemCard(
 @Composable
 fun ExpenseDetailDialog(
     expense: Expense,
-    isAdmin: Boolean,
+    canEdit: Boolean,
+    canDelete: Boolean,
+    canApprove: Boolean,
     onDismiss: () -> Unit,
     onSharePdf: () -> Unit,
     onEdit: () -> Unit,
@@ -1437,7 +1386,7 @@ fun ExpenseDetailDialog(
                     Text("Share PDF", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
 
-                if (isAdmin) {
+                if (canEdit) {
                     FilledTonalIconButton(
                         onClick = onEdit,
                         colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -1450,7 +1399,9 @@ fun ExpenseDetailDialog(
                     ) {
                         Icon(Icons.Default.Edit, contentDescription = "Edit Expense", modifier = Modifier.size(18.dp))
                     }
+                }
 
+                if (canDelete) {
                     FilledTonalIconButton(
                         onClick = onDelete,
                         colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -1541,7 +1492,7 @@ fun ExpenseDetailDialog(
             }
         }
 
-        if (!expense.isAcknowledged && isAdmin) {
+        if (!expense.isAcknowledged && canApprove) {
             Button(
                 onClick = onAcknowledge,
                 colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
@@ -2548,6 +2499,42 @@ fun EditExpenseDialog(
     var paymentSource by remember { mutableStateOf(expense.paymentSource) }
     var paymentMethod by remember { mutableStateOf(if (expense.paymentMethod.isCash) PaymentMethod.CASH else PaymentMethod.BANK_TRANSFER) }
     var notes by remember { mutableStateOf(expense.notes) }
+    var pendingSaveConfirm by remember { mutableStateOf<Expense?>(null) }
+
+    if (pendingSaveConfirm != null) {
+        val candidate = pendingSaveConfirm!!
+        AlertDialog(
+            onDismissRequest = { pendingSaveConfirm = null },
+            containerColor = Color.White,
+            icon = { Icon(Icons.Default.EditNote, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(30.dp)) },
+            title = { Text("Confirm Edit Expense?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
+            text = {
+                Text(
+                    text = "Save changes to Voucher #${candidate.voucherNumber} (${candidate.categoryName} • Rs. ${candidate.amount.toInt()})?\n\nکیا آپ واقعی اس خرچے میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
+                    fontSize = 11.sp,
+                    color = TextPrimaryDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingSaveConfirm = null
+                        onSave(candidate)
+                    },
+                    colors = waterPrimaryButtonColors(),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("confirm_edit_expense_dialog_btn")
+                ) {
+                    Text("Yes, Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSaveConfirm = null }) {
+                    Text("Cancel", color = TextSecondaryDark)
+                }
+            }
+        )
+    }
 
     MobileFormDialog(
         title = "Edit Voucher #${expense.voucherNumber}",
@@ -2572,7 +2559,7 @@ fun EditExpenseDialog(
                         notes = notes.trim(),
                         expenseType = selectedType
                     )
-                    onSave(updated)
+                    pendingSaveConfirm = updated
                 },
                 colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),

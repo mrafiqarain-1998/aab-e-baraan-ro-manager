@@ -714,6 +714,74 @@ fun ReceivePaymentScreen(
                         Spacer(modifier = Modifier.height(14.dp))
 
                         var isSubmitting by remember { mutableStateOf(false) }
+                        // null = no dialog, false = Save Only, true = Save & Issue Slip
+                        var pendingConfirmWithSlip by remember { mutableStateOf<Boolean?>(null) }
+
+                        if (pendingConfirmWithSlip != null) {
+                            val withSlip = pendingConfirmWithSlip!!
+                            val targetCustomer = selectedCustomer
+                            AlertDialog(
+                                onDismissRequest = { pendingConfirmWithSlip = null },
+                                containerColor = Color.White,
+                                icon = {
+                                    Icon(
+                                        Icons.Default.Payments,
+                                        contentDescription = null,
+                                        tint = SuccessGreen,
+                                        modifier = Modifier.size(30.dp)
+                                    )
+                                },
+                                title = {
+                                    Text(
+                                        text = "Confirm Payment?",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = SuccessGreen
+                                    )
+                                },
+                                text = {
+                                    Text(
+                                        text = "Record payment of Rs. ${totalEnteredAmount.toInt()} (${paymentMethod.label}) from ${targetCustomer?.name.orEmpty()}?\n\nکیا آپ واقعی Rs. ${totalEnteredAmount.toInt()} کی وصولی محفوظ کرنا چاہتے ہیں؟",
+                                        fontSize = 11.sp,
+                                        color = TextPrimaryDark
+                                    )
+                                },
+                                confirmButton = {
+                                    Button(
+                                        onClick = {
+                                            val c = targetCustomer
+                                            pendingConfirmWithSlip = null
+                                            if (!isSubmitting && c != null && totalEnteredAmount > 0) {
+                                                isSubmitting = true
+                                                val payment = viewModel.recordPayment(
+                                                    customerId = c.id,
+                                                    amount = totalEnteredAmount,
+                                                    method = paymentMethod,
+                                                    allocations = allocations.toMap(),
+                                                    notes = notes
+                                                )
+                                                if (withSlip) {
+                                                    receiptToShare = payment
+                                                    isSubmitting = false
+                                                } else {
+                                                    onPaymentCompleted()
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.testTag("confirm_receive_payment_dialog_btn")
+                                    ) {
+                                        Text("Yes, Confirm Pay", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { pendingConfirmWithSlip = null }) {
+                                        Text("Cancel", color = TextSecondaryDark)
+                                    }
+                                }
+                            )
+                        }
 
                         // Smart Action Buttons (Save vs Save & Issue Slip)
                         Row(
@@ -723,17 +791,8 @@ fun ReceivePaymentScreen(
                             // Button 1: Save Payment Only
                             OutlinedButton(
                                 onClick = {
-                                    val c = selectedCustomer
-                                    if (!isSubmitting && c != null && totalEnteredAmount > 0) {
-                                        isSubmitting = true
-                                        viewModel.recordPayment(
-                                            customerId = c.id,
-                                            amount = totalEnteredAmount,
-                                            method = paymentMethod,
-                                            allocations = allocations.toMap(),
-                                            notes = notes
-                                        )
-                                        onPaymentCompleted()
+                                    if (!isSubmitting && selectedCustomer != null && totalEnteredAmount > 0) {
+                                        pendingConfirmWithSlip = false
                                     }
                                 },
                                 shape = RoundedCornerShape(10.dp),
@@ -753,18 +812,8 @@ fun ReceivePaymentScreen(
                             // Button 2: Save & Issue Slip (Receipt slip to share on WhatsApp)
                             Button(
                                 onClick = {
-                                    val c = selectedCustomer
-                                    if (!isSubmitting && c != null && totalEnteredAmount > 0) {
-                                        isSubmitting = true
-                                        val payment = viewModel.recordPayment(
-                                            customerId = c.id,
-                                            amount = totalEnteredAmount,
-                                            method = paymentMethod,
-                                            allocations = allocations.toMap(),
-                                            notes = notes
-                                        )
-                                        receiptToShare = payment
-                                        isSubmitting = false
+                                    if (!isSubmitting && selectedCustomer != null && totalEnteredAmount > 0) {
+                                        pendingConfirmWithSlip = true
                                     }
                                 },
                                 shape = RoundedCornerShape(10.dp),

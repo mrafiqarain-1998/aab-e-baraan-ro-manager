@@ -54,6 +54,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
     private val _userAccounts = MutableStateFlow<List<UserAccount>>(SampleData.initialUserAccounts)
     val userAccounts: StateFlow<List<UserAccount>> = _userAccounts.asStateFlow()
 
+    private val primaryAdminEmails = setOf(
+        "mrafiqarain1998@gmail.com"
+    )
+
     // Password Reset Requests (for Admin verification / approval)
     private val _passwordResetRequests = MutableStateFlow<List<PasswordResetRequest>>(SampleData.initialPasswordResetRequests)
     val passwordResetRequests: StateFlow<List<PasswordResetRequest>> = _passwordResetRequests.asStateFlow()
@@ -320,6 +324,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
     // App Theme State (Dark / Light Mode)
     private val _isDarkMode = MutableStateFlow(false)
     val isDarkMode: StateFlow<Boolean> = _isDarkMode.asStateFlow()
+
+    // In-App Transaction Notifications Toggle (persisted locally per device)
+    private val _notificationsEnabled = MutableStateFlow(true)
+    val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        _notificationsEnabled.value = enabled
+        TransactionNotificationHelper.setNotificationsEnabled(context.applicationContext, enabled)
+        if (enabled) {
+            syncNotificationUserContext()
+        }
+    }
+
+    fun toggleNotifications() {
+        setNotificationsEnabled(!_notificationsEnabled.value)
+    }
 
     fun toggleDarkMode() {
         setDarkMode(!_isDarkMode.value)
@@ -819,7 +839,56 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return trimmedProvided.isNotEmpty() && stored.trim() == trimmedProvided
     }
 
+    private fun isRetiredDefaultAdminPasswordText(password: String): Boolean {
+        val clean = password.trim().lowercase()
+        return clean == "admin123" || clean == "admin@123"
+    }
+
+    private fun isPrimaryAdminAccount(acc: UserAccount): Boolean {
+        val normUser = normalizeUsername(acc.username)
+        return acc.isSuperAdmin ||
+            acc.id == "user_admin_01" ||
+            normUser == "admin" ||
+            acc.googleEmail.trim().lowercase() in primaryAdminEmails
+    }
+
+    private fun isRetiredAdminPassword(username: String, password: String): Boolean {
+        val normUser = normalizeUsername(username)
+        if (!isRetiredDefaultAdminPasswordText(password)) return false
+        return normUser == "admin" || normUser == "user_admin_01"
+    }
+
+    private fun scrubRetiredAdminDefaultPasswords(accounts: List<UserAccount>): Pair<List<UserAccount>, Boolean> {
+        var changed = false
+        val cleaned = accounts.map { acc ->
+            if (!isPrimaryAdminAccount(acc)) {
+                acc
+            } else {
+                val hasRetiredPlain = acc.password.isNotBlank() && isRetiredDefaultAdminPasswordText(acc.password)
+                val hasRetiredHash = acc.passwordSalt.isNotBlank() && acc.passwordHash.isNotBlank() && (
+                    PasswordHashUtil.verifyPassword("admin123", acc.passwordSalt, acc.passwordHash) ||
+                        PasswordHashUtil.verifyPassword("Admin@123", acc.passwordSalt, acc.passwordHash)
+                    )
+                if (hasRetiredPlain || hasRetiredHash) {
+                    changed = true
+                    acc.copy(
+                        password = "",
+                        passwordHash = "",
+                        passwordSalt = "",
+                        passwordUpdatedAtMillis = 0L
+                    )
+                } else {
+                    acc
+                }
+            }
+        }
+        return cleaned to changed
+    }
+
     private fun verifyAccountPassword(acc: UserAccount, provided: String): Boolean {
+        if ((isPrimaryAdminAccount(acc) || acc.role == UserRole.ADMIN) && isRetiredDefaultAdminPasswordText(provided)) {
+            return false
+        }
         if (acc.passwordSalt.isNotBlank() && acc.passwordHash.isNotBlank()) {
             if (PasswordHashUtil.verifyPassword(provided, acc.passwordSalt, acc.passwordHash) ||
                 PasswordHashUtil.verifyPassword(provided.trim(), acc.passwordSalt, acc.passwordHash)
@@ -970,11 +1039,18 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val useRemoteHash = remote.passwordHash.isNotBlank() &&
                 remote.passwordSalt.isNotBlank() &&
                 (prev == null || prev.passwordHash.isBlank() || remote.passwordUpdatedAtMillis > prev.passwordUpdatedAtMillis)
+            val resolvedExplicit = remote.hasExplicitPermissions || (prev?.hasExplicitPermissions == true) || remote.permissions.isNotEmpty()
             val normalized = remote.copy(
                 uid = remote.uid.ifBlank { remote.id },
                 isSuperAdmin = resolvedSuperAdmin,
                 role = resolvedRole,
-                permissions = PermissionDefaults.normalizePermissions(remote.permissions, resolvedRole, resolvedSuperAdmin),
+                permissions = PermissionDefaults.normalizePermissions(
+                    input = remote.permissions,
+                    role = resolvedRole,
+                    isSuperAdmin = resolvedSuperAdmin,
+                    explicitMode = resolvedExplicit
+                ),
+                hasExplicitPermissions = resolvedExplicit,
                 assignedBranchIds = remote.assignedBranchIds.ifEmpty { listOf(_activePlantId.value) },
                 defaultBranchId = remote.defaultBranchId.ifBlank { _activePlantId.value },
                 password = if (useRemoteHash) "" else (prev?.password?.takeIf { it.isNotEmpty() } ?: ""),
@@ -992,7 +1068,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val resolvedUid = acc.uid.ifBlank { acc.id }
         val resolvedSuperAdmin = acc.isSuperAdmin || acc.id == "user_admin_01"
         val resolvedRole = if (resolvedSuperAdmin) UserRole.ADMIN else acc.role
-        val normalizedPerms = PermissionDefaults.normalizePermissions(acc.permissions, resolvedRole, resolvedSuperAdmin)
+        val isExplicit = acc.hasExplicitPermissions || acc.permissions.isNotEmpty()
+        val normalizedPerms = PermissionDefaults.normalizePermissions(
+            input = acc.permissions,
+            role = resolvedRole,
+            isSuperAdmin = resolvedSuperAdmin,
+            explicitMode = isExplicit
+        )
         val branchIds = acc.assignedBranchIds.ifEmpty { listOf(_activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }) }
         val defBranch = acc.defaultBranchId.ifBlank { branchIds.first() }
         return mapOf(
@@ -1005,6 +1087,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             "role" to resolvedRole.name,
             "isSuperAdmin" to resolvedSuperAdmin,
             "permissions" to normalizedPerms,
+            "hasExplicitPermissions" to (if (resolvedSuperAdmin || resolvedRole == UserRole.ADMIN) false else true),
             "assignedBranchIds" to branchIds,
             "defaultBranchId" to defBranch,
             "plantId" to defBranch,
@@ -1066,6 +1149,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 ?: (map["plantId"] as? String)?.takeIf { it.isNotBlank() }
                 ?: PermissionDefaults.DEFAULT_PLANT_ID
 
+            val explicitFlag = (map["hasExplicitPermissions"] as? Boolean) == true ||
+                (rawPerms != null && rawPerms.isNotEmpty())
+
             UserAccount(
                 id = docId,
                 uid = docUid,
@@ -1077,7 +1163,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 phone = (map["phone"] as? String) ?: "",
                 role = effectiveRole,
                 isSuperAdmin = isSuper,
-                permissions = PermissionDefaults.normalizePermissions(rawPerms, effectiveRole, isSuper),
+                permissions = PermissionDefaults.normalizePermissions(
+                    input = rawPerms,
+                    role = effectiveRole,
+                    isSuperAdmin = isSuper,
+                    explicitMode = explicitFlag
+                ),
+                hasExplicitPermissions = explicitFlag,
                 assignedBranchIds = rawBranches.ifEmpty { listOf(defBranch) },
                 defaultBranchId = defBranch,
                 active = if (isSuper) true else ((map["active"] as? Boolean) ?: true),
@@ -1096,7 +1188,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val isSuper = account.isSuperAdmin || account.id == "user_admin_01" ||
             account.googleEmail.trim().lowercase() in primaryAdminEmails
         val effectiveRole = if (isSuper) UserRole.ADMIN else account.role
-        val normalizedPerms = PermissionDefaults.normalizePermissions(account.permissions, effectiveRole, isSuper)
+        val isExplicit = account.hasExplicitPermissions || account.permissions.isNotEmpty()
+        val normalizedPerms = PermissionDefaults.normalizePermissions(
+            input = account.permissions,
+            role = effectiveRole,
+            isSuperAdmin = isSuper,
+            explicitMode = isExplicit
+        )
         val branchList = account.assignedBranchIds.ifEmpty { listOf(PermissionDefaults.DEFAULT_PLANT_ID) }
         val defBranch = account.defaultBranchId.ifBlank { branchList.first() }
         val activePlant = if (isSuper || effectiveRole == UserRole.ADMIN || _activePlantId.value in branchList) {
@@ -1122,10 +1220,12 @@ class WaterPlantRepository private constructor(private val context: Context) {
             businessId = activePlant,
             active = account.active,
             restrictToOwnDataOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToOwnDataOnly,
-            restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToTodayOnly
+            restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToTodayOnly,
+            hasExplicitPermissions = isExplicit
         )
         _currentUser.value = profile
         refreshSeenRecordsForCurrentUser()
+        syncNotificationUserContext()
         storage.saveCurrentProfile(profile)
         storage.saveLoginState(true)
         storage.saveLastUser(cleanUser)
@@ -1146,6 +1246,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     // Authentication with Username and Password (synchronous local hashed check)
     fun authenticate(username: String, password: String): UserProfile? {
         val cleanUser = normalizeUsername(username)
+        if (isRetiredAdminPassword(cleanUser, password)) return null
         val account = _userAccounts.value.find {
             normalizeUsername(it.username) == cleanUser && verifyAccountPassword(it, password)
         } ?: return null
@@ -1177,6 +1278,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
     suspend fun authenticateWithOutcome(username: String, password: String): Pair<LoginOutcome, UserProfile?> {
         val cleanUser = normalizeUsername(username)
         if (cleanUser.isEmpty() || password.isEmpty()) {
+            return LoginOutcome.INVALID_CREDENTIALS to null
+        }
+        if (isRetiredAdminPassword(cleanUser, password)) {
             return LoginOutcome.INVALID_CREDENTIALS to null
         }
 
@@ -1314,7 +1418,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val rawPassword = account.password.trim()
         val effectiveSuperAdmin = account.isSuperAdmin || id == "user_admin_01"
         val effectiveRole = if (effectiveSuperAdmin) UserRole.ADMIN else account.role
-        val normalizedPerms = PermissionDefaults.normalizePermissions(account.permissions, effectiveRole, effectiveSuperAdmin)
+        val isExplicit = account.hasExplicitPermissions || account.permissions.isNotEmpty()
+        val normalizedPerms = PermissionDefaults.normalizePermissions(
+            input = account.permissions,
+            role = effectiveRole,
+            isSuperAdmin = effectiveSuperAdmin,
+            explicitMode = isExplicit
+        )
         val branches = account.assignedBranchIds.ifEmpty { listOf(_activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }) }
         val defBranch = account.defaultBranchId.ifBlank { branches.first() }
 
@@ -1328,6 +1438,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             role = effectiveRole,
             isSuperAdmin = effectiveSuperAdmin,
             permissions = normalizedPerms,
+            hasExplicitPermissions = true,
             assignedBranchIds = branches,
             defaultBranchId = defBranch
         )
@@ -1383,12 +1494,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val cleanEmail = account.googleEmail.trim().lowercase()
         val effectiveRole = if (isProtectedSuper) UserRole.ADMIN else account.role
         val effectiveActive = if (isProtectedSuper) true else account.active
-        val normalizedPerms = PermissionDefaults.normalizePermissions(account.permissions, effectiveRole, isProtectedSuper)
+        val normalizedPerms = PermissionDefaults.normalizePermissions(
+            input = account.permissions,
+            role = effectiveRole,
+            isSuperAdmin = isProtectedSuper,
+            explicitMode = true
+        )
         val branches = account.assignedBranchIds.ifEmpty { existing?.assignedBranchIds?.ifEmpty { null } ?: listOf(_activePlantId.value) }
         val defBranch = account.defaultBranchId.ifBlank { branches.first() }
         val resolvedUid = account.uid.ifBlank { existing?.uid?.ifBlank { account.id } ?: account.id }
 
         val rawNewPass = account.password.trim()
+        val safeRawNewPass = if ((isProtectedSuper || effectiveRole == UserRole.ADMIN) && isRetiredDefaultAdminPasswordText(rawNewPass)) {
+            ""
+        } else {
+            rawNewPass
+        }
         val updatedBase = account.copy(
             uid = resolvedUid,
             username = cleanUser,
@@ -1399,13 +1520,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
             isSuperAdmin = isProtectedSuper,
             active = effectiveActive,
             permissions = normalizedPerms,
+            hasExplicitPermissions = true,
             assignedBranchIds = branches,
             defaultBranchId = defBranch,
             restrictToOwnDataOnly = if (isProtectedSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToOwnDataOnly,
             restrictToTodayOnly = if (isProtectedSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToTodayOnly
         )
-        val updated = if (rawNewPass.isNotEmpty()) {
-            stampAccountWithPasswordHash(updatedBase, rawNewPass)
+        val updated = if (safeRawNewPass.isNotEmpty()) {
+            stampAccountWithPasswordHash(updatedBase, safeRawNewPass)
         } else {
             updatedBase.copy(
                 password = "",
@@ -1448,6 +1570,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (!hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.MANAGE)) return false
         val acc = _userAccounts.value.find { it.id == userId || it.uid == userId } ?: return false
         val cleanNew = newPassword.trim().ifEmpty { newPassword }
+        if ((isPrimaryAdminAccount(acc) || acc.role == UserRole.ADMIN) && isRetiredDefaultAdminPasswordText(cleanNew)) {
+            return false
+        }
         val updated = stampAccountWithPasswordHash(acc, cleanNew)
         val resolvedUid = updated.uid.ifBlank { updated.id }
         _userAccounts.value = _userAccounts.value.map { if (it.id == acc.id) updated else it }
@@ -1572,6 +1697,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (cleanNew.length < 4) {
             return Pair(false, "New password must be at least 4 characters.")
         }
+        if ((isPrimaryAdminAccount(acc) || acc.role == UserRole.ADMIN) && isRetiredDefaultAdminPasswordText(cleanNew)) {
+            return Pair(false, "Default admin123 password is permanently retired. Choose a new password.")
+        }
         val updated = stampAccountWithPasswordHash(acc, cleanNew)
         val resolvedUid = updated.uid.ifBlank { updated.id }
         _userAccounts.value = _userAccounts.value.map { if (it.id == acc.id) updated else it }
@@ -1660,24 +1788,20 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return hasUpper && hasDigit && hasSpecial
     }
 
-    // Role Switcher & Strict Role Verification
+    // Role Switcher & Strict Role Verification (NO hardcoded fallback passwords like admin123)
     fun verifyRolePassword(role: UserRole, password: String): Boolean {
         val clean = password.trim()
         if (clean.isBlank()) return false
-        val accounts = _userAccounts.value.filter { it.role == role }
+        val accounts = _userAccounts.value.filter { it.role == role && it.active }
         if (accounts.isNotEmpty() && accounts.any { verifyAccountPassword(it, clean) }) {
             return true
         }
-        // Admin password always grants authority to switch to any role
-        val adminAccounts = _userAccounts.value.filter { it.role == UserRole.ADMIN }
+        // Admin custom password grants authority to switch to any role (retired default admin123 is always rejected)
+        val adminAccounts = _userAccounts.value.filter { it.role == UserRole.ADMIN && it.active }
         if (adminAccounts.any { verifyAccountPassword(it, clean) }) {
             return true
         }
-        return when (role) {
-            UserRole.ADMIN -> clean == "admin123" || clean == "Admin@123"
-            UserRole.INCHARGE -> clean == "supervisor123" || clean == "Incharge@123" || clean == "admin123"
-            UserRole.VIEW_ONLY -> clean == "view123" || clean == "guest123" || clean == "admin123"
-        }
+        return false
     }
 
     fun verifyAdminPassword(password: String): Boolean = verifyRolePassword(UserRole.ADMIN, password)
@@ -1688,11 +1812,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (!isValidStrongPassword(clean)) {
             return false
         }
+        if ((isPrimaryAdminAccount(target) || target.role == UserRole.ADMIN) && isRetiredDefaultAdminPasswordText(clean)) {
+            return false
+        }
         val updated = stampAccountWithPasswordHash(target, clean)
         val resolvedUid = updated.uid.ifBlank { updated.id }
         _userAccounts.value = _userAccounts.value.map { if (it.id == target.id) updated else it }
         storage.saveUserAccounts(_userAccounts.value)
         syncStaffAccountDocuments(updated)
+        syncPasswordVerifierToCloud(updated)
         appendAuditLog(
             action = AuditActionType.PASSWORD_RESET,
             module = AppModule.STAFF_MANAGEMENT,
@@ -1708,6 +1836,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (cleanUser.isEmpty() || password.isEmpty()) {
             return Pair(false, "Username and password are required (یوزر نیم اور پاس ورڈ دونوں درج کریں)")
         }
+        if (isRetiredAdminPassword(cleanUser, password)) {
+            return Pair(false, "Old default password is disabled. Use your updated password or Google Sign-In.")
+        }
         val matched = _userAccounts.value.find {
             normalizeUsername(it.username) == cleanUser && verifyAccountPassword(it, password)
         } ?: return Pair(false, "Invalid username or password (یوزر نیم یا پاس ورڈ غلط ہے)")
@@ -1721,6 +1852,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     suspend fun switchUserByCredentialsAsync(username: String, password: String): Pair<Boolean, String> {
+        val cleanUser = normalizeUsername(username)
+        if (cleanUser.isEmpty() || password.isEmpty()) {
+            return Pair(false, "Username and password are required (یوزر نیم اور پاس ورڈ دونوں درج کریں)")
+        }
+        if (isRetiredAdminPassword(cleanUser, password)) {
+            return Pair(false, "Old default password is disabled. Use your updated password or Google Sign-In.")
+        }
+        // Always refresh cloud password verifier first so changed passwords immediately invalidate old ones on every device
+        refreshCloudVerifierForUsername(cleanUser)
+
         if (staffAuthApiClient.isConfigured() && isDeviceOnline.value) {
             val (outcome, profile) = authenticateWithOutcome(username, password)
             if (outcome == LoginOutcome.SUCCESS && profile != null) {
@@ -1736,9 +1877,6 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         val localResult = switchUserByCredentials(username, password)
         if (localResult.first) return localResult
-
-        val cleanUser = normalizeUsername(username)
-        if (cleanUser.isEmpty() || password.isEmpty()) return localResult
 
         val inactiveLocal = _userAccounts.value.find {
             normalizeUsername(it.username) == cleanUser && verifyAccountPassword(it, password) && !it.active
@@ -4041,12 +4179,19 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (!matches) return
         val isSuper = acc.isSuperAdmin || acc.id == "user_admin_01"
         val effectiveRole = if (isSuper) UserRole.ADMIN else acc.role
+        val isExplicit = acc.hasExplicitPermissions || acc.permissions.isNotEmpty()
         val updatedProfile = cur.copy(
             name = acc.name.ifBlank { cur.name },
             phone = acc.phone,
             role = effectiveRole,
             isSuperAdmin = isSuper,
-            permissions = PermissionDefaults.normalizePermissions(acc.permissions, effectiveRole, isSuper),
+            permissions = PermissionDefaults.normalizePermissions(
+                input = acc.permissions,
+                role = effectiveRole,
+                isSuperAdmin = isSuper,
+                explicitMode = isExplicit
+            ),
+            hasExplicitPermissions = isExplicit,
             assignedBranchIds = acc.assignedBranchIds.ifEmpty { cur.assignedBranchIds },
             defaultBranchId = acc.defaultBranchId.ifBlank { cur.defaultBranchId },
             active = if (isSuper) true else acc.active,
@@ -4054,6 +4199,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else acc.restrictToTodayOnly
         )
         _currentUser.value = updatedProfile
+        syncNotificationUserContext()
         storage.saveCurrentProfile(updatedProfile)
     }
 
@@ -4155,6 +4301,20 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return list.filter { t ->
             val dateOk = !user.restrictToTodayOnly || t.date == today
             val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, "", t.performedBy)
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisibleCashClosings(
+        list: List<CashClosing>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<CashClosing> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { c ->
+            val dateOk = !user.restrictToTodayOnly || c.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, "", c.closedBy)
             dateOk && ownOk
         }
     }
@@ -5919,6 +6079,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun acknowledgeExpense(expenseId: String) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE) && !_currentUser.value.isSuperAdmin) return
         val target = _expenses.value.find { it.id == expenseId } ?: return
         withSyncAction("Verify Expense • ${target.voucherNumber}") {
             _expenses.value = _expenses.value.map {
@@ -6728,6 +6889,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadSecurityDeposits()?.let { _securityDeposits.value = it } ?: storage.saveSecurityDeposits(_securityDeposits.value)
         storage.loadExpenseCategories()?.let { _expenseCategories.value = it } ?: storage.saveExpenseCategories(_expenseCategories.value)
         storage.loadUserAccounts()?.let { _userAccounts.value = it } ?: storage.saveUserAccounts(_userAccounts.value)
+        val (scrubbedAccounts, hadRetiredAdminPass) = scrubRetiredAdminDefaultPasswords(_userAccounts.value)
+        if (hadRetiredAdminPass) {
+            _userAccounts.value = scrubbedAccounts
+            storage.saveUserAccounts(scrubbedAccounts)
+        }
         storage.loadPasswordResetRequests()?.let { _passwordResetRequests.value = it } ?: storage.savePasswordResetRequests(_passwordResetRequests.value)
         storage.loadBottleMovements()?.let { _bottleMovements.value = it } ?: storage.saveBottleMovements(_bottleMovements.value)
         storage.loadFactoryMaterials()?.let { _factoryMaterials.value = it } ?: storage.saveFactoryMaterials(_factoryMaterials.value)
@@ -6737,6 +6903,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadPlantWorkers()?.let { _plantWorkers.value = it } ?: storage.savePlantWorkers(_plantWorkers.value)
         storage.loadCurrentProfile()?.let { _currentUser.value = it }
         refreshSeenRecordsForCurrentUser()
+        _notificationsEnabled.value = TransactionNotificationHelper.isNotificationsEnabled(context.applicationContext)
         storage.loadDarkMode()?.let { _isDarkMode.value = it }
         val loadedHistory = storage.loadBackupHistory()
         _backupHistory.value = loadedHistory
@@ -7049,14 +7216,18 @@ class WaterPlantRepository private constructor(private val context: Context) {
             .filter { it.isNotBlank() }
             .distinct()
             .joinToString("|")
+        val restrictOwn = user.restrictToOwnDataOnly && !user.isSuperAdmin && user.role != UserRole.ADMIN
         TransactionNotificationHelper.updateActiveUserContext(
             context = context.applicationContext,
             plantId = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID },
             actorUid = actorId,
             actorName = user.name,
-            actorEmail = user.email
+            actorEmail = user.email,
+            restrictToOwnDataOnly = restrictOwn
         )
-        TransactionNotificationHelper.scheduleBackgroundSyncWorker(context.applicationContext)
+        if (_notificationsEnabled.value) {
+            TransactionNotificationHelper.scheduleBackgroundSyncWorker(context.applicationContext)
+        }
     }
 
     private fun registerRtdbListener(query: RtdbQuery, listener: ValueEventListener) {
@@ -8147,10 +8318,6 @@ class WaterPlantRepository private constructor(private val context: Context) {
             _syncStatus.value = friendlyFirestoreStatusMessage(e)
         }
     }
-
-    private val primaryAdminEmails = setOf(
-        "mrafiqarain1998@gmail.com"
-    )
 
     private fun findAuthorizedLocalAccount(uid: String, cleanEmail: String): UserAccount? {
         return _userAccounts.value.find {

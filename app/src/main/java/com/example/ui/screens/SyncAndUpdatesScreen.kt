@@ -46,6 +46,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
     val availableAppUpdate by viewModel.availableAppUpdate.collectAsState()
     val isCheckingAppUpdate by viewModel.isCheckingAppUpdate.collectAsState()
     val appUpdateStatusMessage by viewModel.appUpdateStatusMessage.collectAsState()
+    val notificationsEnabled by viewModel.notificationsEnabled.collectAsState()
     val context = LocalContext.current
 
     val canManageSettings = viewModel.hasPermission(AppModule.SETTINGS, PermissionAction.MANAGE)
@@ -247,6 +248,75 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                         fontSize = 9.5.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // 1A. In-App Transaction Notifications Control (ON / OFF)
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                border = BorderStroke(1.dp, if (notificationsEnabled) SuccessGreen.copy(alpha = 0.4f) else ErrorRed.copy(alpha = 0.35f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("sync_notifications_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f).padding(end = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = if (notificationsEnabled) SuccessGreenLight else ErrorRedLight,
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (notificationsEnabled) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,
+                                    contentDescription = "Notifications",
+                                    tint = if (notificationsEnabled) SuccessGreen else ErrorRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                        Column {
+                            Text(
+                                text = "Transaction Notifications (نوٹیفکیشنز)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = WaterNavyPrimary
+                            )
+                            Text(
+                                text = if (notificationsEnabled) {
+                                    "ON — Alerts active for new staff deliveries, payments & expenses"
+                                } else {
+                                    "OFF — All transaction notifications are muted on this device"
+                                },
+                                fontSize = 9.5.sp,
+                                color = if (notificationsEnabled) SuccessGreen else ErrorRed
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = notificationsEnabled,
+                        onCheckedChange = { viewModel.setNotificationsEnabled(it) },
+                        modifier = Modifier.testTag("sync_notifications_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = SuccessGreen,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = ErrorRed.copy(alpha = 0.5f)
+                        )
                     )
                 }
             }
