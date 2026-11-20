@@ -42,7 +42,6 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
     val syncConflicts by viewModel.syncConflicts.collectAsState()
     val plantBranches by viewModel.plantBranches.collectAsState()
     val activePlantId by viewModel.activePlantId.collectAsState()
-    val backendConfig by viewModel.backendConfig.collectAsState()
     val appReleaseInfo by viewModel.appReleaseInfo.collectAsState()
     val availableAppUpdate by viewModel.availableAppUpdate.collectAsState()
     val isCheckingAppUpdate by viewModel.isCheckingAppUpdate.collectAsState()
@@ -54,8 +53,14 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
 
     var queueFilter by remember { mutableStateOf<SyncQueueStatus?>(null) }
     var showAddBranchDialog by remember { mutableStateOf(false) }
-    var showPublishUpdatePanel by remember { mutableStateOf(false) }
-    var githubRepoInput by remember(appReleaseInfo?.githubRepo) { mutableStateOf(appReleaseInfo?.githubRepo.orEmpty()) }
+    var showUpdateSettings by remember { mutableStateOf(false) }
+    var showManualLinkFields by remember { mutableStateOf(false) }
+    var githubRepoInput by remember(appReleaseInfo?.githubRepo) {
+        mutableStateOf(
+            appReleaseInfo?.githubRepo?.ifBlank { AppUpdateChecker.defaultConfiguredGithubRepo() }
+                ?: AppUpdateChecker.defaultConfiguredGithubRepo()
+        )
+    }
     var releaseVersionNameInput by remember(appReleaseInfo?.versionName) {
         mutableStateOf(appReleaseInfo?.versionName?.ifBlank { BuildConfig.VERSION_NAME } ?: BuildConfig.VERSION_NAME)
     }
@@ -66,9 +71,6 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
     var releaseNotesInput by remember(appReleaseInfo?.releaseNotes) { mutableStateOf(appReleaseInfo?.releaseNotes.orEmpty()) }
     var releaseMandatory by remember(appReleaseInfo?.mandatory) { mutableStateOf(appReleaseInfo?.mandatory ?: false) }
     var isPublishingRelease by remember { mutableStateOf(false) }
-    var staffAuthUrlInput by remember(backendConfig.staffAuthApiUrl) { mutableStateOf(backendConfig.staffAuthApiUrl) }
-    var backendTestStatus by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
-    var isTestingBackend by remember { mutableStateOf(false) }
 
     val unsyncedActionGroups = remember(syncQueueItems) {
         syncQueueItems
@@ -344,146 +346,222 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                         )
                     }
 
-                    if (!appReleaseInfo?.githubRepo.isNullOrBlank()) {
-                        Text(
-                            text = "Auto-Update Source: GitHub (${appReleaseInfo!!.githubRepo}) • 0 Firebase reads",
-                            fontSize = 9.5.sp,
-                            color = WaterBlueMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                    val activeRepo = appReleaseInfo?.githubRepo?.takeIf { it.isNotBlank() }
+                        ?: AppUpdateChecker.defaultConfiguredGithubRepo()
+                    if (activeRepo.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = WaterSkyLight.copy(alpha = 0.7f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = SuccessGreen,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "Auto-Update Connected: $activeRepo",
+                                    fontSize = 10.sp,
+                                    color = WaterNavyDark,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    } else if (currentUser.isSuperAdmin) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = WarningOrangeLight,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "One-time setup: Tap 'Settings' below and paste your GitHub repo link once. After that, every push auto-notifies all phones!",
+                                fontSize = 10.sp,
+                                color = WarningOrange,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            )
+                        }
                     }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
+                        Button(
                             enabled = !isCheckingAppUpdate && isDeviceOnline,
                             onClick = { viewModel.checkForAppUpdate(force = true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(44.dp)
+                                .height(46.dp)
                                 .testTag("check_app_update_btn")
                         ) {
                             if (isCheckingAppUpdate) {
-                                CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
                             } else {
-                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.SystemUpdateAlt, contentDescription = null, modifier = Modifier.size(17.dp))
                             }
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isCheckingAppUpdate) "Checking..." else "Check Update", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text(if (isCheckingAppUpdate) "Checking..." else "Check Update", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                         }
 
                         if (currentUser.isSuperAdmin) {
-                            FilledTonalButton(
-                                onClick = { showPublishUpdatePanel = !showPublishUpdatePanel },
+                            OutlinedButton(
+                                onClick = { showUpdateSettings = !showUpdateSettings },
                                 shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, WaterNavyPrimary.copy(alpha = 0.45f)),
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp)
+                                    .height(46.dp)
                                     .testTag("toggle_publish_update_btn")
                             ) {
-                                Icon(Icons.Default.Publish, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(if (showPublishUpdatePanel) "Hide Setup" else "Setup / Publish", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Icon(
+                                    if (showUpdateSettings) Icons.Default.Close else Icons.Default.Settings,
+                                    contentDescription = "Update Settings",
+                                    tint = WaterNavyPrimary,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = if (showUpdateSettings) "Close" else "Settings",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WaterNavyPrimary
+                                )
                             }
                         }
                     }
 
-                    if (currentUser.isSuperAdmin && showPublishUpdatePanel) {
+                    if (currentUser.isSuperAdmin && showUpdateSettings) {
                         HorizontalDivider(color = BorderLight)
                         Text(
-                            text = "Option 1 (Automatic Free): Enter your GitHub repo (owner/repo). Every push builds a fresh APK via GitHub Actions automatically!",
+                            text = "One-Time GitHub Auto-Update Setup",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WaterNavyDark
+                        )
+                        Text(
+                            text = "Paste your PUBLIC GitHub repo link once (e.g. username/aab-e-baraan). Every time GitHub Actions finishes, all phones will automatically see the new update.",
                             fontSize = 10.sp,
                             color = TextSecondaryDark
                         )
                         OutlinedTextField(
                             value = githubRepoInput,
                             onValueChange = { githubRepoInput = it },
-                            label = { Text("GitHub Repo (e.g. username/aab-e-baraan-app)", fontSize = 10.sp) },
+                            label = { Text("GitHub Repo Link (username/repo)", fontSize = 10.5.sp) },
+                            placeholder = { Text("https://github.com/username/repo-name", fontSize = 10.sp) },
                             singleLine = true,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("update_github_repo_input")
                         )
-                        Text(
-                            text = "Option 2 (Instant Manual Link): Paste any direct HTTPS APK link (GitHub Release / Google Drive) + version to notify all phones now.",
-                            fontSize = 10.sp,
-                            color = TextSecondaryDark
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+
+                        TextButton(
+                            onClick = { showManualLinkFields = !showManualLinkFields },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
                         ) {
-                            OutlinedTextField(
-                                value = releaseVersionNameInput,
-                                onValueChange = { releaseVersionNameInput = it },
-                                label = { Text("Version (e.g. 1.0.2)", fontSize = 10.sp) },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
+                            Icon(
+                                if (showManualLinkFields) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
                             )
-                            OutlinedTextField(
-                                value = releaseVersionCodeInput,
-                                onValueChange = { releaseVersionCodeInput = it.filter { ch -> ch.isDigit() } },
-                                label = { Text("Build Code", fontSize = 10.sp) },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (showManualLinkFields) "Hide Manual APK Link Option" else "Or paste a direct APK link manually (Optional)",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
-                        OutlinedTextField(
-                            value = releaseUrlInput,
-                            onValueChange = { releaseUrlInput = it },
-                            label = { Text("Direct HTTPS APK Link (Optional if GitHub Repo set)", fontSize = 10.sp) },
-                            placeholder = { Text("https://github.com/.../releases/latest/download/app.apk", fontSize = 10.sp) },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("update_download_url_input")
-                        )
-                        OutlinedTextField(
-                            value = releaseNotesInput,
-                            onValueChange = { releaseNotesInput = it },
-                            label = { Text("What's New (Release Notes)", fontSize = 10.sp) },
-                            maxLines = 2,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Keep Update Banner Pinned (Mandatory)", fontSize = 10.5.sp, color = WaterNavyDark)
-                            Switch(
-                                checked = releaseMandatory,
-                                onCheckedChange = { releaseMandatory = it }
+
+                        if (showManualLinkFields) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = releaseVersionNameInput,
+                                    onValueChange = { releaseVersionNameInput = it },
+                                    label = { Text("Version (e.g. 1.0.2)", fontSize = 10.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = releaseVersionCodeInput,
+                                    onValueChange = { releaseVersionCodeInput = it.filter { ch -> ch.isDigit() } },
+                                    label = { Text("Build Code", fontSize = 10.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            OutlinedTextField(
+                                value = releaseUrlInput,
+                                onValueChange = { releaseUrlInput = it },
+                                label = { Text("Direct HTTPS APK Link", fontSize = 10.sp) },
+                                placeholder = { Text("https://.../Aab-e-Baraan.apk", fontSize = 10.sp) },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("update_download_url_input")
                             )
+                            OutlinedTextField(
+                                value = releaseNotesInput,
+                                onValueChange = { releaseNotesInput = it },
+                                label = { Text("What's New (Optional)", fontSize = 10.sp) },
+                                maxLines = 2,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Keep Update Banner Pinned", fontSize = 10.5.sp, color = WaterNavyDark)
+                                Switch(
+                                    checked = releaseMandatory,
+                                    onCheckedChange = { releaseMandatory = it }
+                                )
+                            }
                         }
+
                         Button(
                             enabled = !isPublishingRelease,
                             onClick = {
                                 isPublishingRelease = true
+                                val manualUrl = if (showManualLinkFields) releaseUrlInput else ""
+                                val manualCode = if (showManualLinkFields) (releaseVersionCodeInput.toIntOrNull() ?: 0) else 0
+                                val manualVer = if (showManualLinkFields) releaseVersionNameInput else ""
+                                val manualNotes = if (showManualLinkFields) releaseNotesInput else ""
                                 viewModel.publishAppRelease(
-                                    versionCode = releaseVersionCodeInput.toIntOrNull() ?: 0,
-                                    versionName = releaseVersionNameInput,
-                                    downloadUrl = releaseUrlInput,
+                                    versionCode = manualCode,
+                                    versionName = manualVer,
+                                    downloadUrl = manualUrl,
                                     githubRepo = githubRepoInput,
-                                    releaseNotes = releaseNotesInput,
-                                    mandatory = releaseMandatory
+                                    releaseNotes = manualNotes,
+                                    mandatory = if (showManualLinkFields) releaseMandatory else false
                                 ) { ok, _ ->
                                     isPublishingRelease = false
-                                    if (ok) showPublishUpdatePanel = false
+                                    if (ok) showUpdateSettings = false
                                 }
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                            colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(46.dp)
                                 .testTag("save_publish_update_btn")
                         ) {
+                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isPublishingRelease) "Publishing..." else "Save & Notify All Phones",
+                                text = if (isPublishingRelease) "Saving..." else "Save & Check for Update",
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -623,73 +701,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
             }
         }
 
-        // 5. Backend Server URL & Health Check (Admin)
-        if (canManageSettings) {
-            item {
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    border = BorderStroke(1.dp, BorderLight),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "Staff Auth Backend Endpoint (Admin)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = WaterNavyDark
-                        )
-                        OutlinedTextField(
-                            value = staffAuthUrlInput,
-                            onValueChange = { staffAuthUrlInput = it },
-                            label = { Text("Firebase Functions Base URL (STAFF_AUTH_API_URL)", fontSize = 10.sp) },
-                            placeholder = { Text("https://us-central1-<project>.cloudfunctions.net/api", fontSize = 10.5.sp) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("staff_auth_url_input")
-                        )
-                        backendTestStatus?.let { (ok, msg) ->
-                            Text(
-                                text = msg,
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (ok) SuccessGreen else ErrorRed
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                enabled = !isTestingBackend,
-                                onClick = {
-                                    isTestingBackend = true
-                                    viewModel.updateBackendConfig(staffAuthUrlInput)
-                                    viewModel.testBackendConnection { ok, msg ->
-                                        isTestingBackend = false
-                                        backendTestStatus = ok to msg
-                                    }
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.weight(1f).height(44.dp).testTag("test_backend_health_btn")
-                            ) {
-                                Text(if (isTestingBackend) "Checking..." else "Save & Test", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Button(
-                                onClick = { viewModel.updateBackendConfig(staffAuthUrlInput) },
-                                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.weight(1f).height(44.dp).testTag("save_backend_urls_btn")
-                            ) {
-                                Text("Save URL", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 6. Offline Sync Queue — shown ONLY when unsynced actions exist; 1 grouped card per complete action
+        // 5. Offline Sync Queue — shown ONLY when unsynced actions exist; 1 grouped card per complete action
         if (unsyncedActionGroups.isNotEmpty()) {
             item {
                 Row(

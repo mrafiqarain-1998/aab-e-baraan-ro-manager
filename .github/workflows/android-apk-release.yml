@@ -87,6 +87,8 @@ jobs:
           sed -i "s/versionName = \"[^\"]*\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
       - name: Build Android APK using Gradle Wrapper
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           chmod +x ./gradlew
           ./gradlew --version
@@ -101,7 +103,8 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "Aab-e-Baraan RO Manager v${{ steps.version.outputs.name }}"
+          make_latest: true
           body: |
-            Automatic build from commit `${{ github.sha }}`.
-            Open the Aab-e-Baraan RO Manager app and tap **Update Now** to install this update without USB debugging.
+            Automatic build v${{ steps.version.outputs.name }} (Build ${{ steps.version.outputs.code }}) from commit `${{ github.sha }}`.
+            Open Aab-e-Baraan RO Manager -> Sync & Updates -> tap **Check Update** -> **Download & Install Update**.
           files: "Aab-e-Baraan-v${{ steps.version.outputs.name }}.apk"

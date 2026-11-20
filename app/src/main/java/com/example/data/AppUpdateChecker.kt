@@ -110,28 +110,98 @@ object AppUpdateChecker {
         }
     }
 
-    suspend fun fetchLatestFromGitHub(repoInput: String): AppReleaseInfo? = withContext(Dispatchers.IO) {
+    fun defaultConfiguredGithubRepo(): String {
+        return normalizeGithubRepo(BuildConfig.GITHUB_UPDATE_REPO)
+    }
+
+    data class GitHubReleaseFetchResult(
+        val release: AppReleaseInfo? = null,
+        val httpCode: Int = 0,
+        val errorMessage: String = ""
+    )
+
+    suspend fun fetchLatestFromGitHubDetailed(repoInput: String): GitHubReleaseFetchResult = withContext(Dispatchers.IO) {
         val repo = normalizeGithubRepo(repoInput)
-        if (repo.isBlank()) return@withContext null
-        var conn: HttpURLConnection? = null
-        try {
-            val url = URL("https://api.github.com/repos/$repo/releases/latest")
-            conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "AabEBaraanROManager/${BuildConfig.VERSION_NAME}")
-            }
-            if (conn.responseCode !in 200..299) return@withContext null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            parseGithubReleaseJson(body, repo)
-        } catch (e: Exception) {
-            Log.w(TAG, "GitHub release check skipped: ${e.message}")
-            null
-        } finally {
-            conn?.disconnect()
+        if (repo.isBlank()) {
+            return@withContext GitHubReleaseFetchResult(errorMessage = "GitHub repository is not connected yet.")
         }
+
+        fun request(urlStr: String): Pair<Int, String?> {
+            var conn: HttpURLConnection? = null
+            return try {
+                val url = URL(urlStr)
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "AabEBaraanROManager/${BuildConfig.VERSION_NAME}")
+                }
+                val code = conn.responseCode
+                val body = if (code in 200..299) {
+                    conn.inputStream.bufferedReader().use { it.readText() }
+                } else null
+                code to body
+            } catch (e: Exception) {
+                Log.w(TAG, "GitHub release request error: ${e.message}")
+                -1 to e.localizedMessage
+            } finally {
+                conn?.disconnect()
+            }
+        }
+
+        // 1. Primary: /releases/latest
+        val (latestCode, latestBody) = request("https://api.github.com/repos/$repo/releases/latest")
+        if (latestCode in 200..299 && !latestBody.isNullOrBlank()) {
+            val parsed = parseGithubReleaseJson(latestBody, repo)
+            if (parsed != null) {
+                return@withContext GitHubReleaseFetchResult(release = parsed, httpCode = latestCode)
+            }
+        }
+
+        // 2. Fallback: /releases?per_page=1 (covers pre-releases or releases not marked latest)
+        if (latestCode == 404) {
+            val (listCode, listBody) = request("https://api.github.com/repos/$repo/releases?per_page=1")
+            if (listCode in 200..299 && !listBody.isNullOrBlank()) {
+                try {
+                    val arr = org.json.JSONArray(listBody)
+                    if (arr.length() > 0) {
+                        val firstObj = arr.optJSONObject(0)
+                        if (firstObj != null) {
+                            val parsed = parseGithubReleaseJson(firstObj.toString(), repo)
+                            if (parsed != null) {
+                                return@withContext GitHubReleaseFetchResult(release = parsed, httpCode = listCode)
+                            }
+                        }
+                    }
+                    return@withContext GitHubReleaseFetchResult(
+                        httpCode = 404,
+                        errorMessage = "GitHub repo '$repo' found, but no APK Release is published yet. Run the GitHub Actions workflow first."
+                    )
+                } catch (_: Exception) {}
+            }
+            return@withContext GitHubReleaseFetchResult(
+                httpCode = 404,
+                errorMessage = "Could not access GitHub repo '$repo' (404). Make sure the repo name is right AND the GitHub repo is set to PUBLIC (Private repos block free app update checks)."
+            )
+        }
+
+        if (latestCode == 403) {
+            return@withContext GitHubReleaseFetchResult(
+                httpCode = 403,
+                errorMessage = "GitHub API limit reached. Please try again in a few minutes."
+            )
+        }
+
+        val errDetail = if (latestCode == -1) (latestBody ?: "No internet connection") else "HTTP $latestCode"
+        return@withContext GitHubReleaseFetchResult(
+            httpCode = latestCode,
+            errorMessage = "Could not reach GitHub ($errDetail)."
+        )
+    }
+
+    suspend fun fetchLatestFromGitHub(repoInput: String): AppReleaseInfo? {
+        return fetchLatestFromGitHubDetailed(repoInput).release
     }
 
     fun openUpdateUrl(context: Context, downloadUrl: String): Boolean {

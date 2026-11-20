@@ -20,6 +20,9 @@ android {
     versionCode = 100
     versionName = "1.0.1"
 
+    val githubRepoEnv = (System.getenv("GITHUB_REPOSITORY") ?: "").trim().replace("\"", "")
+    buildConfigField("String", "GITHUB_UPDATE_REPO", "\"$githubRepoEnv\"")
+
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 

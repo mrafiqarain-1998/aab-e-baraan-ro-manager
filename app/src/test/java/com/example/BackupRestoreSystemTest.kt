@@ -187,4 +187,73 @@ class BackupRestoreSystemTest {
         val cashText = cashCsv.readText()
         assertTrue(cashText.contains("Closing ID,Date,Opening Cash"))
     }
+
+    @Test
+    fun testBackupNowExecutesCleanlyAndRecordsHistory() {
+        val initialHistory = repository.backupHistory.value.size
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var ok = false
+        var message = ""
+
+        repository.backupNow("End of day test") { success, msg ->
+            ok = success
+            message = msg
+            latch.countDown()
+        }
+
+        assertTrue("backupNow should finish within 5s", latch.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue("backupNow must succeed: $message", ok)
+        assertTrue(message.contains("Backup completed successfully"))
+        assertTrue(repository.backupHistory.value.size > initialHistory)
+        assertEquals("SUCCESS", repository.backupHistory.value.first().status)
+    }
+
+    @Test
+    fun testCompleteExcelWorkbookExportContainsAllDetailedSheets() {
+        // Ensure sample customer & delivery exist
+        repository.addCustomer(
+            Customer(
+                name = "Excel Test Customer",
+                phone = "03001234567",
+                whatsapp = "03001234567",
+                area = "Johar Town",
+                address = "House 9, Block G",
+                active = true
+            )
+        )
+
+        val xlsxFile = repository.generateCompleteExcelExport()
+        assertNotNull("Complete Excel .xlsx file must be created", xlsxFile)
+        assertTrue("Excel file must exist and be non-empty", xlsxFile!!.exists() && xlsxFile.length() > 1000L)
+        assertTrue("File name must end with .xlsx", xlsxFile.name.endsWith(".xlsx"))
+
+        java.util.zip.ZipFile(xlsxFile).use { zip ->
+            assertNotNull("[Content_Types].xml missing", zip.getEntry("[Content_Types].xml"))
+            assertNotNull("xl/workbook.xml missing", zip.getEntry("xl/workbook.xml"))
+            assertNotNull("xl/styles.xml missing", zip.getEntry("xl/styles.xml"))
+
+            val workbookXml = zip.getInputStream(zip.getEntry("xl/workbook.xml")).bufferedReader().use { it.readText() }
+            val expectedSheets = listOf(
+                "Summary", "Customers", "Deliveries", "Delivery_Items",
+                "Payments", "Expenses", "Bottle_Stock", "Bottle_Refills",
+                "Bottle_Purchases", "Bottle_Issues", "Material_Stock",
+                "Material_History", "Cash_Closing", "Security_Deposits",
+                "Invoices", "Staff_Accounts"
+            )
+            expectedSheets.forEach { sheetName ->
+                assertTrue("Workbook must contain sheet '$sheetName'", workbookXml.contains("name=\"$sheetName\""))
+            }
+
+            // Verify Customers sheet contains our newly added customer's full details
+            val customersSheetXml = zip.getInputStream(zip.getEntry("xl/worksheets/sheet2.xml")).bufferedReader().use { it.readText() }
+            assertTrue(customersSheetXml.contains("Excel Test Customer"))
+            assertTrue(customersSheetXml.contains("Johar Town"))
+            assertTrue(customersSheetXml.contains("House 9, Block G"))
+
+            // Verify Staff_Accounts sheet NEVER exports plaintext passwords or hashes
+            val staffSheetXml = zip.getInputStream(zip.getEntry("xl/worksheets/sheet16.xml")).bufferedReader().use { it.readText() }
+            assertFalse("Staff Excel sheet must NEVER contain plaintext password", staffSheetXml.contains("admin123"))
+        }
+    }
 }
+

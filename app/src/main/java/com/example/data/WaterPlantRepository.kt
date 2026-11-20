@@ -5953,11 +5953,17 @@ class WaterPlantRepository private constructor(private val context: Context) {
             staffAuthApiClient.setOverrideBaseUrl(cfg.staffAuthApiUrl)
         }
         val cachedRelease = storage.loadAppReleaseInfo()
+        val bakedRepo = AppUpdateChecker.defaultConfiguredGithubRepo()
         if (cachedRelease != null) {
-            _appReleaseInfo.value = cachedRelease
-            if (AppUpdateChecker.isUpdateNewer(cachedRelease)) {
-                _availableAppUpdate.value = cachedRelease
+            val effective = if (cachedRelease.githubRepo.isBlank() && bakedRepo.isNotBlank()) {
+                cachedRelease.copy(githubRepo = bakedRepo)
+            } else cachedRelease
+            _appReleaseInfo.value = effective
+            if (AppUpdateChecker.isUpdateNewer(effective)) {
+                _availableAppUpdate.value = effective
             }
+        } else if (bakedRepo.isNotBlank()) {
+            _appReleaseInfo.value = AppReleaseInfo(githubRepo = bakedRepo, source = "github")
         }
     }
 
@@ -5978,6 +5984,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             _isCheckingAppUpdate.value = true
             try {
                 val cached = _appReleaseInfo.value ?: storage.loadAppReleaseInfo()
+                val bakedRepo = AppUpdateChecker.defaultConfiguredGithubRepo()
                 var cloudInfo: AppReleaseInfo? = null
                 val db = rtdb
                 if (db != null && isFirebaseSignedIn()) {
@@ -6004,29 +6011,56 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
                 val repoToQuery = cloudInfo?.githubRepo?.takeIf { it.isNotBlank() }
                     ?: cached?.githubRepo?.takeIf { it.isNotBlank() }
-                    ?: ""
+                    ?: bakedRepo
 
-                val githubInfo = if (repoToQuery.isNotBlank()) {
-                    AppUpdateChecker.fetchLatestFromGitHub(repoToQuery)
+                // If APK was built by GitHub Actions (bakedRepo present) and RTDB has no repo saved yet, auto-register for all staff phones
+                if (db != null && isFirebaseSignedIn() && isCurrentAuthSuperAdmin() &&
+                    bakedRepo.isNotBlank() && cloudInfo?.githubRepo.isNullOrBlank()
+                ) {
+                    try {
+                        rtdbDocRef(db, "appReleases", "latest").updateChildren(
+                            mapOf(
+                                "githubRepo" to bakedRepo,
+                                "updatedAtMillis" to now,
+                                "updatedBy" to _currentUser.value.email
+                            )
+                        ).await()
+                    } catch (_: Exception) {}
+                }
+
+                val githubResult = if (repoToQuery.isNotBlank()) {
+                    AppUpdateChecker.fetchLatestFromGitHubDetailed(repoToQuery)
                 } else null
+                val githubInfo = githubResult?.release
 
                 val bestRelease = selectNewerAppRelease(cloudInfo, githubInfo, cached)
                 if (bestRelease != null) {
-                    _appReleaseInfo.value = bestRelease
-                    storage.saveAppReleaseInfo(bestRelease)
-                    if (AppUpdateChecker.isUpdateNewer(bestRelease)) {
-                        _availableAppUpdate.value = bestRelease
-                        _appUpdateStatusMessage.value = "Update v${bestRelease.versionName.ifBlank { bestRelease.versionCode.toString() }} is available!"
+                    val effectiveBest = if (bestRelease.githubRepo.isBlank() && repoToQuery.isNotBlank()) {
+                        bestRelease.copy(githubRepo = repoToQuery)
+                    } else bestRelease
+                    _appReleaseInfo.value = effectiveBest
+                    storage.saveAppReleaseInfo(effectiveBest)
+                    if (AppUpdateChecker.isUpdateNewer(effectiveBest)) {
+                        _availableAppUpdate.value = effectiveBest
+                        _appUpdateStatusMessage.value = "Update v${effectiveBest.versionName.ifBlank { effectiveBest.versionCode.toString() }} (Build ${effectiveBest.versionCode}) is ready to install!"
                     } else {
                         _availableAppUpdate.value = null
                         if (force) {
-                            _appUpdateStatusMessage.value = "You are on the latest version (v${AppUpdateChecker.installedVersionName()})."
+                            _appUpdateStatusMessage.value = if (!githubResult?.errorMessage.isNullOrBlank() && effectiveBest.downloadUrl.isBlank()) {
+                                githubResult!!.errorMessage
+                            } else {
+                                "You are on the latest version (v${AppUpdateChecker.installedVersionName()}, Build ${AppUpdateChecker.installedVersionCode()})."
+                            }
                         }
                     }
                 } else {
                     _availableAppUpdate.value = null
                     if (force) {
-                        _appUpdateStatusMessage.value = "No remote release configured yet. Super Admin can connect GitHub or publish a link below."
+                        _appUpdateStatusMessage.value = when {
+                            !githubResult?.errorMessage.isNullOrBlank() -> githubResult!!.errorMessage
+                            repoToQuery.isBlank() -> "GitHub repo not connected yet. Tap 'Update Settings' once and paste your GitHub repo link (e.g. username/repo)."
+                            else -> "No update found yet on GitHub ($repoToQuery)."
+                        }
                     }
                 }
                 storage.saveLastUpdateCheckMillis(System.currentTimeMillis())
@@ -6300,6 +6334,36 @@ class WaterPlantRepository private constructor(private val context: Context) {
         stopFirestoreSync()
         activeSyncSessionKey = sessionKey
         _syncStatus.value = "Connecting to Realtime DB..."
+
+        // Live Firebase Realtime DB socket presence listener (.info/connected)
+        try {
+            val connectedRef = db.getReference(".info/connected")
+            val connectedListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val connected = snapshot.getValue(Boolean::class.java) == true
+                    val online = isDeviceOnline.value
+                    _isCloudConnected.value = connected && online
+                    if (connected && online) {
+                        val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
+                        if (_syncStatus.value.startsWith("Connecting") ||
+                            _syncStatus.value.startsWith("Offline") ||
+                            _syncStatus.value.startsWith("Reconnecting")
+                        ) {
+                            _syncStatus.value = "Realtime DB Live • $time"
+                        }
+                    } else if (!online) {
+                        _syncStatus.value = "Offline • Changes saved locally"
+                    } else {
+                        _syncStatus.value = "Reconnecting to Realtime DB..."
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {
+                    _isCloudConnected.value = false
+                }
+            }
+            registerRtdbListener(connectedRef, connectedListener)
+        } catch (_: Exception) {}
 
         syncJob = scope.launch {
             try {
@@ -8012,6 +8076,40 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return storage.saveBackupToFile(snap)
     }
 
+    fun generateCompleteExcelExport(): File? {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val fileName = "Aab_e_Baraan_Complete_Records_$timestamp.xlsx"
+        val file = File(context.cacheDir, fileName)
+        return try {
+            com.example.util.ExcelExportGenerator.generateCompleteWorkbook(
+                outputFile = file,
+                exportedBy = _currentUser.value.name.ifBlank { "Admin" },
+                customers = _customers.value,
+                customerRates = _customerRates.value,
+                customerAllocations = _customerAllocations.value,
+                deliveries = _deliveries.value,
+                payments = _payments.value,
+                invoices = _invoices.value,
+                expenses = _expenses.value,
+                bottleSizes = _bottleSizes.value,
+                inventory = _inventory.value,
+                bottleRefills = _bottleRefills.value,
+                bottlePurchases = _bottlePurchases.value,
+                bottleIssueSales = _bottleIssueSales.value,
+                factoryMaterials = _factoryMaterials.value,
+                materialTransactions = _materialTransactions.value,
+                roPlantItems = _roPlantItems.value,
+                roTransactions = _roTransactions.value,
+                cashClosings = _cashClosings.value,
+                securityDeposits = _securityDeposits.value,
+                userAccounts = _userAccounts.value
+            )
+        } catch (e: Exception) {
+            Log.e("WaterPlantRepo", "Error generating complete Excel workbook: ${e.message}", e)
+            null
+        }
+    }
+
     fun generateCsvExport(collectionType: String): File? {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val fileName = "aab_ebaraan_${collectionType.lowercase()}_$timestamp.csv"
@@ -8031,40 +8129,93 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         when (collectionType.uppercase()) {
             "CUSTOMERS" -> {
-                sb.appendLine("Customer ID,Customer Code,Name,Phone,Address,Type,Current Balance,Empty Bottles Held,Status")
+                val ratesByCust = _customerRates.value.groupBy { it.customerId }
+                sb.appendLine("Customer ID,Customer Code,Name,Phone,WhatsApp,Area,Address,Type,Payment Cycle,Opening Balance,Current Balance,Advance Credit,Security Deposit,Empty Bottles Held,Total Purchases,Agreed Rates,Missing Details,Notes,Status,Created By")
                 _customers.value.forEach { c ->
-                    sb.appendLine(listOf(c.id, c.customerCode, c.name, c.phone, c.address, c.type.label, c.currentBalance, c.emptyBottlesOwed, if (c.active) "Active" else "Inactive").joinToString(",") { escape(it) })
+                    val ratesStr = ratesByCust[c.id].orEmpty().filter { it.isAssigned }.joinToString("; ") { "${it.bottleSizeName}: Rs.${it.customPrice.toInt()}" }
+                    sb.appendLine(
+                        listOf(
+                            c.id, c.customerCode, c.name, c.phone, c.whatsapp, c.area, c.address,
+                            c.type.label, c.paymentCycle.label, c.openingBalance,
+                            if (c.currentBalance > 0) c.currentBalance else 0.0,
+                            if (c.currentBalance < 0) -c.currentBalance else 0.0,
+                            c.effectiveSecurityDeposit, c.emptyBottlesOwed, c.totalPurchases,
+                            ratesStr, c.missingDetailLabels().joinToString("; "), c.notes,
+                            if (c.active) "Active" else "Inactive", c.createdBy
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             "DELIVERIES" -> {
-                sb.appendLine("Delivery ID,Delivery Number,Date,Time,Customer Name,Items Summary,Total Full Delivered,Total Empty Collected,Total Amount,Payment Collected,Payment Method,Status,Staff Name")
+                sb.appendLine("Delivery ID,Delivery Number,Date,Time,Customer Name,Phone,Area,Address,Items Summary,Total Full Delivered,Total Empty Collected,Subtotal,Delivery Charges,Total Amount,Payment Collected,Remaining Due,Payment Method,Status,Staff Name,Notes,Created By")
                 _deliveries.value.forEach { d ->
-                    val itemsSummary = d.items.joinToString("; ") { "${it.bottleName}: ${it.quantity}x @ ${it.unitPrice}" }
-                    sb.appendLine(listOf(d.id, d.deliveryNumber, d.date, d.time, d.customerName, itemsSummary, d.totalFullDelivered, d.totalEmptyCollected, d.totalAmount, d.paymentCollected, d.paymentMethod, d.status.label, d.staffName).joinToString(",") { escape(it) })
+                    val itemsSummary = d.items.joinToString("; ") { "${it.bottleName}: ${it.quantity}x @ ${it.unitPrice} = ${it.lineTotal}" }
+                    val remaining = (d.totalAmount - d.paymentCollected).coerceAtLeast(0.0)
+                    sb.appendLine(
+                        listOf(
+                            d.id, d.deliveryNumber, d.date, d.time, d.customerName, d.customerPhone,
+                            d.customerArea, d.customerAddress, itemsSummary, d.totalFullDelivered,
+                            d.totalEmptyCollected, d.subtotal, d.deliveryCharges, d.totalAmount,
+                            d.paymentCollected, remaining, d.paymentMethod, d.status.label,
+                            d.staffName, d.notes, d.createdBy
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             "PAYMENTS" -> {
-                sb.appendLine("Payment ID,Receipt Number,Date,Customer Name,Amount,Payment Method,Notes,Received By,Status")
+                sb.appendLine("Payment ID,Receipt Number,Date,Customer Name,Amount,Payment Method,Transaction Ref,Advance Credited,Notes,Received By,Role,Status,Acknowledged By")
                 _payments.value.forEach { p ->
-                    sb.appendLine(listOf(p.id, p.receiptNumber, p.date, p.customerName, p.amount, p.paymentMethod.label, p.notes, p.receivedBy, if (p.isAcknowledged) "Acknowledged" else "Pending Verification").joinToString(",") { escape(it) })
+                    sb.appendLine(
+                        listOf(
+                            p.id, p.receiptNumber, p.date, p.customerName, p.amount, p.paymentMethod.label,
+                            p.transactionRef, p.advanceCredited, p.notes, p.receivedBy,
+                            p.receivedByRole.displayName,
+                            if (p.isAcknowledged) "Cleared" else "Pending Admin Clear",
+                            p.acknowledgedBy
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             "EXPENSES" -> {
-                sb.appendLine("Expense ID,Voucher Number,Date,Type,Category,Description,Amount,Payment Method,Payee,Recorded By,Status")
+                sb.appendLine("Expense ID,Voucher Number,Date,Type,Category,Description,Amount,Payment Method,Payment Source,Payee,Notes,Recorded By,Role,Status,Acknowledged By")
                 _expenses.value.forEach { e ->
-                    sb.appendLine(listOf(e.id, e.voucherNumber, e.date, e.expenseType.label, e.categoryName, e.description, e.amount, e.paymentMethod.label, e.payee, e.enteredBy, if (e.isApprovedByOwner) "Approved" else "Pending Approval").joinToString(",") { escape(it) })
+                    val verified = e.isAcknowledged && e.isApprovedByOwner
+                    sb.appendLine(
+                        listOf(
+                            e.id, e.voucherNumber, e.date, e.expenseType.label, e.categoryName,
+                            e.description, e.amount, e.paymentMethod.label, e.paymentSource.label,
+                            e.payee, e.notes, e.enteredBy, e.enteredByRole.displayName,
+                            if (verified) "Verified" else "Pending Admin Verification",
+                            e.acknowledgedBy
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             "INVENTORY" -> {
-                sb.appendLine("Inventory ID,Bottle Size ID,Bottle Name,Full At Plant,Empty At Plant,With Customers,Damaged,Total Purchased")
+                sb.appendLine("Inventory ID,Bottle Size ID,Bottle Name,Full At Plant,Empty At Plant,In Use,Pack Variants,With Customers,With Staff,Damaged,Total Purchased,Total Issued")
                 _inventory.value.forEach { inv ->
-                    sb.appendLine(listOf(inv.id, inv.bottleSizeId, inv.sizeName, inv.atPlantFull, inv.atPlantEmpty, inv.withCustomers, inv.damaged, inv.totalPurchased).joinToString(",") { escape(it) })
+                    val variantsStr = inv.packVariants.filter { it.packetCount > 0 }.joinToString("; ") { "${it.displayName}: ${it.packetCount}" }
+                    sb.appendLine(
+                        listOf(
+                            inv.id, inv.bottleSizeId, inv.sizeName, inv.atPlantFull, inv.atPlantEmpty,
+                            inv.inUse, variantsStr, inv.withCustomers, inv.withStaff, inv.damaged,
+                            inv.totalPurchased, inv.totalIssuedOrSold
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             "CASH_CLOSING" -> {
-                sb.appendLine("Closing ID,Date,Opening Cash,Customer Cash Collected,Cash Expenses,Expected Cash,Actual Cash,Difference,Closed By,Status")
+                sb.appendLine("Closing ID,Date,Opening Cash,Customer Cash Collected,Other Cash Income,Cash Expenses,Cash Refunds,Expected Cash,Actual Cash,Difference,Closed By,Status,Notes")
                 _cashClosings.value.forEach { cc ->
-                    sb.appendLine(listOf(cc.id, cc.date, cc.openingCash, cc.customerCashCollected, cc.cashExpenses, cc.expectedClosingCash, cc.actualClosingCash, cc.difference, cc.closedBy, if (cc.isApprovedByOwner) "Approved by Admin" else "Pending Review").joinToString(",") { escape(it) })
+                    sb.appendLine(
+                        listOf(
+                            cc.id, cc.date, cc.openingCash, cc.customerCashCollected, cc.otherCashIncome,
+                            cc.cashExpenses, cc.cashRefunds, cc.expectedClosingCash, cc.actualClosingCash,
+                            cc.difference, cc.closedBy,
+                            if (cc.isApprovedByOwner) "Approved by Admin" else "Pending Review",
+                            cc.notes
+                        ).joinToString(",") { escape(it) }
+                    )
                 }
             }
             else -> return null

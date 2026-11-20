@@ -1048,6 +1048,10 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         return repository.generateCsvExport(collectionType)
     }
 
+    fun generateCompleteExcelExport(): java.io.File? {
+        return repository.generateCompleteExcelExport()
+    }
+
     fun markDeliveryAsPaid(deliveryId: String, amountPaid: Double? = null, method: PaymentMethod = PaymentMethod.CASH): Boolean {
         val success = repository.markDeliveryAsPaid(deliveryId, amountPaid, method)
         if (success) {

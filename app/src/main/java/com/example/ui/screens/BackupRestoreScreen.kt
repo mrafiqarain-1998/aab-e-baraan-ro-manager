@@ -1,8 +1,14 @@
 package com.example.ui.screens
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +41,9 @@ import com.example.model.*
 import com.example.ui.components.SectionHeader
 import com.example.ui.theme.*
 import com.example.viewmodel.WaterPlantViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
@@ -61,6 +70,45 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
     // Cloud backups list state
     var cloudBackupsList by remember { mutableStateOf<List<BackupMetadata>>(emptyList()) }
     var isLoadingCloudBackups by remember { mutableStateOf(false) }
+    var isExportingCompleteExcel by remember { mutableStateOf(false) }
+
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val coroutineScope = rememberCoroutineScope()
+
+    fun showSafeToast(message: String, length: Int = Toast.LENGTH_LONG) {
+        mainHandler.post {
+            try {
+                Toast.makeText(context, message, length).show()
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Save a copy directly into the phone's Downloads folder on Android 10+ (zero permissions required)
+    fun saveCopyToDownloads(sourceFile: File, mimeType: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, sourceFile.name)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+                resolver.openOutputStream(uri)?.use { out ->
+                    sourceFile.inputStream().use { input -> input.copyTo(out) }
+                }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                true
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     // Helper for sharing files via FileProvider
     fun shareFile(file: File, mimeType: String, title: String) {
@@ -75,7 +123,7 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
             }
             context.startActivity(Intent.createChooser(intent, title))
         } catch (e: Exception) {
-            Toast.makeText(context, "Error exporting file: ${e.message}", Toast.LENGTH_LONG).show()
+            showSafeToast("Error exporting file: ${e.message}")
         }
     }
 
@@ -404,8 +452,10 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                         activeTab = 1
                         isLoadingCloudBackups = true
                         viewModel.fetchCloudBackups { list ->
-                            cloudBackupsList = list
-                            isLoadingCloudBackups = false
+                            mainHandler.post {
+                                cloudBackupsList = list
+                                isLoadingCloudBackups = false
+                            }
                         }
                     },
                     text = {
@@ -485,13 +535,117 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             SectionHeader(
                                 title = "Export Records as Excel / CSV",
-                                urduTitle = "مائیکروسافٹ ایکسل یا گوگل شیٹس کے لیے سی ایس وی"
+                                urduTitle = "مائیکروسافٹ ایکسل یا گوگل شیٹس کے لیے مکمل ریکارڈ"
                             )
                             Text(
-                                text = "Download individual table records as formatted CSV spreadsheets for financial auditing, reports, or offline record keeping.",
+                                text = "Download ALL tabs together in one complete multi-sheet Excel workbook (.xlsx) with every detail, or export any single table below.",
                                 fontSize = 10.5.sp,
                                 color = TextSecondaryDark
                             )
+
+                            // Prominent 1-Click Complete Multi-Sheet Excel Download Button with Excel Icon
+                            val excelGreen = Color(0xFF1D6F42)
+                            Button(
+                                enabled = !isExportingCompleteExcel,
+                                onClick = {
+                                    isExportingCompleteExcel = true
+                                    coroutineScope.launch {
+                                        val mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                        val file = withContext(Dispatchers.IO) {
+                                            viewModel.generateCompleteExcelExport()
+                                        }
+                                        val savedToDownloads = if (file != null) {
+                                            withContext(Dispatchers.IO) { saveCopyToDownloads(file, mime) }
+                                        } else false
+                                        isExportingCompleteExcel = false
+                                        if (file != null) {
+                                            if (savedToDownloads) {
+                                                showSafeToast("Complete Excel saved to Downloads (${file.name})")
+                                            }
+                                            shareFile(file, mime, "Aab-e-Baraan Complete Excel Records")
+                                        } else {
+                                            showSafeToast("Error generating complete Excel file")
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = excelGreen,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("export_all_excel_btn")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        // Crisp Excel Icon Badge
+                                        Surface(
+                                            shape = RoundedCornerShape(7.dp),
+                                            color = Color.White,
+                                            modifier = Modifier.size(36.dp)
+                                        ) {
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.Center,
+                                                modifier = Modifier.fillMaxSize()
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.TableChart,
+                                                    contentDescription = "Excel Icon",
+                                                    tint = excelGreen,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Text(
+                                                    text = "XLS",
+                                                    fontSize = 7.5.sp,
+                                                    fontWeight = FontWeight.Black,
+                                                    color = excelGreen,
+                                                    lineHeight = 8.sp
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column {
+                                            Text(
+                                                text = if (isExportingCompleteExcel) "Preparing Complete Excel..." else "Download All Tabs Excel (.XLSX)",
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = Color.White
+                                            )
+                                            Text(
+                                                text = "ایک کلک میں تمام 16 ٹیبز کی مکمل تفصیلی ایکسل فائل",
+                                                fontSize = 9.5.sp,
+                                                color = Color.White.copy(alpha = 0.9f)
+                                            )
+                                        }
+                                    }
+                                    if (isExportingCompleteExcel) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = Color.White
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Download,
+                                            contentDescription = "Download All Excel",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(color = BorderLight)
 
                             val csvTypes = listOf(
                                 Triple("CUSTOMERS", "Customers Directory (گاہکوں کی فہرست)", Icons.Default.People),
@@ -505,11 +659,15 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                             csvTypes.forEach { (typeKey, label, icon) ->
                                 OutlinedButton(
                                     onClick = {
-                                        val file = viewModel.generateCsvExport(typeKey)
-                                        if (file != null) {
-                                            shareFile(file, "text/csv", "Aab e Baraan $typeKey CSV")
-                                        } else {
-                                            Toast.makeText(context, "Error generating CSV", Toast.LENGTH_SHORT).show()
+                                        coroutineScope.launch {
+                                            val file = withContext(Dispatchers.IO) {
+                                                viewModel.generateCsvExport(typeKey)
+                                            }
+                                            if (file != null) {
+                                                shareFile(file, "text/csv", "Aab e Baraan $typeKey CSV")
+                                            } else {
+                                                showSafeToast("Error generating CSV")
+                                            }
                                         }
                                     },
                                     shape = RoundedCornerShape(8.dp),
@@ -626,8 +784,10 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                                     onClick = {
                                         isLoadingCloudBackups = true
                                         viewModel.fetchCloudBackups { list ->
-                                            cloudBackupsList = list
-                                            isLoadingCloudBackups = false
+                                            mainHandler.post {
+                                                cloudBackupsList = list
+                                                isLoadingCloudBackups = false
+                                            }
                                         }
                                     }
                                 ) {
@@ -700,14 +860,16 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                                                 Button(
                                                     onClick = {
                                                         viewModel.fetchCloudBackupData(cloudMeta.backupId) { data ->
-                                                            if (data != null) {
-                                                                val rep = viewModel.verifyBackupJson(
-                                                                    com.example.data.PlantDataStorage(context).serializeBackupData(data)
-                                                                )
-                                                                pendingVerificationReport = rep
-                                                                showSafeRestoreConfirmDialog = true
-                                                            } else {
-                                                                Toast.makeText(context, "Could not download cloud backup data.", Toast.LENGTH_SHORT).show()
+                                                            mainHandler.post {
+                                                                if (data != null) {
+                                                                    val rep = viewModel.verifyBackupJson(
+                                                                        com.example.data.PlantDataStorage(context).serializeBackupData(data)
+                                                                    )
+                                                                    pendingVerificationReport = rep
+                                                                    showSafeRestoreConfirmDialog = true
+                                                                } else {
+                                                                    showSafeToast("Could not download cloud backup data.", Toast.LENGTH_SHORT)
+                                                                }
                                                             }
                                                         }
                                                     },
@@ -823,8 +985,8 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                         val notes = backupNotesInput.trim()
                         showBackupNotesDialog = false
                         backupNotesInput = ""
-                        viewModel.backupNow(notes) { success, msg ->
-                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        viewModel.backupNow(notes) { _, msg ->
+                            showSafeToast(msg, Toast.LENGTH_LONG)
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
@@ -966,11 +1128,13 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                     onClick = {
                         if (report.backupData != null) {
                             isRestoringInProgress = true
-                            viewModel.restoreFromVerifiedBackup(report.backupData, requireSafety = true) { success, msg ->
-                                isRestoringInProgress = false
-                                showSafeRestoreConfirmDialog = false
-                                pendingVerificationReport = null
-                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            viewModel.restoreFromVerifiedBackup(report.backupData, requireSafety = true) { _, msg ->
+                                mainHandler.post {
+                                    isRestoringInProgress = false
+                                    showSafeRestoreConfirmDialog = false
+                                    pendingVerificationReport = null
+                                    showSafeToast(msg, Toast.LENGTH_LONG)
+                                }
                             }
                         }
                     },

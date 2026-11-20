@@ -30,6 +30,7 @@ import com.example.R
 import com.example.model.AppModule
 import com.example.model.Delivery
 import com.example.model.PermissionAction
+import com.example.model.SyncQueueStatus
 import com.example.model.UserRole
 import com.example.ui.components.MetricStatCard
 import com.example.ui.components.NewItemBadge
@@ -70,6 +71,10 @@ fun DashboardScreen(
     val passwordResetRequests by viewModel.passwordResetRequests.collectAsState()
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
+    val isDeviceOnline by viewModel.isDeviceOnline.collectAsState()
+    val isCloudConnected by viewModel.isCloudConnected.collectAsState()
+    val isSyncFlushing by viewModel.isSyncFlushing.collectAsState()
+    val syncQueueItems by viewModel.syncQueueItems.collectAsState()
 
     var showAddExpenseDialog by remember { mutableStateOf(false) }
     var showPasswordResetRequestsDialog by remember { mutableStateOf(false) }
@@ -264,25 +269,35 @@ fun DashboardScreen(
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Text(
-                                        text = "Aab e Baraan RO Plant",
-                                        color = Color.White,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
-                                    Text(
-                                        text = "پلانٹ اسٹیٹس: فعال و جاری (Active Plant)",
-                                        color = WaterSkyLight,
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
+                                Text(
+                                    text = "Aab e Baraan RO Plant",
+                                    color = Color.White,
+                                    fontSize = 14.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            val pendingSyncCount = remember(syncQueueItems) {
+                                syncQueueItems.count { it.status == SyncQueueStatus.PENDING || it.status == SyncQueueStatus.SYNCING }
+                            }
+                            val failedSyncCount = remember(syncQueueItems) {
+                                syncQueueItems.count { it.status == SyncQueueStatus.FAILED }
+                            }
+                            val (syncLabel, syncColor) = when {
+                                !isDeviceOnline -> "OFFLINE" to ErrorRed
+                                failedSyncCount > 0 -> "SYNC ERROR" to ErrorRed
+                                isSyncFlushing || pendingSyncCount > 0 ->
+                                    (if (pendingSyncCount > 0) "SYNCING ($pendingSyncCount)" else "SYNCING") to WarningAmber
+                                isCloudConnected -> "LIVE SYNC" to SuccessGreen
+                                else -> "LOCAL ONLY" to WarningAmber
                             }
 
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = SuccessGreen.copy(alpha = 0.2f)
+                                color = syncColor.copy(alpha = 0.22f),
+                                modifier = Modifier.testTag("dashboard_live_sync_badge")
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -292,12 +307,12 @@ fun DashboardScreen(
                                         modifier = Modifier
                                             .size(8.dp)
                                             .clip(CircleShape)
-                                            .background(SuccessGreen)
+                                            .background(syncColor)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "LIVE SYNC",
-                                        color = SuccessGreen,
+                                        text = syncLabel,
+                                        color = syncColor,
                                         fontSize = 9.5.sp,
                                         fontWeight = FontWeight.ExtraBold
                                     )
