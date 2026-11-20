@@ -49,7 +49,8 @@ data class PlantBackupData(
     val factoryMaterials: List<FactoryMaterial> = emptyList(),
     val materialTransactions: List<MaterialTransaction> = emptyList(),
     val bottleCostings: List<BottleCostingRecord> = emptyList(),
-    val monthlyRecurringExpenses: List<MonthlyRecurringExpense> = emptyList()
+    val monthlyRecurringExpenses: List<MonthlyRecurringExpense> = emptyList(),
+    val plantWorkers: List<PlantWorker> = emptyList()
 )
 
 @JsonClass(generateAdapter = true)

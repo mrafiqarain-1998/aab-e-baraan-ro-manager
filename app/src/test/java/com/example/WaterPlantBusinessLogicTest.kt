@@ -2562,6 +2562,269 @@ class WaterPlantBusinessLogicTest {
         assertEquals("owner/repo", com.example.data.AppUpdateChecker.normalizeGithubRepo("https://github.com/owner/repo.git"))
         assertEquals("owner/repo", com.example.data.AppUpdateChecker.normalizeGithubRepo("https://api.github.com/repos/owner/repo/releases/latest"))
     }
+
+    @Test
+    fun testDirectExpenseLinkedMaterialAndBottleStockAtomicSyncAndReversal() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val testDate = "2026-11-18"
+
+        // 1. Add an existing FactoryMaterial first (new items are created only in Other Material)
+        val matId = repository.addFactoryMaterial(
+            FactoryMaterial(
+                name = "Shrink Roll 500ml",
+                itemCategory = "Packing Material",
+                uom = "Roll",
+                openingStock = 5.0,
+                currentStock = 5.0,
+                purchaseRate = 1200.0
+            )
+        )
+        val expCountBeforeMat = repository.expenses.value.size
+        val mtxCountBefore = repository.materialTransactions.value.size
+
+        // 2. Direct Expense -> Material Refill (atomic: 1 Expense + stock +8 + 1 MaterialTransaction)
+        val matRes = repository.recordExpenseWithMaterialRefill(
+            materialId = matId,
+            quantity = 8.0,
+            unitCost = 1250.0,
+            categoryId = "cat_packing_material",
+            categoryName = "Packing Material",
+            expenseType = ExpenseType.OPEX,
+            description = "Purchased 8 Roll Shrink Roll 500ml",
+            supplierName = "PackPro Traders",
+            invoiceNo = "INV-PACK-99",
+            notes = "Urgent batch",
+            expenseDate = testDate,
+            paymentSource = PaymentSource.PAY_FROM_SALE,
+            paymentMethod = PaymentMethod.CASH
+        )
+        assertTrue(matRes.second, matRes.first)
+        assertEquals(expCountBeforeMat + 1, repository.expenses.value.size)
+        assertEquals(mtxCountBefore + 1, repository.materialTransactions.value.size)
+
+        val matAfterRefill = repository.factoryMaterials.value.first { it.id == matId }
+        assertEquals(13.0, matAfterRefill.currentStock, 0.01)
+        assertEquals(1250.0, matAfterRefill.purchaseRate, 0.01)
+
+        val linkedMatExp = repository.expenses.value.first()
+        assertEquals("MATERIAL", linkedMatExp.linkedInventoryType)
+        assertEquals(matId, linkedMatExp.linkedInventoryItemId)
+        assertEquals(10000.0, linkedMatExp.amount, 0.01)
+        assertEquals("INV-PACK-99", linkedMatExp.invoiceNumber)
+
+        // Deleting linked Expense atomically reverses stock back to 5.0 and removes MaterialTransaction
+        assertTrue(repository.deleteExpense(linkedMatExp.id))
+        assertEquals(5.0, repository.factoryMaterials.value.first { it.id == matId }.currentStock, 0.01)
+        assertEquals(mtxCountBefore, repository.materialTransactions.value.size)
+
+        // 3. Direct Expense -> Bottle Stock Purchase (atomic: 1 Expense + Plant Empty +50 + 1 BottlePurchaseRecord)
+        val size19 = repository.bottleSizes.value.first { it.id == "size_19l" }
+        val invBefore = repository.inventory.value.first { it.bottleSizeId == size19.id }
+        val purCountBefore = repository.bottlePurchases.value.size
+        val expCountBeforeBottle = repository.expenses.value.size
+
+        val bottleRes = repository.recordExpenseWithBottlePurchase(
+            bottleSizeId = size19.id,
+            quantity = 50,
+            unitCost = 520.0,
+            categoryId = "cat_bottle_purchase",
+            categoryName = "Bottle Purchase",
+            expenseType = ExpenseType.CAPEX,
+            description = "Purchased 50 19L bottles",
+            supplierName = "Crystal PET",
+            invoiceNo = "INV-BOT-50",
+            notes = "New stock",
+            expenseDate = testDate,
+            paymentSource = PaymentSource.PAY_FROM_INVESTMENT,
+            paymentMethod = PaymentMethod.BANK_TRANSFER
+        )
+        assertTrue(bottleRes.second, bottleRes.first)
+        assertEquals(expCountBeforeBottle + 1, repository.expenses.value.size)
+        assertEquals(purCountBefore + 1, repository.bottlePurchases.value.size)
+
+        val invAfter = repository.inventory.value.first { it.bottleSizeId == size19.id }
+        assertEquals(invBefore.atPlantEmpty + 50, invAfter.atPlantEmpty)
+        assertEquals(invBefore.totalPurchased + 50, invAfter.totalPurchased)
+
+        val linkedBottleExp = repository.expenses.value.first()
+        assertEquals("BOTTLE", linkedBottleExp.linkedInventoryType)
+        assertEquals(size19.id, linkedBottleExp.linkedInventoryItemId)
+        assertEquals(26000.0, linkedBottleExp.amount, 0.01)
+
+        // Deleting linked Expense atomically reverses Plant Empty & removes BottlePurchaseRecord
+        assertTrue(repository.deleteExpense(linkedBottleExp.id))
+        val invReversed = repository.inventory.value.first { it.bottleSizeId == size19.id }
+        assertEquals(invBefore.atPlantEmpty, invReversed.atPlantEmpty)
+        assertEquals(purCountBefore, repository.bottlePurchases.value.size)
+    }
+
+    @Test
+    fun testUnifiedExpenseCategoriesReflectInInventory() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val customName = "Solar Inverter Spares"
+        repository.addExpenseCategory(customName, "سولر پارٹس", ExpenseType.OPEX)
+
+        val inventoryCats = repository.getAllInventoryCategories()
+        assertTrue(
+            "New Expense category must appear in Other Material inventory categories",
+            inventoryCats.any { it.equals(customName, ignoreCase = true) }
+        )
+        assertTrue(
+            "Built-in Expense categories must also be present in inventory categories",
+            inventoryCats.any { it.equals("Fuel / Rent", ignoreCase = true) }
+        )
+    }
+
+    @Test
+    fun testPlantWorkersCrudAndSmartMonthlySalaryAdvanceDeduction() {
+        repository.switchUserRole(UserRole.ADMIN)
+
+        val addRes = repository.addPlantWorker(
+            PlantWorker(
+                name = "Imran Qureshi",
+                cnic = "35202-1234567-1",
+                phone = "03001122334",
+                designation = "Delivery Rider",
+                monthlySalary = 30000.0
+            )
+        )
+        assertTrue(addRes.second, addRes.first)
+        val worker = repository.plantWorkers.value.first { it.name == "Imran Qureshi" }
+        assertEquals("35202-1234567-1", worker.cnic)
+        assertEquals(30000.0, worker.monthlySalary, 0.01)
+
+        val month = "2026-11"
+        val initialSummary = repository.getWorkerMonthlySalarySummary(worker.id, month)
+        assertEquals(30000.0, initialSummary.remainingSalary, 0.01)
+        assertEquals(0.0, initialSummary.paidOrAdvanceThisMonth, 0.01)
+
+        // Advance #1 linked via staffMemberId (Rs. 8,000)
+        repository.addExpense(
+            categoryId = "cat_salary",
+            categoryName = "Staff Salary",
+            description = "Mid-month salary advance",
+            amount = 8000.0,
+            method = PaymentMethod.CASH,
+            payee = worker.name,
+            notes = "Advance 1",
+            type = ExpenseType.OPEX,
+            expenseDate = "2026-11-10",
+            paymentSource = PaymentSource.PAY_FROM_SALE,
+            staffMemberId = worker.id,
+            staffMemberName = worker.name
+        )
+        val afterAdv1 = repository.getWorkerMonthlySalarySummary(worker.id, month)
+        assertEquals(8000.0, afterAdv1.paidOrAdvanceThisMonth, 0.01)
+        assertEquals(22000.0, afterAdv1.remainingSalary, 0.01)
+
+        // Advance #2 legacy-compatible record (blank staffMemberId, matched by payee name)
+        repository.addExpense(
+            categoryId = "cat_salary",
+            categoryName = "Staff Salary",
+            description = "Legacy advance entry",
+            amount = 5000.0,
+            method = PaymentMethod.CASH,
+            payee = "Imran Qureshi",
+            notes = "Advance 2",
+            type = ExpenseType.OPEX,
+            expenseDate = "2026-11-15",
+            paymentSource = PaymentSource.PAY_FROM_SALE
+        )
+        val afterAdv2 = repository.getWorkerMonthlySalarySummary(worker.id, month)
+        assertEquals(13000.0, afterAdv2.paidOrAdvanceThisMonth, 0.01)
+        assertEquals(17000.0, afterAdv2.remainingSalary, 0.01)
+        assertEquals(2, afterAdv2.paymentsCount)
+
+        // Previous month payment must NOT deduct from 2026-11
+        repository.addExpense(
+            categoryId = "cat_salary",
+            categoryName = "Staff Salary",
+            description = "October salary",
+            amount = 30000.0,
+            method = PaymentMethod.CASH,
+            payee = worker.name,
+            notes = "",
+            type = ExpenseType.OPEX,
+            expenseDate = "2026-10-30",
+            paymentSource = PaymentSource.PAY_FROM_SALE,
+            staffMemberId = worker.id,
+            staffMemberName = worker.name
+        )
+        val novSummaryStill = repository.getWorkerMonthlySalarySummary(worker.id, month)
+        assertEquals(13000.0, novSummaryStill.paidOrAdvanceThisMonth, 0.01)
+        assertEquals(17000.0, novSummaryStill.remainingSalary, 0.01)
+    }
+
+    @Test
+    fun testAdminPerUserDataVisibilityRestrictionsPreserveStoredData() {
+        val today = "2026-11-20"
+        val yesterday = "2026-11-19"
+
+        val adminUser = UserProfile(
+            id = "user_admin_01",
+            name = "Admin",
+            username = "admin",
+            role = UserRole.ADMIN,
+            isSuperAdmin = true,
+            restrictToOwnDataOnly = true, // Admin must ALWAYS remain unrestricted
+            restrictToTodayOnly = true
+        )
+        val staffOwnOnly = UserProfile(
+            id = "user_ali",
+            uid = "uid_ali",
+            name = "Ali Rider",
+            username = "alirider",
+            role = UserRole.INCHARGE,
+            restrictToOwnDataOnly = true,
+            restrictToTodayOnly = false
+        )
+        val staffTodayOnly = staffOwnOnly.copy(
+            restrictToOwnDataOnly = false,
+            restrictToTodayOnly = true
+        )
+        val staffBoth = staffOwnOnly.copy(
+            restrictToOwnDataOnly = true,
+            restrictToTodayOnly = true
+        )
+
+        val sampleExpenses = listOf(
+            Expense(id = "e1", date = today, enteredBy = "Ali Rider", createdByUid = "uid_ali", amount = 100.0),
+            Expense(id = "e2", date = yesterday, enteredBy = "Ali Rider", createdByUid = "uid_ali", amount = 200.0),
+            Expense(id = "e3", date = today, enteredBy = "Bilal Staff", createdByUid = "uid_bilal", amount = 300.0),
+            Expense(id = "e4", date = yesterday, enteredBy = "Admin", createdByUid = "user_admin_01", amount = 400.0)
+        )
+        val sampleDeliveries = listOf(
+            Delivery(id = "d1", date = today, createdBy = "Ali Rider", createdByUid = "uid_ali", staffName = "Ali Rider"),
+            Delivery(id = "d2", date = yesterday, createdBy = "Ali Rider", createdByUid = "uid_ali", staffName = "Ali Rider"),
+            Delivery(id = "d3", date = today, createdBy = "Bilal Staff", createdByUid = "uid_bilal", staffName = "Bilal Staff")
+        )
+        val samplePayments = listOf(
+            Payment(id = "p1", date = today, receivedBy = "Ali Rider", createdByUid = "uid_ali", amount = 500.0),
+            Payment(id = "p2", date = yesterday, receivedBy = "Ali Rider", createdByUid = "uid_ali", amount = 600.0),
+            Payment(id = "p3", date = today, receivedBy = "Bilal Staff", createdByUid = "uid_bilal", amount = 700.0)
+        )
+
+        // Admin sees all 4 expenses, 3 deliveries, 3 payments
+        assertEquals(4, repository.filterVisibleExpenses(sampleExpenses, adminUser, today).size)
+        assertEquals(3, repository.filterVisibleDeliveries(sampleDeliveries, adminUser, today).size)
+        assertEquals(3, repository.filterVisiblePayments(samplePayments, adminUser, today).size)
+
+        // Own-data-only sees only Ali's records (both today & yesterday)
+        assertEquals(listOf("e1", "e2"), repository.filterVisibleExpenses(sampleExpenses, staffOwnOnly, today).map { it.id })
+        assertEquals(listOf("d1", "d2"), repository.filterVisibleDeliveries(sampleDeliveries, staffOwnOnly, today).map { it.id })
+        assertEquals(listOf("p1", "p2"), repository.filterVisiblePayments(samplePayments, staffOwnOnly, today).map { it.id })
+
+        // Today-only sees only today's records (both Ali & Bilal)
+        assertEquals(listOf("e1", "e3"), repository.filterVisibleExpenses(sampleExpenses, staffTodayOnly, today).map { it.id })
+        assertEquals(listOf("d1", "d3"), repository.filterVisibleDeliveries(sampleDeliveries, staffTodayOnly, today).map { it.id })
+        assertEquals(listOf("p1", "p3"), repository.filterVisiblePayments(samplePayments, staffTodayOnly, today).map { it.id })
+
+        // Both restrictions enabled -> only Ali's records from today
+        assertEquals(listOf("e1"), repository.filterVisibleExpenses(sampleExpenses, staffBoth, today).map { it.id })
+        assertEquals(listOf("d1"), repository.filterVisibleDeliveries(sampleDeliveries, staffBoth, today).map { it.id })
+        assertEquals(listOf("p1"), repository.filterVisiblePayments(samplePayments, staffBoth, today).map { it.id })
+    }
 }
+
 
 

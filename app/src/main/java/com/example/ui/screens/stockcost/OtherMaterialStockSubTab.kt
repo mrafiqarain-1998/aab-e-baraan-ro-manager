@@ -52,6 +52,7 @@ fun OtherMaterialStockSubTab(
         !viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.EDIT)
     val materials by viewModel.factoryMaterials.collectAsState()
     val transactions by viewModel.materialTransactions.collectAsState()
+    val allInventoryCategories by viewModel.allInventoryCategories.collectAsState()
 
     var showAddItemsDialog by remember { mutableStateOf(false) }
     var showIssueMaterialDialog by remember { mutableStateOf(false) }
@@ -109,8 +110,8 @@ fun OtherMaterialStockSubTab(
                     MaterialActionTile(
                         label = "Issue Material",
                         icon = Icons.Default.Output,
-                        containerColor = WaterNavyPrimary,
-                        contentColor = Color.White,
+                        containerColor = WaterSkyButton,
+                        contentColor = WaterSkyButtonContent,
                         enabled = canEditMaterials && activeMaterials.isNotEmpty(),
                         onClick = { showIssueMaterialDialog = true },
                         modifier = Modifier
@@ -168,8 +169,8 @@ fun OtherMaterialStockSubTab(
                         label = { Text("All (${activeMaterials.size})", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                     )
                 }
-                items(StockMasterOptions.MATERIAL_CATEGORIES) { cat ->
-                    val count = activeMaterials.count { it.itemCategory == cat }
+                items(allInventoryCategories) { cat ->
+                    val count = activeMaterials.count { it.itemCategory.equals(cat, ignoreCase = true) }
                     if (count > 0) {
                         FilterChip(
                             selected = selectedCategoryFilter == cat,
@@ -270,6 +271,7 @@ fun OtherMaterialStockSubTab(
     // A. Add Items Form
     if (showAddItemsDialog) {
         AddMaterialItemDialog(
+            categories = allInventoryCategories,
             onDismiss = { showAddItemsDialog = false },
             onSave = { newMat ->
                 viewModel.addFactoryMaterial(newMat) {
@@ -380,6 +382,7 @@ fun OtherMaterialStockSubTab(
     preselectedMaterialForEdit?.let { mat ->
         EditMaterialDialog(
             material = mat,
+            categories = allInventoryCategories,
             onDismiss = { preselectedMaterialForEdit = null },
             onSave = { updated ->
                 viewModel.updateFactoryMaterial(updated) {
@@ -691,11 +694,15 @@ fun CompactMaterialCard(
 // -------------------------------------------------------------
 @Composable
 fun AddMaterialItemDialog(
+    categories: List<String> = StockMasterOptions.MATERIAL_CATEGORIES,
     onDismiss: () -> Unit,
     onSave: (FactoryMaterial) -> Unit
 ) {
+    val categoryOptions = remember(categories) {
+        categories.ifEmpty { StockMasterOptions.MATERIAL_CATEGORIES }
+    }
     var itemName by remember { mutableStateOf("") }
-    var itemCategory by remember { mutableStateOf(StockMasterOptions.MATERIAL_CATEGORIES.first()) }
+    var itemCategory by remember { mutableStateOf(categoryOptions.first()) }
     var costType by remember { mutableStateOf(ExpenseType.OPEX) }
     var uom by remember { mutableStateOf(StockMasterOptions.MATERIAL_UOMS.first()) }
     var currentStock by remember { mutableStateOf("") }
@@ -748,7 +755,7 @@ fun AddMaterialItemDialog(
                         }
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("btn_save_material_item")
             ) {
@@ -767,7 +774,7 @@ fun AddMaterialItemDialog(
         CompactDropdownField(
             label = "Item Category*",
             selectedText = itemCategory,
-            options = StockMasterOptions.MATERIAL_CATEGORIES,
+            options = categoryOptions,
             optionLabel = { it },
             onOptionSelected = { itemCategory = it }
         )
@@ -782,8 +789,8 @@ fun AddMaterialItemDialog(
                 Surface(
                     onClick = { costType = type },
                     shape = RoundedCornerShape(8.dp),
-                    color = if (selected) WaterNavyPrimary else Color(0xFFF8FAFC),
-                    border = BorderStroke(1.dp, if (selected) WaterNavyPrimary else BorderLight),
+                    color = if (selected) WaterSkyButton else Color(0xFFF8FAFC),
+                    border = BorderStroke(1.dp, if (selected) WaterBlueMedium else BorderLight),
                     modifier = Modifier
                         .weight(1f)
                         .height(36.dp)
@@ -794,7 +801,7 @@ fun AddMaterialItemDialog(
                             text = label,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (selected) Color.White else WaterNavyPrimary,
+                            color = if (selected) WaterSkyButtonContent else WaterNavyPrimary,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -898,7 +905,7 @@ fun IssueMaterialFormDialog(
                         else -> onConfirmIssue(mat.id, qtyVal, issueFor, remarks.trim())
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text("Confirm Issue", fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -1256,11 +1263,17 @@ fun MaterialLossActionDialog(
 @Composable
 fun EditMaterialDialog(
     material: FactoryMaterial,
+    categories: List<String> = StockMasterOptions.MATERIAL_CATEGORIES,
     onDismiss: () -> Unit,
     onSave: (FactoryMaterial) -> Unit
 ) {
+    val categoryOptions = remember(categories, material.itemCategory) {
+        (categories + listOfNotNull(material.itemCategory.takeIf { it.isNotBlank() }))
+            .distinctBy { it.lowercase() }
+            .ifEmpty { StockMasterOptions.MATERIAL_CATEGORIES }
+    }
     var name by remember { mutableStateOf(material.name) }
-    var itemCategory by remember { mutableStateOf(material.itemCategory.ifBlank { StockMasterOptions.MATERIAL_CATEGORIES.first() }) }
+    var itemCategory by remember { mutableStateOf(material.itemCategory.ifBlank { categoryOptions.first() }) }
     var costType by remember { mutableStateOf(material.costType) }
     var uom by remember { mutableStateOf(material.uom.ifBlank { StockMasterOptions.MATERIAL_UOMS.first() }) }
     var purchaseRate by remember { mutableStateOf(material.purchaseRate.toInt().toString()) }
@@ -1305,7 +1318,7 @@ fun EditMaterialDialog(
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text("Update Item", fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -1322,7 +1335,7 @@ fun EditMaterialDialog(
         CompactDropdownField(
             label = "Item Category*",
             selectedText = itemCategory,
-            options = StockMasterOptions.MATERIAL_CATEGORIES,
+            options = categoryOptions,
             optionLabel = { it },
             onOptionSelected = { itemCategory = it }
         )
@@ -1336,8 +1349,8 @@ fun EditMaterialDialog(
                 Surface(
                     onClick = { costType = type },
                     shape = RoundedCornerShape(8.dp),
-                    color = if (selected) WaterNavyPrimary else Color(0xFFF8FAFC),
-                    border = BorderStroke(1.dp, if (selected) WaterNavyPrimary else BorderLight),
+                    color = if (selected) WaterSkyButton else Color(0xFFF8FAFC),
+                    border = BorderStroke(1.dp, if (selected) WaterBlueMedium else BorderLight),
                     modifier = Modifier.weight(1f).height(36.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
@@ -1345,7 +1358,7 @@ fun EditMaterialDialog(
                             text = label,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (selected) Color.White else WaterNavyPrimary,
+                            color = if (selected) WaterSkyButtonContent else WaterNavyPrimary,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -1424,7 +1437,7 @@ fun MaterialHistoryDialog(
         footerContent = {
             Button(
                 onClick = onDismiss,
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                colors = waterPrimaryButtonColors()
             ) {
                 Text("Close", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }

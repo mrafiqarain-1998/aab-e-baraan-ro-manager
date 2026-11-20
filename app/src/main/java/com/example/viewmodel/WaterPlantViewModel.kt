@@ -24,22 +24,45 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     val customerRates = repository.customerRates
     val securityDeposits = repository.securityDeposits
     val customerAllocations = repository.customerAllocations
-    val deliveries = repository.deliveries
-    val invoices = repository.invoices
-    val payments = repository.payments
-    val expenses = repository.expenses
+    val deliveries: StateFlow<List<Delivery>> = combine(repository.deliveries, repository.currentUser) { list, user ->
+        repository.filterVisibleDeliveries(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleDeliveries(repository.deliveries.value, repository.currentUser.value))
+
+    val invoices: StateFlow<List<Invoice>> = combine(repository.invoices, repository.currentUser) { list, user ->
+        repository.filterVisibleInvoices(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleInvoices(repository.invoices.value, repository.currentUser.value))
+
+    val payments: StateFlow<List<Payment>> = combine(repository.payments, repository.currentUser) { list, user ->
+        repository.filterVisiblePayments(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisiblePayments(repository.payments.value, repository.currentUser.value))
+
+    val expenses: StateFlow<List<Expense>> = combine(repository.expenses, repository.currentUser) { list, user ->
+        repository.filterVisibleExpenses(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleExpenses(repository.expenses.value, repository.currentUser.value))
+
     val expenseCategories = repository.expenseCategories
+    val allInventoryCategories: StateFlow<List<String>> = repository.expenseCategories
+        .map { cats -> repository.getAllInventoryCategories(cats) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, repository.getAllInventoryCategories(repository.expenseCategories.value))
+
     val inventory = repository.inventory
-    val bottleMovements = repository.bottleMovements
+    val bottleMovements: StateFlow<List<BottleMovement>> = combine(repository.bottleMovements, repository.currentUser) { list, user ->
+        repository.filterVisibleBottleMovements(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleBottleMovements(repository.bottleMovements.value, repository.currentUser.value))
+
     val roPlantItems = repository.roPlantItems
     val roTransactions = repository.roTransactions
     val bottlePurchases = repository.bottlePurchases
     val bottleRefills = repository.bottleRefills
     val bottleIssueSales = repository.bottleIssueSales
     val factoryMaterials = repository.factoryMaterials
-    val materialTransactions = repository.materialTransactions
+    val materialTransactions: StateFlow<List<MaterialTransaction>> = combine(repository.materialTransactions, repository.currentUser) { list, user ->
+        repository.filterVisibleMaterialTransactions(list, user)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repository.filterVisibleMaterialTransactions(repository.materialTransactions.value, repository.currentUser.value))
+
     val bottleCostings = repository.bottleCostings
     val monthlyRecurringExpenses = repository.monthlyRecurringExpenses
+    val plantWorkers = repository.plantWorkers
     val cashClosings = repository.cashClosings
     val notifications = repository.notifications
     val syncStatus = repository.syncStatus
@@ -557,10 +580,131 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         notes: String,
         type: ExpenseType = ExpenseType.OPEX,
         expenseDate: String? = null,
-        paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE
+        paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE,
+        invoiceNumber: String = "",
+        staffMemberId: String = "",
+        staffMemberName: String = ""
     ) {
-        val voucher = repository.addExpense(categoryId, categoryName, description, amount, method, payee, notes, type, expenseDate, paymentSource)
+        val voucher = repository.addExpense(
+            categoryId = categoryId,
+            categoryName = categoryName,
+            description = description,
+            amount = amount,
+            method = method,
+            payee = payee,
+            notes = notes,
+            type = type,
+            expenseDate = expenseDate,
+            paymentSource = paymentSource,
+            invoiceNumber = invoiceNumber,
+            staffMemberId = staffMemberId,
+            staffMemberName = staffMemberName
+        )
         _userFeedbackMessage.value = "Expense voucher $voucher saved!"
+    }
+
+    fun recordExpenseWithMaterialRefill(
+        materialId: String,
+        quantity: Double,
+        unitCost: Double,
+        categoryId: String,
+        categoryName: String,
+        expenseType: ExpenseType,
+        description: String,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.recordExpenseWithMaterialRefill(
+            materialId = materialId,
+            quantity = quantity,
+            unitCost = unitCost,
+            categoryId = categoryId,
+            categoryName = categoryName,
+            expenseType = expenseType,
+            description = description,
+            supplierName = supplierName,
+            invoiceNo = invoiceNo,
+            notes = notes,
+            expenseDate = expenseDate,
+            paymentSource = paymentSource,
+            paymentMethod = paymentMethod
+        )
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
+    fun recordExpenseWithBottlePurchase(
+        bottleSizeId: String,
+        quantity: Int,
+        unitCost: Double,
+        categoryId: String,
+        categoryName: String,
+        expenseType: ExpenseType,
+        description: String,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.recordExpenseWithBottlePurchase(
+            bottleSizeId = bottleSizeId,
+            quantity = quantity,
+            unitCost = unitCost,
+            categoryId = categoryId,
+            categoryName = categoryName,
+            expenseType = expenseType,
+            description = description,
+            supplierName = supplierName,
+            invoiceNo = invoiceNo,
+            notes = notes,
+            expenseDate = expenseDate,
+            paymentSource = paymentSource,
+            paymentMethod = paymentMethod
+        )
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
+    fun addPlantWorker(
+        worker: PlantWorker,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.addPlantWorker(worker)
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
+    fun updatePlantWorker(
+        worker: PlantWorker,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.updatePlantWorker(worker)
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
+    fun deletePlantWorker(
+        workerId: String,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.deletePlantWorker(workerId)
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
+    fun getWorkerMonthlySalarySummary(
+        workerId: String,
+        month: String = SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
+    ): WorkerSalarySummary {
+        return repository.getWorkerMonthlySalarySummary(workerId, month)
     }
 
     fun acknowledgeExpense(expenseId: String) {

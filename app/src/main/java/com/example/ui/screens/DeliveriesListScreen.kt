@@ -625,8 +625,8 @@ fun DeliveriesListScreen(
                                 DetailIconActionButton(
                                     icon = Icons.Default.Payments,
                                     label = "Pay Now",
-                                    containerColor = WaterNavyPrimary,
-                                    contentColor = Color.White,
+                                    containerColor = WaterSkyButton,
+                                    contentColor = WaterSkyButtonContent,
                                     onClick = { deliveryForDirectPayment = del },
                                     modifier = Modifier
                                         .weight(1f)
@@ -1046,11 +1046,11 @@ fun EditDeliveryDialog(
                     onSave(updated)
                 },
                 enabled = items.any { it.quantity > 0 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("save_edit_delivery_btn")
             ) {
-                Text("Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text("Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
     ) {

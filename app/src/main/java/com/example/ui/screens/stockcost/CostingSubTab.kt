@@ -181,7 +181,7 @@ fun CostingSubTab(
                         costingToEdit = null
                         showAddCostingDialog = true
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     modifier = Modifier
@@ -889,7 +889,7 @@ fun AddBottleCostingDialog(
                     )
                     onSave(record)
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 enabled = selectedSize != null && sPrice > 0.0,
                 shape = RoundedCornerShape(8.dp)
             ) {
@@ -932,7 +932,7 @@ fun AddBottleCostingDialog(
                     val isSel = mode == packingType
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = if (isSel) WaterNavyPrimary else Color(0xFFF1F5F9),
+                        color = if (isSel) WaterSkyButton else Color(0xFFF1F5F9),
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
@@ -949,12 +949,12 @@ fun AddBottleCostingDialog(
                                 text = mode.shortLabel,
                                 fontSize = 10.5.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isSel) Color.White else WaterNavyPrimary
+                                color = if (isSel) WaterSkyButtonContent else WaterNavyPrimary
                             )
                             Text(
                                 text = mode.urduLabel,
                                 fontSize = 8.5.sp,
-                                color = if (isSel) WaterCyanBright else TextSecondaryDark
+                                color = if (isSel) WaterNavyPrimary else TextSecondaryDark
                             )
                         }
                     }
@@ -1228,7 +1228,7 @@ fun AddRecurringCostDialog(
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 enabled = (amount.toDoubleOrNull() ?: 0.0) > 0.0 && description.isNotBlank(),
                 shape = RoundedCornerShape(8.dp)
             ) {
@@ -1476,10 +1476,10 @@ fun MonthPickerDialogComposable(
                                 .height(38.dp),
                             shape = RoundedCornerShape(8.dp),
                             colors = if (isCurrentSelected) {
-                                ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                                waterPrimaryButtonColors()
                             } else {
                                 ButtonDefaults.buttonColors(
-                                    containerColor = WaterNavyPrimary.copy(alpha = 0.08f),
+                                    containerColor = WaterSkyLight,
                                     contentColor = WaterNavyPrimary
                                 )
                             },

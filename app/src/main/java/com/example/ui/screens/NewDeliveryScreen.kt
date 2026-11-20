@@ -1248,17 +1248,14 @@ fun NewDeliveryScreen(
                                 }
                             },
                             enabled = canSubmit,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = WaterNavyPrimary,
-                                contentColor = Color.White
-                            ),
+                            colors = waterPrimaryButtonColors(),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(44.dp)
                                 .testTag("save_delivery_btn")
                         ) {
-                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = WaterCyanBright, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = WaterSkyButtonContent, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = "Submit Delivery",
@@ -1389,11 +1386,11 @@ fun FixCustomerRateDialog(
                         onConfirm(selectedOption, rate, effectiveDate.trim())
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("confirm_fix_rate_btn")
             ) {
-                Text("OK", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text("OK", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
             }
         }
     ) {

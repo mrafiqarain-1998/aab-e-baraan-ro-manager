@@ -150,6 +150,10 @@ class PlantDataStorage(private val context: Context) {
     fun saveMonthlyRecurringExpenses(list: List<MonthlyRecurringExpense>) = saveList("db_monthly_recurring_expenses.json", list, MonthlyRecurringExpense::class.java)
     fun loadMonthlyRecurringExpenses(): List<MonthlyRecurringExpense>? = loadList("db_monthly_recurring_expenses.json", MonthlyRecurringExpense::class.java)
 
+    // 23b. Plant Workers / Staff Management (Payroll & CNIC)
+    fun savePlantWorkers(list: List<PlantWorker>) = saveList("db_plant_workers.json", list, PlantWorker::class.java)
+    fun loadPlantWorkers(): List<PlantWorker>? = loadList("db_plant_workers.json", PlantWorker::class.java)
+
     // 24. Password Reset Requests
     fun savePasswordResetRequests(list: List<PasswordResetRequest>) = saveList("db_password_resets.json", list, PasswordResetRequest::class.java)
     fun loadPasswordResetRequests(): List<PasswordResetRequest>? = loadList("db_password_resets.json", PasswordResetRequest::class.java)

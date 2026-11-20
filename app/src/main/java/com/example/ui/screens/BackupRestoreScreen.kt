@@ -513,7 +513,7 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                                         Toast.makeText(context, "Failed to create export file", Toast.LENGTH_SHORT).show()
                                     }
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                colors = waterPrimaryButtonColors(),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -750,7 +750,7 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
 
                             Button(
                                 onClick = { jsonPickerLauncher.launch("application/json") },
-                                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                colors = waterPrimaryButtonColors(),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -989,9 +989,9 @@ fun BackupRestoreScreen(viewModel: WaterPlantViewModel) {
                             showSafeToast(msg, Toast.LENGTH_LONG)
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
-                    Text("Start Backup Now")
+                    Text("Start Backup Now", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -1261,13 +1261,13 @@ fun BackupHistoryCard(
                     Button(
                         onClick = onRestore,
                         shape = RoundedCornerShape(6.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                        colors = waterPrimaryButtonColors(),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         modifier = Modifier.height(30.dp)
                     ) {
                         Icon(Icons.Default.Restore, contentDescription = "Restore", modifier = Modifier.size(14.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Restore", fontSize = 9.5.sp)
+                        Text("Restore", fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

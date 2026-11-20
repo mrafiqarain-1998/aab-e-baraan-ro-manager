@@ -292,14 +292,11 @@ fun AuthScreen(
                             .height(50.dp)
                             .testTag("login_button"),
                         shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = WaterNavyPrimary,
-                            contentColor = Color.White
-                        )
+                        colors = waterPrimaryButtonColors()
                     ) {
                         if (isLoggingIn) {
                             CircularProgressIndicator(
-                                color = Color.White,
+                                color = WaterSkyButtonContent,
                                 modifier = Modifier.size(20.dp),
                                 strokeWidth = 2.dp
                             )
@@ -307,8 +304,7 @@ fun AuthScreen(
                             Text(
                                 text = "Checking Credentials / تصدیق ہو رہی ہے...",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 11.5.sp,
-                                color = Color.White
+                                fontSize = 11.5.sp
                             )
                         } else {
                             Icon(Icons.Default.Login, contentDescription = null, modifier = Modifier.size(20.dp))
@@ -316,8 +312,7 @@ fun AuthScreen(
                             Text(
                                 text = "Login (لاگ ان کریں)",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 12.5.sp,
-                                color = Color.White
+                                fontSize = 12.5.sp
                             )
                         }
                     }
@@ -583,9 +578,9 @@ fun AuthScreen(
                             resetMessage = "Enter your username to submit request."
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
-                    Text("Submit Request (درخواست بھیجیں)", color = Color.White)
+                    Text("Submit Request (درخواست بھیجیں)", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {

@@ -398,7 +398,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                         Button(
                             enabled = !isCheckingAppUpdate && isDeviceOnline,
                             onClick = { viewModel.checkForAppUpdate(force = true) },
-                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                            colors = waterPrimaryButtonColors(),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -406,7 +406,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                                 .testTag("check_app_update_btn")
                         ) {
                             if (isCheckingAppUpdate) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = WaterSkyButtonContent)
                             } else {
                                 Icon(Icons.Default.SystemUpdateAlt, contentDescription = null, modifier = Modifier.size(17.dp))
                             }
@@ -686,7 +686,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                                     ) {
                                         Button(
                                             onClick = { viewModel.resolveSyncConflict(conflict.id) },
-                                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                            colors = waterPrimaryButtonColors(),
                                             shape = RoundedCornerShape(8.dp),
                                             modifier = Modifier.height(36.dp)
                                         ) {
@@ -793,7 +793,7 @@ fun SyncAndUpdatesScreen(viewModel: WaterPlantViewModel) {
                         )
                         if (ok) showAddBranchDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
                     Text("Save Branch", fontWeight = FontWeight.Bold)
                 }

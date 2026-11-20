@@ -264,8 +264,8 @@ fun CustomerDetailScreen(
                                     icon = Icons.Default.LocalShipping,
                                     label = "Deliver",
                                     contentDescription = "New Delivery for ${currentCust.name}",
-                                    containerColor = WaterNavyPrimary,
-                                    contentColor = Color.White,
+                                    containerColor = WaterSkyButton,
+                                    contentColor = WaterSkyButtonContent,
                                     onClick = { onDeliver(currentCust) },
                                     modifier = Modifier.weight(1f),
                                     testTag = "customer_deliver_btn"
@@ -984,7 +984,7 @@ fun CustomerDetailScreen(
                         viewModel.issueBottlesToCustomer(currentCust.id, selectedIssueSizeId, countVal, dep)
                         showIssueDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
                     Text("Issue Bottles", fontWeight = FontWeight.Bold)
                 }
@@ -1243,7 +1243,7 @@ fun CustomerDetailScreen(
                         }
                         showUnsafeDeleteWarningDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
                     Text(if (currentCust.active) "Mark Inactive (غیر فعال کریں)" else "Understood (سمجھ گئے)")
                 }

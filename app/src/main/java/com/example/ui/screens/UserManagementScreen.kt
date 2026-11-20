@@ -244,7 +244,7 @@ fun UserManagementScreen(
 
                                     Button(
                                         onClick = { requestToResolve = req },
-                                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                        colors = waterPrimaryButtonColors(),
                                         shape = RoundedCornerShape(8.dp),
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
@@ -283,10 +283,7 @@ fun UserManagementScreen(
                 if (canManageStaff) {
                     Button(
                         onClick = { showCreateDialog = true },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = WaterNavyPrimary,
-                            contentColor = Color.White
-                        ),
+                        colors = waterPrimaryButtonColors(),
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                         modifier = Modifier
@@ -437,6 +434,27 @@ fun UserManagementScreen(
                                         textColor = if (allowNewItems) SuccessGreen else ErrorRed
                                     )
                                 }
+                                if (acc.restrictToOwnDataOnly || acc.restrictToTodayOnly) {
+                                    Row(
+                                        modifier = Modifier.padding(top = 3.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        if (acc.restrictToOwnDataOnly) {
+                                            StatusBadge(
+                                                text = "Own Data Only",
+                                                backgroundColor = WarningOrangeLight,
+                                                textColor = WarningOrange
+                                            )
+                                        }
+                                        if (acc.restrictToTodayOnly) {
+                                            StatusBadge(
+                                                text = "Today Only",
+                                                backgroundColor = WarningOrangeLight,
+                                                textColor = WarningOrange
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -554,6 +572,8 @@ fun UserManagementScreen(
         var selectedRole by remember { mutableStateOf(UserRole.INCHARGE) }
         var customPerms by remember { mutableStateOf(PermissionDefaults.defaultPermissionsForRole(UserRole.INCHARGE)) }
         var selectedBranches by remember { mutableStateOf(setOf(activePlantId.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID })) }
+        var restrictToOwnDataOnly by remember { mutableStateOf(false) }
+        var restrictToTodayOnly by remember { mutableStateOf(false) }
         var errorMsg by remember { mutableStateOf<String?>(null) }
 
         val hasUnsaved = name.isNotBlank() || username.isNotBlank() || password.isNotBlank() || phone.isNotBlank() || googleEmail.isNotBlank()
@@ -593,12 +613,14 @@ fun UserManagementScreen(
                                 permissions = customPerms,
                                 assignedBranchIds = branchList,
                                 defaultBranchId = branchList.first(),
-                                active = true
+                                active = true,
+                                restrictToOwnDataOnly = restrictToOwnDataOnly,
+                                restrictToTodayOnly = restrictToTodayOnly
                             )
                         )
                         showCreateDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.testTag("create_staff_submit_btn")
                 ) {
@@ -706,7 +728,11 @@ fun UserManagementScreen(
 
             AdminSpecialControlsCard(
                 permissions = customPerms,
-                onPermissionsChanged = { customPerms = it }
+                onPermissionsChanged = { customPerms = it },
+                restrictToOwnDataOnly = restrictToOwnDataOnly,
+                onRestrictOwnDataChanged = { restrictToOwnDataOnly = it },
+                restrictToTodayOnly = restrictToTodayOnly,
+                onRestrictTodayOnlyChanged = { restrictToTodayOnly = it }
             )
 
             PermissionMatrixEditor(
@@ -750,7 +776,7 @@ fun UserManagementScreen(
                             }
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text("Save Password", fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -824,7 +850,7 @@ fun UserManagementScreen(
                             }
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text("Update Password", fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -958,11 +984,15 @@ fun UserManagementScreen(
         var selectedBranches by remember(targetAcc.id) {
             mutableStateOf(targetAcc.assignedBranchIds.ifEmpty { listOf(activePlantId.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }) }.toSet())
         }
+        var restrictToOwnDataOnly by remember(targetAcc.id) { mutableStateOf(targetAcc.restrictToOwnDataOnly) }
+        var restrictToTodayOnly by remember(targetAcc.id) { mutableStateOf(targetAcc.restrictToTodayOnly) }
         var editError by remember { mutableStateOf<String?>(null) }
 
         val hasUnsaved = name != targetAcc.name || phone != targetAcc.phone ||
             googleEmail != targetAcc.googleEmail || selectedRole != targetAcc.role ||
-            customPerms != targetAcc.permissions
+            customPerms != targetAcc.permissions ||
+            restrictToOwnDataOnly != targetAcc.restrictToOwnDataOnly ||
+            restrictToTodayOnly != targetAcc.restrictToTodayOnly
 
         MobileFormDialog(
             title = "Edit Staff Account",
@@ -992,13 +1022,15 @@ fun UserManagementScreen(
                                 isSuperAdmin = isPrimaryAdmin,
                                 permissions = finalPerms,
                                 assignedBranchIds = branchList,
-                                defaultBranchId = branchList.first()
+                                defaultBranchId = branchList.first(),
+                                restrictToOwnDataOnly = if (isPrimaryAdmin) false else restrictToOwnDataOnly,
+                                restrictToTodayOnly = if (isPrimaryAdmin) false else restrictToTodayOnly
                             )
                         )
                         Toast.makeText(context, "Updated @${targetAcc.username}", Toast.LENGTH_SHORT).show()
                         accountToEdit = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.testTag("save_edit_staff_btn")
                 ) {
@@ -1101,7 +1133,11 @@ fun UserManagementScreen(
 
                 AdminSpecialControlsCard(
                     permissions = customPerms,
-                    onPermissionsChanged = { customPerms = it }
+                    onPermissionsChanged = { customPerms = it },
+                    restrictToOwnDataOnly = restrictToOwnDataOnly,
+                    onRestrictOwnDataChanged = { restrictToOwnDataOnly = it },
+                    restrictToTodayOnly = restrictToTodayOnly,
+                    onRestrictTodayOnlyChanged = { restrictToTodayOnly = it }
                 )
 
                 PermissionMatrixEditor(
@@ -1151,7 +1187,11 @@ private fun BranchAssignmentSelector(
 @Composable
 private fun AdminSpecialControlsCard(
     permissions: Map<String, List<String>>,
-    onPermissionsChanged: (Map<String, List<String>>) -> Unit
+    onPermissionsChanged: (Map<String, List<String>>) -> Unit,
+    restrictToOwnDataOnly: Boolean = false,
+    onRestrictOwnDataChanged: (Boolean) -> Unit = {},
+    restrictToTodayOnly: Boolean = false,
+    onRestrictTodayOnlyChanged: (Boolean) -> Unit = {}
 ) {
     val canChangeRates = PermissionAction.EDIT.name in permissions[AppModule.CUSTOMER_RATES.name].orEmpty()
     val canAddStock = PermissionAction.ADD.name in permissions[AppModule.BOTTLE_STOCK.name].orEmpty() ||
@@ -1240,6 +1280,34 @@ private fun AdminSpecialControlsCard(
                     }
                     onPermissionsChanged(next)
                 }
+            )
+
+            HorizontalDivider(color = BorderLight.copy(alpha = 0.6f))
+
+            Text(
+                text = "Data Visibility Controls (ڈیٹا چھپانے کا کنٹرول)",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = WarningOrange,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+
+            AdminControlToggleRow(
+                title = "Hide Other Users' Data (Own Data Only)",
+                subtitle = "صرف اس یوزر کا اپنا ڈیٹا نظر آئے — دوسرے عملے کی انٹریز چھپ جائیں",
+                checked = restrictToOwnDataOnly,
+                tag = "toggle_ctrl_own_data_only",
+                onCheckedChange = onRestrictOwnDataChanged
+            )
+
+            HorizontalDivider(color = BorderLight.copy(alpha = 0.6f))
+
+            AdminControlToggleRow(
+                title = "Hide Old / Past Data (Today Only)",
+                subtitle = "صرف آج کا ڈیٹا نظر آئے — گزشتہ دنوں کا پرانا ریکارڈ چھپ جائے",
+                checked = restrictToTodayOnly,
+                tag = "toggle_ctrl_today_only",
+                onCheckedChange = onRestrictTodayOnlyChanged
             )
         }
     }

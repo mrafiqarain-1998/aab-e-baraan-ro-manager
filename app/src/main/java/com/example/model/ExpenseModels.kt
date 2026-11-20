@@ -35,5 +35,15 @@ data class Expense(
     val isApprovedByOwner: Boolean = true,
     val businessId: String = "aab_e_baraan_plant_01",
     val createdByUid: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    // Backward-compatible Expense <-> Inventory & Staff Salary linkage fields
+    val linkedInventoryType: String = "",          // "", "MATERIAL", "BOTTLE"
+    val linkedInventoryItemId: String = "",
+    val linkedInventoryItemName: String = "",
+    val linkedInventoryQty: Double = 0.0,
+    val linkedInventoryUnitCost: Double = 0.0,
+    val linkedInventoryTransactionId: String = "",
+    val invoiceNumber: String = "",
+    val staffMemberId: String = "",
+    val staffMemberName: String = ""
 )

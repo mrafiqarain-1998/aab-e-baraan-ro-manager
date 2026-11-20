@@ -456,13 +456,13 @@ fun AabTopAppBar(
                             switchError = "Account switcher unavailable."
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.testTag("confirm_switch_user_btn")
                 ) {
                     if (isSwitching) {
                         CircularProgressIndicator(
-                            color = Color.White,
+                            color = WaterSkyButtonContent,
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp
                         )

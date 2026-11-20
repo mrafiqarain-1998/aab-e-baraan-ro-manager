@@ -166,7 +166,7 @@ fun CustomerListScreen(
                             if (!isViewOnly) {
                                 Button(
                                     onClick = { showAddDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                    colors = waterPrimaryButtonColors(),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                     modifier = Modifier.height(34.dp).testTag("add_customer_top_btn")
@@ -696,10 +696,7 @@ fun CustomerCard(
                         Button(
                             onClick = onDeliver,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = WaterNavyPrimary,
-                                contentColor = Color.White
-                            ),
+                            colors = waterPrimaryButtonColors(),
                             shape = RoundedCornerShape(7.dp),
                             modifier = Modifier.height(30.dp).testTag("customer_deliver_${customer.id}")
                         ) {
@@ -970,7 +967,7 @@ fun CustomerBottleRateDialog(
                                             },
                                             shape = RoundedCornerShape(6.dp),
                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                            colors = waterPrimaryButtonColors(),
                                             modifier = Modifier.height(30.dp)
                                         ) {
                                             Text(
@@ -1020,9 +1017,9 @@ fun CustomerBottleRateDialog(
         confirmButton = {
             Button(
                 onClick = onDismiss,
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                colors = waterPrimaryButtonColors()
             ) {
-                Text("Done (مکمل)", color = Color.White, maxLines = 1, softWrap = false)
+                Text("Done (مکمل)", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
             }
         }
     )
@@ -1198,7 +1195,7 @@ fun CustomerSecurityDepositDialog(
                                         }
                                     }
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                colors = waterPrimaryButtonColors(),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.fillMaxWidth().height(36.dp)
                             ) {
@@ -1295,8 +1292,8 @@ fun CustomerSecurityDepositDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)) {
-                Text("Close", color = Color.White)
+            Button(onClick = onDismiss, colors = waterPrimaryButtonColors()) {
+                Text("Close", fontWeight = FontWeight.Bold)
             }
         }
     )
@@ -1816,7 +1813,7 @@ fun CustomerFormDialog(
                             onConfirm(updatedOrNew)
                             onConfirmWithRate?.invoke(updatedOrNew, rate)
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                        colors = waterPrimaryButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                         modifier = Modifier
@@ -1827,7 +1824,6 @@ fun CustomerFormDialog(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = if (isEditMode) "Save Changes" else "Add Customer",
-                            color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 10.sp,
                             maxLines = 1,

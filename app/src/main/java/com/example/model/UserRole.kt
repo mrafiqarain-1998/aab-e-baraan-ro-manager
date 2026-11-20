@@ -19,7 +19,9 @@ data class UserProfile(
     val assignedBranchIds: List<String> = listOf(PermissionDefaults.DEFAULT_PLANT_ID),
     val defaultBranchId: String = PermissionDefaults.DEFAULT_PLANT_ID,
     val businessId: String = PermissionDefaults.DEFAULT_PLANT_ID,
-    val active: Boolean = true
+    val active: Boolean = true,
+    val restrictToOwnDataOnly: Boolean = false,
+    val restrictToTodayOnly: Boolean = false
 )
 
 data class UserAccount(
@@ -39,7 +41,9 @@ data class UserAccount(
     val active: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
     val googleEmail: String = "",
-    val passwordUpdatedAtMillis: Long = 0L
+    val passwordUpdatedAtMillis: Long = 0L,
+    val restrictToOwnDataOnly: Boolean = false,
+    val restrictToTodayOnly: Boolean = false
 )
 
 data class PasswordResetRequest(

@@ -190,6 +190,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
     private val _monthlyRecurringExpenses = MutableStateFlow<List<MonthlyRecurringExpense>>(SampleData.initialMonthlyRecurringExpenses)
     val monthlyRecurringExpenses: StateFlow<List<MonthlyRecurringExpense>> = _monthlyRecurringExpenses.asStateFlow()
 
+    private val _plantWorkers = MutableStateFlow<List<PlantWorker>>(emptyList())
+    val plantWorkers: StateFlow<List<PlantWorker>> = _plantWorkers.asStateFlow()
+
     private val _cashClosings = MutableStateFlow<List<CashClosing>>(emptyList())
     val cashClosings: StateFlow<List<CashClosing>> = _cashClosings.asStateFlow()
 
@@ -1006,7 +1009,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             "defaultBranchId" to defBranch,
             "plantId" to defBranch,
             "active" to if (resolvedSuperAdmin) true else acc.active,
-            "createdAt" to acc.createdAt
+            "createdAt" to acc.createdAt,
+            "restrictToOwnDataOnly" to if (resolvedSuperAdmin || resolvedRole == UserRole.ADMIN) false else acc.restrictToOwnDataOnly,
+            "restrictToTodayOnly" to if (resolvedSuperAdmin || resolvedRole == UserRole.ADMIN) false else acc.restrictToTodayOnly
         )
     }
 
@@ -1077,7 +1082,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 defaultBranchId = defBranch,
                 active = if (isSuper) true else ((map["active"] as? Boolean) ?: true),
                 createdAt = (map["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
-                googleEmail = googleEmail
+                googleEmail = googleEmail,
+                restrictToOwnDataOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else ((map["restrictToOwnDataOnly"] as? Boolean) ?: false),
+                restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else ((map["restrictToTodayOnly"] as? Boolean) ?: false)
             )
         } catch (_: Exception) {
             null
@@ -1113,7 +1120,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             assignedBranchIds = branchList,
             defaultBranchId = defBranch,
             businessId = activePlant,
-            active = account.active
+            active = account.active,
+            restrictToOwnDataOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToOwnDataOnly,
+            restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToTodayOnly
         )
         _currentUser.value = profile
         refreshSeenRecordsForCurrentUser()
@@ -1391,7 +1400,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             active = effectiveActive,
             permissions = normalizedPerms,
             assignedBranchIds = branches,
-            defaultBranchId = defBranch
+            defaultBranchId = defBranch,
+            restrictToOwnDataOnly = if (isProtectedSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToOwnDataOnly,
+            restrictToTodayOnly = if (isProtectedSuper || effectiveRole == UserRole.ADMIN) false else account.restrictToTodayOnly
         )
         val updated = if (rawNewPass.isNotEmpty()) {
             stampAccountWithPasswordHash(updatedBase, rawNewPass)
@@ -1404,6 +1415,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
         _userAccounts.value = _userAccounts.value.map { if (it.id == updated.id) updated else it }
         storage.saveUserAccounts(_userAccounts.value)
+        refreshCurrentProfileIfMatches(updated)
 
         syncStaffAccountDocuments(updated, previousEmail = existing?.googleEmail.orEmpty())
         if (rawNewPass.isNotEmpty()) {
@@ -3602,7 +3614,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
         notes: String,
         type: ExpenseType = ExpenseType.OPEX,
         expenseDate: String? = null,
-        paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE
+        paymentSource: PaymentSource = PaymentSource.PAY_FROM_SALE,
+        invoiceNumber: String = "",
+        staffMemberId: String = "",
+        staffMemberName: String = "",
+        linkedInventoryType: String = "",
+        linkedInventoryItemId: String = "",
+        linkedInventoryItemName: String = "",
+        linkedInventoryQty: Double = 0.0,
+        linkedInventoryUnitCost: Double = 0.0,
+        linkedInventoryTransactionId: String = ""
     ): String {
         if (!hasPermission(AppModule.EXPENSES, PermissionAction.ADD)) return ""
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
@@ -3630,7 +3651,16 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 isAcknowledged = isAdmin, // Admin additions auto-verified, Incharge needs Admin acknowledgment
                 acknowledgedBy = if (isAdmin) _currentUser.value.name else "",
                 isApprovedByOwner = isAdmin,
-                createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid }
+                createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid },
+                linkedInventoryType = linkedInventoryType,
+                linkedInventoryItemId = linkedInventoryItemId,
+                linkedInventoryItemName = linkedInventoryItemName,
+                linkedInventoryQty = linkedInventoryQty,
+                linkedInventoryUnitCost = linkedInventoryUnitCost,
+                linkedInventoryTransactionId = linkedInventoryTransactionId,
+                invoiceNumber = invoiceNumber.trim(),
+                staffMemberId = staffMemberId.trim(),
+                staffMemberName = staffMemberName.trim()
             )
             markRecordSeen("expense", expId)
             _expenses.value = listOf(expense) + _expenses.value
@@ -3641,6 +3671,491 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val roleNotice = if (isAdmin) "Verified" else "Pending Admin Acknowledgment"
             addNotification("Expense Added", "Rs. $amount for $categoryName ($payee) [$roleNotice]", NotificationSeverity.INFO)
             voucher
+        }
+    }
+
+    /**
+     * Direct Expense -> Other Material Inventory atomic purchase & refill.
+     * Creates ONE linked Expense and updates FactoryMaterial stock + MaterialTransaction without duplicates.
+     */
+    fun recordExpenseWithMaterialRefill(
+        materialId: String,
+        quantity: Double,
+        unitCost: Double,
+        categoryId: String,
+        categoryName: String,
+        expenseType: ExpenseType,
+        description: String,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod
+    ): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Permission required to add expenses.")
+        }
+        if (!hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding material stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
+        if (quantity <= 0.0) return@synchronized Pair(false, "Quantity must be greater than zero.")
+        if (unitCost < 0.0) return@synchronized Pair(false, "Unit rate cannot be negative.")
+        val mat = _factoryMaterials.value.find { it.id == materialId && it.active }
+            ?: return@synchronized Pair(false, "Selected inventory item not found. Add new items in Stock & Cost -> Other Material first.")
+
+        val effectiveDate = expenseDate.ifBlank { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) }
+        val cleanSupplier = supplierName.ifBlank { mat.supplierName.ifBlank { "Supplier" } }
+        val totalCost = quantity * unitCost
+        val stockPayMode = if (paymentMethod.isCash) StockPaymentMode.CASH else StockPaymentMode.ONLINE_TRANSFER
+        val finalDesc = description.ifBlank { "Purchased ${if (quantity % 1.0 == 0.0) quantity.toInt().toString() else String.format(Locale.US, "%.2f", quantity)} ${mat.uom} ${mat.name}" }
+
+        withSyncAction("Expense + Material Stock • ${mat.name}") {
+            val newStock = mat.currentStock + quantity
+            val updatedMat = mat.copy(
+                currentStock = newStock,
+                purchaseRate = if (unitCost > 0.0) unitCost else mat.purchaseRate,
+                supplierName = cleanSupplier,
+                lastUpdated = System.currentTimeMillis()
+            )
+            _factoryMaterials.value = _factoryMaterials.value.map { if (it.id == materialId) updatedMat else it }
+            storage.saveFactoryMaterials(_factoryMaterials.value)
+            syncDocument("factoryMaterials", materialId, updatedMat)
+
+            val tx = MaterialTransaction(
+                id = nextRecordId("mtx"),
+                materialId = materialId,
+                materialName = mat.name,
+                date = effectiveDate,
+                actionType = MaterialActionType.REFILL,
+                quantity = quantity,
+                unitCost = unitCost,
+                totalCost = totalCost,
+                uom = mat.uom,
+                supplierOrReceiver = cleanSupplier,
+                invoiceNo = invoiceNo.trim(),
+                paymentSource = paymentSource.label,
+                paymentMode = stockPayMode.label,
+                notes = notes.trim(),
+                balanceAfter = newStock,
+                performedBy = _currentUser.value.name
+            )
+            _materialTransactions.value = listOf(tx) + _materialTransactions.value
+            storage.saveMaterialTransactions(_materialTransactions.value)
+            syncDocument("materialTransactions", tx.id, tx)
+
+            val voucher = addExpense(
+                categoryId = categoryId.ifBlank { if (expenseType == ExpenseType.CAPEX) "cat_asset_machinery" else "cat_maint" },
+                categoryName = categoryName.ifBlank { mat.itemCategory.ifBlank { "Material Stock Refill" } },
+                description = finalDesc,
+                amount = totalCost,
+                method = paymentMethod,
+                payee = cleanSupplier,
+                notes = notes.trim(),
+                type = expenseType,
+                expenseDate = effectiveDate,
+                paymentSource = paymentSource,
+                invoiceNumber = invoiceNo.trim(),
+                linkedInventoryType = "MATERIAL",
+                linkedInventoryItemId = materialId,
+                linkedInventoryItemName = mat.name,
+                linkedInventoryQty = quantity,
+                linkedInventoryUnitCost = unitCost,
+                linkedInventoryTransactionId = tx.id
+            )
+            Pair(true, "Voucher $voucher saved & added ${if (quantity % 1.0 == 0.0) quantity.toInt() else quantity} ${mat.uom} to ${mat.name} stock.")
+        }
+    }
+
+    /**
+     * Direct Expense -> Bottle Stock atomic purchase & refill.
+     * Creates ONE linked Expense and updates BottleInventory.atPlantEmpty + BottlePurchaseRecord + BottleMovement without duplicates.
+     */
+    fun recordExpenseWithBottlePurchase(
+        bottleSizeId: String,
+        quantity: Int,
+        unitCost: Double,
+        categoryId: String,
+        categoryName: String,
+        expenseType: ExpenseType,
+        description: String,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod
+    ): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Permission required to add expenses.")
+        }
+        if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding bottle stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
+        if (quantity <= 0) return@synchronized Pair(false, "Quantity must be greater than zero.")
+        if (unitCost < 0.0) return@synchronized Pair(false, "Purchase rate cannot be negative.")
+        val size = _bottleSizes.value.find { it.id == bottleSizeId && it.active }
+            ?: return@synchronized Pair(false, "Bottle size not found. Add new bottle sizes in Stock & Cost -> Bottle Stock first.")
+
+        val effectiveDate = expenseDate.ifBlank { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) }
+        val cleanSupplier = supplierName.ifBlank { "Supplier" }
+        val totalCost = quantity * unitCost
+        val stockPayMode = if (paymentMethod.isCash) StockPaymentMode.CASH else StockPaymentMode.ONLINE_TRANSFER
+        val finalDesc = description.ifBlank { "Purchased $quantity ${size.name} from $cleanSupplier" }
+
+        withSyncAction("Expense + Bottle Stock • ${size.name} (+$quantity)") {
+            val updatedSize = size.copy(
+                latestPurchaseRate = if (unitCost > 0.0) unitCost else size.latestPurchaseRate,
+                purchaseCost = if (unitCost > 0.0) unitCost else size.purchaseCost
+            )
+            _bottleSizes.value = _bottleSizes.value.map { if (it.id == bottleSizeId) updatedSize else it }
+            storage.saveBottleSizes(_bottleSizes.value)
+            syncDocument("bottleSizes", bottleSizeId, updatedSize)
+
+            val curInv = _inventory.value.find { it.bottleSizeId == bottleSizeId } ?: BottleInventory(
+                id = "inv_$bottleSizeId",
+                bottleSizeId = bottleSizeId,
+                sizeName = size.name
+            )
+            val updatedInv = curInv.copy(
+                atPlantEmpty = curInv.atPlantEmpty + quantity,
+                totalPurchased = curInv.totalPurchased + quantity
+            )
+            _inventory.value = _inventory.value.filterNot { it.bottleSizeId == bottleSizeId } + updatedInv
+            storage.saveInventory(_inventory.value)
+            syncIncrementalDelta(
+                "bottleInventory",
+                updatedInv.id,
+                updatedInv,
+                mapOf("atPlantEmpty" to quantity, "totalPurchased" to quantity)
+            )
+
+            val purchase = BottlePurchaseRecord(
+                id = nextRecordId("bp"),
+                date = effectiveDate,
+                bottleSizeId = bottleSizeId,
+                sizeName = size.name,
+                quantity = quantity,
+                unitCost = unitCost,
+                totalCost = totalCost,
+                supplierName = cleanSupplier,
+                invoiceOrBillNo = invoiceNo.trim(),
+                paymentSource = paymentSource.label,
+                paymentMode = stockPayMode.label,
+                notes = notes.trim(),
+                recordedBy = _currentUser.value.name
+            )
+            _bottlePurchases.value = listOf(purchase) + _bottlePurchases.value
+            storage.saveBottlePurchases(_bottlePurchases.value)
+            syncDocument("bottlePurchases", purchase.id, purchase)
+
+            val mov = BottleMovement(
+                id = nextRecordId("mov"),
+                date = effectiveDate,
+                bottleSizeId = bottleSizeId,
+                sizeName = size.name,
+                movementType = BottleMovementType.PURCHASE_NEW,
+                quantity = quantity,
+                referenceType = "Expense Purchase (${paymentSource.label})",
+                notes = "Purchased $quantity ${size.name} @ Rs. $unitCost from $cleanSupplier. $notes".trim(),
+                createdBy = _currentUser.value.name
+            )
+            _bottleMovements.value = listOf(mov) + _bottleMovements.value
+            storage.saveBottleMovements(_bottleMovements.value)
+            syncDocument("bottleMovements", mov.id, mov)
+
+            val voucher = addExpense(
+                categoryId = categoryId.ifBlank {
+                    val isSingle = size.usageType == BottleUsageType.ONE_TIME ||
+                        (size.usageType == BottleUsageType.CUSTOM && !size.isReturnableBottle)
+                    if (isSingle) "cat_bottles_opex" else "cat_bottles_capex"
+                },
+                categoryName = categoryName.ifBlank { "Bottle Stock Purchase" },
+                description = finalDesc,
+                amount = totalCost,
+                method = paymentMethod,
+                payee = cleanSupplier,
+                notes = notes.trim(),
+                type = expenseType,
+                expenseDate = effectiveDate,
+                paymentSource = paymentSource,
+                invoiceNumber = invoiceNo.trim(),
+                linkedInventoryType = "BOTTLE",
+                linkedInventoryItemId = bottleSizeId,
+                linkedInventoryItemName = size.name,
+                linkedInventoryQty = quantity.toDouble(),
+                linkedInventoryUnitCost = unitCost,
+                linkedInventoryTransactionId = purchase.id
+            )
+            Pair(true, "Voucher $voucher saved & added $quantity ${size.name} to Bottle Stock (Plant Empty).")
+        }
+    }
+
+    /**
+     * Unified categories shared between Expenses and Other Material Inventory.
+     * Any new Expense Category added by the user immediately appears in Other Material Inventory too.
+     */
+    fun getAllInventoryCategories(categories: List<ExpenseCategory> = _expenseCategories.value): List<String> {
+        val seen = linkedSetOf<String>()
+        val result = mutableListOf<String>()
+        fun addUnique(raw: String) {
+            val clean = raw.trim()
+            if (clean.isNotEmpty() && seen.add(clean.lowercase())) {
+                result.add(clean)
+            }
+        }
+        StockMasterOptions.MATERIAL_CATEGORIES.forEach { addUnique(it) }
+        categories.forEach { addUnique(it.name) }
+        return result
+    }
+
+    // =============================================================
+    // PLANT WORKERS / STAFF MANAGEMENT & PAYROLL ADVANCES
+    // =============================================================
+
+    fun addPlantWorker(worker: PlantWorker): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.ADD) &&
+            !hasPermission(AppModule.EXPENSES, PermissionAction.ADD) &&
+            _currentUser.value.role != UserRole.ADMIN
+        ) {
+            return@synchronized Pair(false, "Permission required to add staff members.")
+        }
+        val cleanName = worker.name.trim()
+        if (cleanName.isEmpty()) return@synchronized Pair(false, "Staff name is required.")
+        if (worker.monthlySalary < 0.0) return@synchronized Pair(false, "Monthly salary cannot be negative.")
+
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+        val workerId = worker.id.ifBlank { nextRecordId("wrk") }
+        val newWorker = worker.copy(
+            id = workerId,
+            name = cleanName,
+            cnic = worker.cnic.trim(),
+            phone = worker.phone.trim(),
+            designation = worker.designation.trim().ifBlank { "Worker" },
+            joiningDate = worker.joiningDate.ifBlank { today },
+            notes = worker.notes.trim(),
+            businessId = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID },
+            createdAt = System.currentTimeMillis(),
+            updatedAt = System.currentTimeMillis()
+        )
+        withSyncAction("Add Staff Worker • $cleanName") {
+            _plantWorkers.value = listOf(newWorker) + _plantWorkers.value.filterNot { it.id == workerId }
+            storage.savePlantWorkers(_plantWorkers.value)
+            syncDocument("plantWorkers", workerId, newWorker)
+            addNotification("Staff Added", "Added worker $cleanName (Salary Rs. ${newWorker.monthlySalary.toInt()}).", NotificationSeverity.SUCCESS)
+            Pair(true, "Worker '$cleanName' saved successfully.")
+        }
+    }
+
+    fun updatePlantWorker(worker: PlantWorker): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.EDIT) &&
+            _currentUser.value.role != UserRole.ADMIN
+        ) {
+            return@synchronized Pair(false, "Permission required to update staff members.")
+        }
+        val cleanName = worker.name.trim()
+        if (cleanName.isEmpty()) return@synchronized Pair(false, "Staff name is required.")
+        if (worker.monthlySalary < 0.0) return@synchronized Pair(false, "Monthly salary cannot be negative.")
+        val updated = worker.copy(
+            name = cleanName,
+            cnic = worker.cnic.trim(),
+            phone = worker.phone.trim(),
+            designation = worker.designation.trim().ifBlank { "Worker" },
+            notes = worker.notes.trim(),
+            updatedAt = System.currentTimeMillis()
+        )
+        withSyncAction("Update Staff Worker • $cleanName") {
+            _plantWorkers.value = _plantWorkers.value.map { if (it.id == updated.id) updated else it }
+            storage.savePlantWorkers(_plantWorkers.value)
+            syncDocument("plantWorkers", updated.id, updated)
+            Pair(true, "Worker '$cleanName' updated successfully.")
+        }
+    }
+
+    fun deletePlantWorker(workerId: String): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.DELETE) &&
+            _currentUser.value.role != UserRole.ADMIN
+        ) {
+            return@synchronized Pair(false, "Admin permission required to delete staff members.")
+        }
+        val existing = _plantWorkers.value.find { it.id == workerId }
+            ?: return@synchronized Pair(false, "Staff member not found.")
+        withSyncAction("Delete Staff Worker • ${existing.name}") {
+            _plantWorkers.value = _plantWorkers.value.filterNot { it.id == workerId }
+            storage.savePlantWorkers(_plantWorkers.value)
+            deleteDocument("plantWorkers", workerId)
+            Pair(true, "Removed worker '${existing.name}'. Historical salary expenses remain intact.")
+        }
+    }
+
+    /**
+     * Computes live monthly salary, advance/paid total, and remaining payable salary for a worker.
+     * Backward-compatible: matches both newly linked expenses (staffMemberId) and legacy salary expenses
+     * where payee or description matches the worker's name in that month.
+     */
+    fun getWorkerMonthlySalarySummary(
+        workerId: String,
+        month: String = SimpleDateFormat("yyyy-MM", Locale.US).format(Date()),
+        expensesList: List<Expense> = _expenses.value
+    ): WorkerSalarySummary {
+        val worker = _plantWorkers.value.find { it.id == workerId }
+            ?: return WorkerSalarySummary(workerId = workerId, month = month)
+        val cleanMonth = if (month.length >= 7) month.take(7) else SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
+        val workerNameNorm = worker.name.trim()
+
+        val matchedExpenses = expensesList.filter { exp ->
+            if (!exp.date.startsWith(cleanMonth)) return@filter false
+            val isSalaryCategory = exp.categoryId == "cat_salary" ||
+                exp.categoryName.contains("salary", ignoreCase = true) ||
+                exp.staffMemberId.isNotBlank()
+            if (!isSalaryCategory) return@filter false
+            when {
+                exp.staffMemberId.isNotBlank() -> exp.staffMemberId == worker.id
+                workerNameNorm.isNotBlank() -> exp.payee.trim().equals(workerNameNorm, ignoreCase = true) ||
+                    exp.staffMemberName.trim().equals(workerNameNorm, ignoreCase = true)
+                else -> false
+            }
+        }
+        val paidTotal = matchedExpenses.sumOf { it.amount }
+        val remaining = (worker.monthlySalary - paidTotal).coerceAtLeast(0.0)
+        return WorkerSalarySummary(
+            workerId = worker.id,
+            workerName = worker.name,
+            month = cleanMonth,
+            monthlySalary = worker.monthlySalary,
+            paidOrAdvanceThisMonth = paidTotal,
+            remainingSalary = remaining,
+            paymentsCount = matchedExpenses.size
+        )
+    }
+
+    // =============================================================
+    // ADMIN PER-USER DATA VISIBILITY FILTERS (BACKWARD-COMPATIBLE)
+    // =============================================================
+
+    private fun refreshCurrentProfileIfMatches(acc: UserAccount) {
+        val cur = _currentUser.value
+        val matches = (cur.id.isNotBlank() && cur.id == acc.id) ||
+            (cur.uid.isNotBlank() && acc.uid.isNotBlank() && cur.uid == acc.uid) ||
+            (cur.username.isNotBlank() && normalizeUsername(cur.username) == normalizeUsername(acc.username))
+        if (!matches) return
+        val isSuper = acc.isSuperAdmin || acc.id == "user_admin_01"
+        val effectiveRole = if (isSuper) UserRole.ADMIN else acc.role
+        val updatedProfile = cur.copy(
+            name = acc.name.ifBlank { cur.name },
+            phone = acc.phone,
+            role = effectiveRole,
+            isSuperAdmin = isSuper,
+            permissions = PermissionDefaults.normalizePermissions(acc.permissions, effectiveRole, isSuper),
+            assignedBranchIds = acc.assignedBranchIds.ifEmpty { cur.assignedBranchIds },
+            defaultBranchId = acc.defaultBranchId.ifBlank { cur.defaultBranchId },
+            active = if (isSuper) true else acc.active,
+            restrictToOwnDataOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else acc.restrictToOwnDataOnly,
+            restrictToTodayOnly = if (isSuper || effectiveRole == UserRole.ADMIN) false else acc.restrictToTodayOnly
+        )
+        _currentUser.value = updatedProfile
+        storage.saveCurrentProfile(updatedProfile)
+    }
+
+    fun isRecordOwnedByUser(
+        user: UserProfile,
+        createdByUid: String,
+        createdByName: String,
+        secondaryName: String = ""
+    ): Boolean {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return true
+        val uidCandidates = setOf(user.id.trim(), user.uid.trim()).filter { it.isNotEmpty() }
+        if (createdByUid.isNotBlank() && createdByUid.trim() in uidCandidates) return true
+        val nameCandidates = setOf(user.name.trim().lowercase(), normalizeUsername(user.username))
+            .filter { it.isNotEmpty() }
+        val primaryNorm = createdByName.trim().lowercase()
+        val secondaryNorm = secondaryName.trim().lowercase()
+        return (primaryNorm.isNotEmpty() && primaryNorm in nameCandidates) ||
+            (secondaryNorm.isNotEmpty() && secondaryNorm in nameCandidates)
+    }
+
+    fun filterVisibleDeliveries(
+        list: List<Delivery>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<Delivery> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { d ->
+            val dateOk = !user.restrictToTodayOnly || d.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, d.createdByUid, d.createdBy, d.staffName)
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisiblePayments(
+        list: List<Payment>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<Payment> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { p ->
+            val dateOk = !user.restrictToTodayOnly || p.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, p.createdByUid, p.receivedBy)
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisibleExpenses(
+        list: List<Expense>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<Expense> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { e ->
+            val dateOk = !user.restrictToTodayOnly || e.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, e.createdByUid, e.enteredBy)
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisibleInvoices(
+        list: List<Invoice>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<Invoice> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        val visibleDeliveryIds = filterVisibleDeliveries(_deliveries.value, user, today).map { it.id }.toSet()
+        return list.filter { inv ->
+            val dateOk = !user.restrictToTodayOnly || inv.date == today
+            val ownOk = !user.restrictToOwnDataOnly || inv.deliveryId in visibleDeliveryIds
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisibleBottleMovements(
+        list: List<BottleMovement>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<BottleMovement> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { m ->
+            val dateOk = !user.restrictToTodayOnly || m.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, "", m.createdBy)
+            dateOk && ownOk
+        }
+    }
+
+    fun filterVisibleMaterialTransactions(
+        list: List<MaterialTransaction>,
+        user: UserProfile = _currentUser.value,
+        today: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    ): List<MaterialTransaction> {
+        if (user.isSuperAdmin || user.role == UserRole.ADMIN) return list
+        if (!user.restrictToOwnDataOnly && !user.restrictToTodayOnly) return list
+        return list.filter { t ->
+            val dateOk = !user.restrictToTodayOnly || t.date == today
+            val ownOk = !user.restrictToOwnDataOnly || isRecordOwnedByUser(user, "", t.performedBy)
+            dateOk && ownOk
         }
     }
 
@@ -3876,7 +4391,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 notes = "${paymentSource.label} • ${paymentMode.label}. $notes".trim(),
                 type = if (isSingleUse) ExpenseType.OPEX else ExpenseType.CAPEX,
                 expenseDate = effectiveDate,
-                paymentSource = paymentSource
+                paymentSource = paymentSource,
+                linkedInventoryType = "BOTTLE",
+                linkedInventoryItemId = bottleSizeId,
+                linkedInventoryItemName = size.name,
+                linkedInventoryQty = quantity.toDouble(),
+                linkedInventoryUnitCost = unitPurchaseRate,
+                linkedInventoryTransactionId = purchase.id
             )
         }
 
@@ -4879,7 +5400,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     notes = "${paymentSource.label} • ${paymentMode.label}. $notes".trim(),
                     type = mat.costType,
                     expenseDate = effectiveDate,
-                    paymentSource = paymentSource
+                    paymentSource = paymentSource,
+                    invoiceNumber = invoiceNo.trim(),
+                    linkedInventoryType = "MATERIAL",
+                    linkedInventoryItemId = materialId,
+                    linkedInventoryItemName = mat.name,
+                    linkedInventoryQty = quantity,
+                    linkedInventoryUnitCost = purchaseRate,
+                    linkedInventoryTransactionId = tx.id
                 )
             }
 
@@ -5901,11 +6429,58 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    // Delete Expense
-    fun deleteExpense(expenseId: String): Boolean {
-        if (!hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)) return false
-        val expense = _expenses.value.find { it.id == expenseId } ?: return false
-        return withSyncAction("Delete Expense ${expense.voucherNumber}") {
+    // Delete Expense (atomically reverses linked Material or Bottle stock purchase to prevent drift)
+    fun deleteExpense(expenseId: String): Boolean = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)) return@synchronized false
+        val expense = _expenses.value.find { it.id == expenseId } ?: return@synchronized false
+        withSyncAction("Delete Expense ${expense.voucherNumber}") {
+            // 1. Reverse linked inventory addition if this expense purchased stock
+            if (expense.linkedInventoryType == "MATERIAL" &&
+                expense.linkedInventoryItemId.isNotBlank() &&
+                expense.linkedInventoryQty > 0.0
+            ) {
+                val mat = _factoryMaterials.value.find { it.id == expense.linkedInventoryItemId }
+                if (mat != null) {
+                    val reversedStock = (mat.currentStock - expense.linkedInventoryQty).coerceAtLeast(0.0)
+                    val updatedMat = mat.copy(currentStock = reversedStock, lastUpdated = System.currentTimeMillis())
+                    _factoryMaterials.value = _factoryMaterials.value.map { if (it.id == mat.id) updatedMat else it }
+                    storage.saveFactoryMaterials(_factoryMaterials.value)
+                    syncDocument("factoryMaterials", mat.id, updatedMat)
+                }
+                if (expense.linkedInventoryTransactionId.isNotBlank()) {
+                    _materialTransactions.value = _materialTransactions.value.filterNot { it.id == expense.linkedInventoryTransactionId }
+                    storage.saveMaterialTransactions(_materialTransactions.value)
+                    deleteDocument("materialTransactions", expense.linkedInventoryTransactionId)
+                }
+            } else if (expense.linkedInventoryType == "BOTTLE" &&
+                expense.linkedInventoryItemId.isNotBlank() &&
+                expense.linkedInventoryQty > 0.0
+            ) {
+                val qtyInt = expense.linkedInventoryQty.toInt()
+                val inv = _inventory.value.find { it.bottleSizeId == expense.linkedInventoryItemId }
+                if (inv != null && qtyInt > 0) {
+                    val actualEmptyDelta = -minOf(inv.atPlantEmpty, qtyInt)
+                    val actualPurchasedDelta = -minOf(inv.totalPurchased, qtyInt)
+                    val updatedInv = inv.copy(
+                        atPlantEmpty = (inv.atPlantEmpty + actualEmptyDelta).coerceAtLeast(0),
+                        totalPurchased = (inv.totalPurchased + actualPurchasedDelta).coerceAtLeast(0)
+                    )
+                    _inventory.value = _inventory.value.map { if (it.bottleSizeId == inv.bottleSizeId) updatedInv else it }
+                    storage.saveInventory(_inventory.value)
+                    syncIncrementalDelta(
+                        "bottleInventory",
+                        updatedInv.id,
+                        updatedInv,
+                        mapOf("atPlantEmpty" to actualEmptyDelta, "totalPurchased" to actualPurchasedDelta)
+                    )
+                }
+                if (expense.linkedInventoryTransactionId.isNotBlank()) {
+                    _bottlePurchases.value = _bottlePurchases.value.filterNot { it.id == expense.linkedInventoryTransactionId }
+                    storage.saveBottlePurchases(_bottlePurchases.value)
+                    deleteDocument("bottlePurchases", expense.linkedInventoryTransactionId)
+                }
+            }
+
             _expenses.value = _expenses.value.filter { it.id != expenseId }
             storage.saveExpenses(_expenses.value)
             deleteDocument("expenses", expenseId)
@@ -5999,7 +6574,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
     // Cash Closing: Deducts ONLY OPEX expenses paid from Sale (excludes CAPEX & Investment Account)
     fun getDailyCashSummary(date: String): CashClosingSummary {
-        val dayPayments = _payments.value.filter { it.date == date }
+        val visiblePayments = filterVisiblePayments(_payments.value)
+        val dayPayments = visiblePayments.filter { it.date == date }
         val cashCollected = dayPayments
             .filter { it.paymentMethod.isCash }
             .sumOf { it.amount }
@@ -6010,7 +6586,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         val otherCashIncome = 0.0
 
-        val dayExpenses = _expenses.value.filter { it.date == date }
+        val visibleExpenses = filterVisibleExpenses(_expenses.value)
+        val dayExpenses = visibleExpenses.filter { it.date == date }
         val cashExpenses = dayExpenses
             .filter {
                 it.expenseType == ExpenseType.OPEX &&
@@ -6157,6 +6734,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadMaterialTransactions()?.let { _materialTransactions.value = it } ?: storage.saveMaterialTransactions(_materialTransactions.value)
         storage.loadBottleCostings()?.let { _bottleCostings.value = it } ?: storage.saveBottleCostings(_bottleCostings.value)
         storage.loadMonthlyRecurringExpenses()?.let { _monthlyRecurringExpenses.value = it } ?: storage.saveMonthlyRecurringExpenses(_monthlyRecurringExpenses.value)
+        storage.loadPlantWorkers()?.let { _plantWorkers.value = it } ?: storage.savePlantWorkers(_plantWorkers.value)
         storage.loadCurrentProfile()?.let { _currentUser.value = it }
         refreshSeenRecordsForCurrentUser()
         storage.loadDarkMode()?.let { _isDarkMode.value = it }
@@ -7008,6 +7586,19 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     )
                 }
 
+                attachCollectionListener(
+                    db = db,
+                    collection = "plantWorkers",
+                    clazz = PlantWorker::class.java,
+                    currentLocalProvider = { _plantWorkers.value },
+                    idExtractor = { it.id },
+                    onApplyList = { list ->
+                        _plantWorkers.value = list
+                        storage.savePlantWorkers(list)
+                    },
+                    markConnectedOnSuccess = true
+                )
+
                 if (hasPermission(AppModule.REFILL_BATCHES, PermissionAction.VIEW)) {
                     attachCollectionListener(
                         db = db,
@@ -7134,6 +7725,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                     val merged = mergeAccountsPreservingLocalCredentials(_userAccounts.value, listOf(updatedAcc))
                                     _userAccounts.value = merged
                                     storage.saveUserAccounts(merged)
+                                    refreshCurrentProfileIfMatches(updatedAcc)
                                     if (!updatedAcc.active && !updatedAcc.isSuperAdmin && isUserLoggedIn()) {
                                         logout()
                                     }
@@ -7535,6 +8127,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     _materialTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
                     _bottleCostings.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
                     _monthlyRecurringExpenses.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
+                    _plantWorkers.value.forEach { if (it.id.isNotBlank()) syncDocument("plantWorkers", it.id, it) }
                     _cashClosings.value.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
                     _expenseCategories.value.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
                     syncDocument("appSettings", currentAppSettingsDocId(), mapOf("isDarkMode" to _isDarkMode.value))
@@ -7608,7 +8201,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             assignedBranchIds = branchIds,
             defaultBranchId = defBranch,
             businessId = _activePlantId.value,
-            active = true
+            active = true,
+            restrictToOwnDataOnly = if (isSuper || role == UserRole.ADMIN) false else (existingAccount?.restrictToOwnDataOnly == true),
+            restrictToTodayOnly = if (isSuper || role == UserRole.ADMIN) false else (existingAccount?.restrictToTodayOnly == true)
         )
         _currentUser.value = profile
         refreshSeenRecordsForCurrentUser()
@@ -7764,6 +8359,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             syncStaffAccountDocuments(it)
                         }
                     }
+                    _plantWorkers.value.forEach { if (it.id.isNotBlank()) syncDocument("plantWorkers", it.id, it) }
                 }
                 if (hasPermission(AppModule.SETTINGS, PermissionAction.MANAGE)) {
                     syncDocument("appSettings", currentAppSettingsDocId(), mapOf("isDarkMode" to _isDarkMode.value))
@@ -7956,7 +8552,12 @@ class WaterPlantRepository private constructor(private val context: Context) {
             securityDeposits = _securityDeposits.value,
             expenseCategories = _expenseCategories.value,
             userAccounts = sanitizedAccounts,
-            bottleMovements = _bottleMovements.value
+            bottleMovements = _bottleMovements.value,
+            factoryMaterials = _factoryMaterials.value,
+            materialTransactions = _materialTransactions.value,
+            bottleCostings = _bottleCostings.value,
+            monthlyRecurringExpenses = _monthlyRecurringExpenses.value,
+            plantWorkers = _plantWorkers.value
         )
 
         val serialized = storage.serializeBackupData(preliminaryData)
@@ -8273,8 +8874,13 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 _expenseCategories.value = backupData.expenseCategories
                 _userAccounts.value = backupData.userAccounts
                 _bottleMovements.value = backupData.bottleMovements
+                if (backupData.factoryMaterials.isNotEmpty()) _factoryMaterials.value = backupData.factoryMaterials
+                if (backupData.materialTransactions.isNotEmpty()) _materialTransactions.value = backupData.materialTransactions
+                if (backupData.bottleCostings.isNotEmpty()) _bottleCostings.value = backupData.bottleCostings
+                if (backupData.monthlyRecurringExpenses.isNotEmpty()) _monthlyRecurringExpenses.value = backupData.monthlyRecurringExpenses
+                if (backupData.plantWorkers.isNotEmpty()) _plantWorkers.value = backupData.plantWorkers
 
-                // 3. Persist All 19 Restored Collections to Local Storage
+                // 3. Persist All Restored Collections to Local Storage
                 storage.saveCustomers(backupData.customers)
                 storage.saveDeliveries(backupData.deliveries)
                 storage.savePayments(backupData.payments)
@@ -8294,6 +8900,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 storage.saveExpenseCategories(backupData.expenseCategories)
                 storage.saveUserAccounts(backupData.userAccounts)
                 storage.saveBottleMovements(backupData.bottleMovements)
+                if (backupData.factoryMaterials.isNotEmpty()) storage.saveFactoryMaterials(backupData.factoryMaterials)
+                if (backupData.materialTransactions.isNotEmpty()) storage.saveMaterialTransactions(backupData.materialTransactions)
+                if (backupData.bottleCostings.isNotEmpty()) storage.saveBottleCostings(backupData.bottleCostings)
+                if (backupData.monthlyRecurringExpenses.isNotEmpty()) storage.saveMonthlyRecurringExpenses(backupData.monthlyRecurringExpenses)
+                if (backupData.plantWorkers.isNotEmpty()) storage.savePlantWorkers(backupData.plantWorkers)
 
                 // 4. Synchronize ALL Restored Collections to Firebase Realtime Database
                 val db = rtdb
@@ -8324,6 +8935,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
                                 }
                             }
                             backupData.bottleMovements.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
+                            backupData.factoryMaterials.forEach { if (it.id.isNotBlank()) syncDocument("factoryMaterials", it.id, it) }
+                            backupData.materialTransactions.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
+                            backupData.bottleCostings.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
+                            backupData.monthlyRecurringExpenses.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
+                            backupData.plantWorkers.forEach { if (it.id.isNotBlank()) syncDocument("plantWorkers", it.id, it) }
                         }
                     } catch (e: Exception) {
                         Log.w("WaterPlantRepo", "Cloud post-restore sync notice: ${e.message}")

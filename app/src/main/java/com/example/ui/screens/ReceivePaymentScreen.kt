@@ -666,9 +666,9 @@ fun ReceivePaymentScreen(
                                         },
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                         shape = RoundedCornerShape(6.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary)
+                                        colors = waterPrimaryButtonColors()
                                     ) {
-                                        Text("Pay Full (Rs. ${inv.balanceDue.toInt()})", fontSize = 10.sp)
+                                        Text("Pay Full (Rs. ${inv.balanceDue.toInt()})", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -1230,10 +1230,10 @@ fun ReceivePaymentScreen(
                         receiptToShare = null
                         onPaymentCompleted()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                    colors = waterPrimaryButtonColors(),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("Done / Close", color = Color.White, maxLines = 1, softWrap = false)
+                    Text("Done / Close", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
             }
         )

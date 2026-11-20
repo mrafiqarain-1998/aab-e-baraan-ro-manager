@@ -309,3 +309,35 @@ data class MonthlyFinancialSummary(
     val netProfitAccrual: Double = 0.0, // totalSalesAmount - totalExpenses
     val netProfitCash: Double = 0.0     // receivedPayments - totalExpenses
 )
+
+/**
+ * Plant Worker / Employee profile managed under Stock & Cost -> Staff
+ */
+@JsonClass(generateAdapter = true)
+data class PlantWorker(
+    val id: String = "",
+    val name: String = "",
+    val cnic: String = "",
+    val phone: String = "",
+    val designation: String = "Worker",
+    val monthlySalary: Double = 0.0,
+    val joiningDate: String = "",
+    val active: Boolean = true,
+    val notes: String = "",
+    val businessId: String = "aab_e_baraan_plant_01",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/**
+ * Monthly salary & advance summary computed live for a PlantWorker from Expenses
+ */
+data class WorkerSalarySummary(
+    val workerId: String = "",
+    val workerName: String = "",
+    val month: String = "",
+    val monthlySalary: Double = 0.0,
+    val paidOrAdvanceThisMonth: Double = 0.0,
+    val remainingSalary: Double = 0.0,
+    val paymentsCount: Int = 0
+)

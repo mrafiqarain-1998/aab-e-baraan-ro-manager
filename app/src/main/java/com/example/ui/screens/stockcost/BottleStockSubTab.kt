@@ -111,8 +111,8 @@ fun BottleStockSubTab(
                         BottleActionTile(
                             label = "Issue Bottle",
                             icon = Icons.Default.Upload,
-                            containerColor = WaterNavyPrimary,
-                            contentColor = Color.White,
+                            containerColor = WaterSkyButton,
+                            contentColor = WaterSkyButtonContent,
                             enabled = canIssueBottle && activeSizes.isNotEmpty(),
                             onClick = { showIssueBottleDialog = true },
                             modifier = Modifier
@@ -173,10 +173,7 @@ fun BottleStockSubTab(
                 if (!isViewOnly && canAddNewItems) {
                     Button(
                         onClick = { showAddSizeDialog = true },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = WaterNavyPrimary,
-                            contentColor = Color.White
-                        ),
+                        colors = waterPrimaryButtonColors(),
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier
@@ -899,7 +896,7 @@ fun AddBottleStockFormDialog(
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("btn_confirm_add_stock")
             ) {
@@ -1132,7 +1129,7 @@ fun IssueBottleFormDialog(
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("btn_confirm_issue_bottle")
             ) {
@@ -1910,7 +1907,7 @@ fun BottleSizeFormDialog(
                         else -> onSave(cleanName, capVal, usageType, fillVal, purVal, depVal, cleanUom)
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("btn_save_bottle_size")
             ) {

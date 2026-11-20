@@ -434,18 +434,17 @@ fun DailyCashClosingScreen(
                                 onClosingSubmitted()
                             }
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                        colors = waterPrimaryButtonColors(),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         enabled = actualCashText.isNotEmpty()
                     ) {
-                        Icon(Icons.Default.Verified, contentDescription = null, tint = Color.White)
+                        Icon(Icons.Default.Verified, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "Submit Cash Closing & Lock Day",
-                            color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )

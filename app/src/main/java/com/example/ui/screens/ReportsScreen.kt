@@ -230,18 +230,17 @@ fun ReportsScreen(
 
                         Button(
                             onClick = { openDetailedStatementPdf() },
-                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                            colors = waterPrimaryButtonColors(),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("open_statement_pdf_btn"),
                             shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 "Preview & Share Full PDF Statement (مکمل PDF رپورٹ)",
-                                color = Color.White,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )

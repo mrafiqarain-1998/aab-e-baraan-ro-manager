@@ -22,6 +22,7 @@ import com.example.model.UserRole
 import com.example.ui.screens.stockcost.BottleStockSubTab
 import com.example.ui.screens.stockcost.CostingSubTab
 import com.example.ui.screens.stockcost.OtherMaterialStockSubTab
+import com.example.ui.screens.stockcost.StaffManagementSubTab
 import com.example.ui.theme.*
 import com.example.viewmodel.WaterPlantViewModel
 
@@ -31,9 +32,10 @@ enum class StockCostSubTab(
     val icon: androidx.compose.ui.graphics.vector.ImageVector,
     val adminOnly: Boolean = false
 ) {
-    BOTTLE_STOCK("Bottle Stock", "بوتل اسٹاک", Icons.Default.WaterDrop),
-    OTHER_MATERIALS("Other Material", "دیگر سامان", Icons.Default.Category),
-    COSTING("Costing", "لاگت و منافع", Icons.Default.MonetizationOn, adminOnly = true)
+    BOTTLE_STOCK("Bottles", "بوتل اسٹاک", Icons.Default.WaterDrop),
+    OTHER_MATERIALS("Materials", "دیگر سامان", Icons.Default.Category),
+    COSTING("Costing", "لاگت و منافع", Icons.Default.MonetizationOn, adminOnly = true),
+    STAFF("Staff", "عملہ", Icons.Default.Badge)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -212,6 +214,12 @@ fun InventoryScreen(
                 }
                 StockCostSubTab.COSTING -> {
                     CostingSubTab(
+                        viewModel = viewModel,
+                        isAdmin = isAdmin
+                    )
+                }
+                StockCostSubTab.STAFF -> {
+                    StaffManagementSubTab(
                         viewModel = viewModel,
                         isAdmin = isAdmin
                     )

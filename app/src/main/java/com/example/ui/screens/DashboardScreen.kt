@@ -75,6 +75,9 @@ fun DashboardScreen(
     val isCloudConnected by viewModel.isCloudConnected.collectAsState()
     val isSyncFlushing by viewModel.isSyncFlushing.collectAsState()
     val syncQueueItems by viewModel.syncQueueItems.collectAsState()
+    val factoryMaterials by viewModel.factoryMaterials.collectAsState()
+    val bottleSizes by viewModel.bottleSizes.collectAsState()
+    val plantWorkers by viewModel.plantWorkers.collectAsState()
 
     var showAddExpenseDialog by remember { mutableStateOf(false) }
     var showPasswordResetRequestsDialog by remember { mutableStateOf(false) }
@@ -454,7 +457,7 @@ fun DashboardScreen(
                                 if (pendingPasswordResets > 0) {
                                     Button(
                                         onClick = { showPasswordResetRequestsDialog = true },
-                                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                        colors = waterPrimaryButtonColors(),
                                         modifier = Modifier.weight(1f).height(36.dp),
                                         shape = RoundedCornerShape(8.dp),
                                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
@@ -1055,14 +1058,14 @@ fun DashboardScreen(
                                                 selectedReqForReset = req
                                                 newPasswordInput = "123456"
                                             },
-                                            colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                                            colors = waterPrimaryButtonColors(),
                                             shape = RoundedCornerShape(8.dp),
                                             modifier = Modifier.fillMaxWidth(),
                                             contentPadding = PaddingValues(vertical = 6.dp)
                                         ) {
                                             Icon(Icons.Default.VpnKey, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(modifier = Modifier.width(6.dp))
-                                            Text("Reset & Approve Password", fontSize = 10.5.sp, color = Color.White)
+                                            Text("Reset & Approve Password", fontSize = 10.5.sp)
                                         }
                                     }
                                 }
@@ -1083,9 +1086,9 @@ fun DashboardScreen(
             confirmButton = {
                 Button(
                     onClick = { showPasswordResetRequestsDialog = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
-                    Text("Close (بند کریں)", color = Color.White)
+                    Text("Close (بند کریں)")
                 }
             }
         )
@@ -1095,6 +1098,12 @@ fun DashboardScreen(
         AddExpenseDialog(
             categories = expenseCategories,
             isAdmin = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE),
+            factoryMaterials = factoryMaterials,
+            bottleSizes = bottleSizes,
+            plantWorkers = plantWorkers,
+            onGetWorkerSalarySummary = { workerId, month ->
+                viewModel.getWorkerMonthlySalarySummary(workerId, month)
+            },
             onDismiss = { showAddExpenseDialog = false },
             onSave = { catId, catName, desc, amt, method, payee, notes, type, date ->
                 viewModel.addExpense(catId, catName, desc, amt, method, payee, notes, type, date)
@@ -1102,6 +1111,60 @@ fun DashboardScreen(
             },
             onSaveWithSource = { catId, catName, desc, amt, method, payee, notes, type, date, source ->
                 viewModel.addExpense(catId, catName, desc, amt, method, payee, notes, type, date, source)
+                showAddExpenseDialog = false
+            },
+            onSaveWithSourceAndStaff = { catId, catName, desc, amt, method, payee, notes, type, date, source, invoiceNo, staffId, staffName ->
+                viewModel.addExpense(
+                    categoryId = catId,
+                    categoryName = catName,
+                    description = desc,
+                    amount = amt,
+                    method = method,
+                    payee = payee,
+                    notes = notes,
+                    type = type,
+                    expenseDate = date,
+                    paymentSource = source,
+                    invoiceNumber = invoiceNo,
+                    staffMemberId = staffId,
+                    staffMemberName = staffName
+                )
+                showAddExpenseDialog = false
+            },
+            onSaveWithMaterialRefill = { matId, qty, unitCost, catId, catName, expType, desc, supplier, invoiceNo, notes, date, source, method ->
+                viewModel.recordExpenseWithMaterialRefill(
+                    materialId = matId,
+                    quantity = qty,
+                    unitCost = unitCost,
+                    categoryId = catId,
+                    categoryName = catName,
+                    expenseType = expType,
+                    description = desc,
+                    supplierName = supplier,
+                    invoiceNo = invoiceNo,
+                    notes = notes,
+                    expenseDate = date,
+                    paymentSource = source,
+                    paymentMethod = method
+                )
+                showAddExpenseDialog = false
+            },
+            onSaveWithBottlePurchase = { sizeId, qty, unitCost, catId, catName, expType, desc, supplier, invoiceNo, notes, date, source, method ->
+                viewModel.recordExpenseWithBottlePurchase(
+                    bottleSizeId = sizeId,
+                    quantity = qty,
+                    unitCost = unitCost,
+                    categoryId = catId,
+                    categoryName = catName,
+                    expenseType = expType,
+                    description = desc,
+                    supplierName = supplier,
+                    invoiceNo = invoiceNo,
+                    notes = notes,
+                    expenseDate = date,
+                    paymentSource = source,
+                    paymentMethod = method
+                )
                 showAddExpenseDialog = false
             },
             onAddCategory = { name, urdu, type ->
@@ -1443,7 +1506,7 @@ fun DashboardDateRangeDialog(
                     val e = if (isSingleDateMode) s else if (endDateText.isNotBlank()) endDateText.trim() else s
                     onConfirm(s, e)
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                colors = waterPrimaryButtonColors()
             ) {
                 Text("لاگو کریں (Apply Filter)")
             }

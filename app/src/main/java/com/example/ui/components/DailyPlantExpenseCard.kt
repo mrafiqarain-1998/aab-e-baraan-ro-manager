@@ -467,7 +467,7 @@ fun DailyPlantExpenseCard(
                             showAddCategoryDialog = false
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
                     Text("شامل کریں (Save)")
                 }
@@ -510,7 +510,7 @@ fun DailyPlantExpenseCard(
                             showManageCategoriesDialog = false
                             showAddCategoryDialog = true
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White),
+                        colors = waterPrimaryButtonColors(),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -571,7 +571,7 @@ fun DailyPlantExpenseCard(
             confirmButton = {
                 Button(
                     onClick = { showManageCategoriesDialog = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = WaterNavyPrimary, contentColor = Color.White)
+                    colors = waterPrimaryButtonColors()
                 ) {
                     Text("بند کریں (Done)")
                 }

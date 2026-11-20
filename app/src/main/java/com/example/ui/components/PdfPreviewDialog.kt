@@ -311,10 +311,7 @@ fun PdfPreviewDialog(
                                     chooserTitle = request.chooserTitle
                                 )
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = WaterNavyPrimary,
-                                contentColor = Color.White
-                            ),
+                            colors = waterPrimaryButtonColors(),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)

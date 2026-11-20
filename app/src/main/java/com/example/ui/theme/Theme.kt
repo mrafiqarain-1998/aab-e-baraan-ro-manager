@@ -52,10 +52,18 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
+fun waterPrimaryButtonColors() = androidx.compose.material3.ButtonDefaults.buttonColors(
+    containerColor = WaterSkyButton,
+    contentColor = WaterSkyButtonContent,
+    disabledContainerColor = Color(0xFFE2E8F0),
+    disabledContentColor = TextMuted
+)
+
+@Composable
 fun waterFilterChipColors() = androidx.compose.material3.FilterChipDefaults.filterChipColors(
-    selectedContainerColor = WaterNavyPrimary,
-    selectedLabelColor = Color.White,
-    selectedLeadingIconColor = Color.White,
+    selectedContainerColor = WaterSkyButton,
+    selectedLabelColor = WaterSkyButtonContent,
+    selectedLeadingIconColor = WaterSkyButtonContent,
     containerColor = WaterSkyLight,
     labelColor = WaterNavyDark,
     iconColor = WaterNavyPrimary

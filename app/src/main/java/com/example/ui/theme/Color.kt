@@ -20,6 +20,8 @@ val WaterSkySurface = Color(0xFFF0F7FB)       // Canvas Background (#F0F7FB): Ap
 val WaterSurfaceWhite = Color(0xFFFFFFFF)     // Card Surface (#FFFFFF): All Cards, Tables, Modals
 val SubtleHeader = Color(0xFFF8FAFC)          // Subtle Header (#F8FAFC): Table Headers, Input Backgrounds
 val WaterSkyLight = Color(0xFFE3F2FD)         // Ice Blue Highlight (#E3F2FD): Unselected Tabs, Chips, Badges
+val WaterSkyButton = Color(0xFF38BDF8)        // Vibrant Sky Blue (#38BDF8): High-visibility Action Buttons
+val WaterSkyButtonContent = Color(0xFF0A2540) // Deep Ink Navy (#0A2540): Ultra-legible text/icons on Sky Blue (>9:1 contrast)
 
 // 3. Financial & Status Colors (پیسوں اور کھاتے کے رنگ)
 val SuccessGreen = Color(0xFF059669)          // Paid / Received / Rich Emerald Green

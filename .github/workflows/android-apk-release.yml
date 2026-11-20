@@ -86,9 +86,26 @@ jobs:
           sed -i "s/versionCode = [0-9]\+/versionCode = ${BUILD_NUM}/" app/build.gradle.kts
           sed -i "s/versionName = \"[^\"]*\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
+      - name: Resolve OTA Update Release Target Repo
+        id: target
+        env:
+          PUBLIC_RELEASE_REPO: ${{ secrets.PUBLIC_RELEASE_REPO }}
+          PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          CLEAN_REPO="$(printf '%s' "$PUBLIC_RELEASE_REPO" | sed 's#^https\?://\(www\.\)\?github\.com/##; s#\.git$##; s#^/##; s#/$##' | awk -F'/' '{if (NF>=2) print $1"/"$2}')"
+          if [ -n "$CLEAN_REPO" ] && [ -n "$PUBLIC_RELEASE_TOKEN" ]; then
+            echo "repo=${CLEAN_REPO}" >> "$GITHUB_OUTPUT"
+            echo "using_public_repo=true" >> "$GITHUB_OUTPUT"
+            echo "Publishing APK release to separate Public Releases repo: ${CLEAN_REPO} (main code repo stays 100% Private)."
+          else
+            echo "repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
+            echo "using_public_repo=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing APK release to current repo: ${{ github.repository }}."
+          fi
+
       - name: Build Android APK using Gradle Wrapper
         env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY: ${{ steps.target.outputs.repo }}
         run: |
           chmod +x ./gradlew
           ./gradlew --version
@@ -101,10 +118,13 @@ jobs:
       - name: Publish GitHub Release (Free OTA Update Endpoint)
         uses: softprops/action-gh-release@v2
         with:
+          repository: ${{ steps.target.outputs.repo }}
+          token: ${{ steps.target.outputs.using_public_repo == 'true' && secrets.PUBLIC_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          target_commitish: ${{ steps.target.outputs.using_public_repo == 'true' && 'main' || github.sha }}
           tag_name: ${{ steps.version.outputs.tag }}
           name: "Aab-e-Baraan RO Manager v${{ steps.version.outputs.name }}"
           make_latest: true
           body: |
-            Automatic build v${{ steps.version.outputs.name }} (Build ${{ steps.version.outputs.code }}) from commit `${{ github.sha }}`.
+            Official update v${{ steps.version.outputs.name }} (Build ${{ steps.version.outputs.code }}).
             Open Aab-e-Baraan RO Manager -> Sync & Updates -> tap **Check Update** -> **Download & Install Update**.
           files: "Aab-e-Baraan-v${{ steps.version.outputs.name }}.apk"
