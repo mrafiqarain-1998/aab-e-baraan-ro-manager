@@ -529,15 +529,12 @@ fun DeliveriesListScreen(
             PdfGenerator.findRelatedPaymentsForDelivery(del, payments)
         }
         val allocatedTotal = relatedPayments.sumOf { p ->
-            val matched = p.allocations.filter {
-                (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
-                    it.invoiceId == del.id ||
-                    it.invoiceId == "inv_${del.id}"
-            }.sumOf { it.allocatedAmount }
-            if (matched > 0.0) matched else p.amount
+            PdfGenerator.allocatedAmountForDelivery(del, p)
         }
-        val totalPaid = maxOf(del.paymentCollected, allocatedTotal).coerceAtMost(del.totalAmount)
+        // Single source of truth: delivery.paymentCollected (matches Delivery List, Invoices, and Dues)
+        val totalPaid = del.paymentCollected.coerceIn(0.0, del.totalAmount)
         val outstandingBal = (del.totalAmount - totalPaid).coerceAtLeast(0.0)
+        val hasPaymentRecordMismatch = kotlin.math.abs(allocatedTotal - totalPaid) > 1.0
 
         MobileFormDialog(
             title = "Delivery ${del.deliveryNumber}",
@@ -566,14 +563,11 @@ fun DeliveriesListScreen(
                                     val retTxt = if (isRet) " (Empty Ret: ${item.emptyCollected})" else ""
                                     "• ${item.bottleName}: ${item.quantity} x Rs.${item.unitPrice.toInt()} = Rs.${item.lineTotal.toInt()}$retTxt"
                                 }
-                                val payStr = if (relatedPayments.isNotEmpty()) {
-                                    relatedPayments.mapIndexed { idx, p ->
-                                        val matched = p.allocations.find {
-                                            (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
-                                                it.invoiceId == del.id ||
-                                                it.invoiceId == "inv_${del.id}"
-                                        }?.allocatedAmount ?: p.amount
-                                        "${idx + 1}. ${p.date}: Rs.${matched.toInt()} (${p.paymentMethod.label})"
+                                val payStr = if (relatedPayments.isNotEmpty() && !hasPaymentRecordMismatch) {
+                                    relatedPayments.mapIndexedNotNull { idx, p ->
+                                        val matched = PdfGenerator.allocatedAmountForDelivery(del, p)
+                                        if (matched <= 0.0) null
+                                        else "${idx + 1}. ${p.date}: Rs.${matched.toInt()} (${p.paymentMethod.label})"
                                     }.joinToString("\n")
                                 } else if (totalPaid > 0) {
                                     "Paid Rs.${totalPaid.toInt()} (${del.paymentMethod})"
@@ -837,13 +831,59 @@ fun DeliveriesListScreen(
                     }
                 }
             }
+            if (hasPaymentRecordMismatch) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = WarningOrangeLight,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.55f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("delivery_payment_mismatch_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Mismatch Warning",
+                            tint = WarningOrange,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Payment records total Rs. ${allocatedTotal.toInt()} differs from Delivery Paid Rs. ${totalPaid.toInt()}.",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF9A3412),
+                            lineHeight = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (canEditDelivery) {
+                            Surface(
+                                onClick = { viewModel.reconcileDeliveryPayments(del.id) },
+                                shape = RoundedCornerShape(6.dp),
+                                color = WarningOrange,
+                                modifier = Modifier.testTag("btn_fix_payment_mismatch")
+                            ) {
+                                Text(
+                                    text = "Fix",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             if (relatedPayments.isNotEmpty()) {
                 relatedPayments.forEachIndexed { idx, p ->
-                    val allocAmt = p.allocations.find {
-                        (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
-                            it.invoiceId == del.id ||
-                            it.invoiceId == "inv_${del.id}"
-                    }?.allocatedAmount ?: p.amount
+                    val allocAmt = PdfGenerator.allocatedAmountForDelivery(del, p)
+                    if (allocAmt <= 0.0) return@forEachIndexed
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -923,7 +963,8 @@ fun DeliveriesListScreen(
 
             EditMetadataBadge(
                 lastEditedAt = del.lastEditedAt,
-                lastEditedBy = del.lastEditedBy
+                lastEditedBy = del.lastEditedBy,
+                lastEditNote = del.lastEditNote
             )
         }
     }
@@ -1044,13 +1085,65 @@ fun EditDeliveryDialog(
         )
     }
     var notesText by remember { mutableStateOf(delivery.notes) }
+    var editReasonText by remember { mutableStateOf("") }
     var showAddSizeDropdown by remember { mutableStateOf(false) }
     var pendingSaveConfirm by remember { mutableStateOf<Delivery?>(null) }
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
 
     val subtotal = remember(items) { items.sumOf { it.lineTotal } }
-    val currentTotal = remember(subtotal, deliveryChargesText) {
-        subtotal + (deliveryChargesText.toDoubleOrNull() ?: 0.0)
+    val rawCharges = deliveryChargesText.toDoubleOrNull() ?: 0.0
+    val rawPaid = paymentCollectedText.toDoubleOrNull() ?: 0.0
+    val currentTotal = remember(subtotal, rawCharges) { subtotal + rawCharges }
+    val totalDeliveredQty = remember(items) { items.sumOf { it.quantity } }
+    val totalReturnedEmpty = remember(items, bottleSizes) {
+        items.sumOf { item ->
+            val s = bottleSizes.find { it.id == item.bottleSizeId }
+            val isRet = if (item.variantId.isNotBlank()) false
+            else s?.isReturnableBottle ?: (item.bottleSizeId in listOf("size_19l", "size_12l"))
+            if (isRet) item.emptyCollected else 0
+        }
+    }
+
+    // Abnormal logic checks: Blocking Errors (cannot save) & Non-blocking Warnings (must review)
+    val isPaidExceedingBill = rawPaid > currentTotal + 0.01
+    val blockingErrors = remember(totalDeliveredQty, rawCharges, rawPaid, currentTotal) {
+        buildList {
+            if (totalDeliveredQty <= 0) {
+                add("Total bottle quantity must be at least 1 (کم از کم 1 بوتل ضروری ہے).")
+            }
+            if (rawCharges < 0.0 || rawPaid < 0.0) {
+                add("Delivery charges and Paid amount cannot be negative.")
+            }
+            if (rawPaid > currentTotal + 0.01) {
+                add("Abnormal: Paid amount (Rs. ${rawPaid.toInt()}) is greater than Updated Bill (Rs. ${currentTotal.toInt()})! Reduce Paid Amount or increase Bottle Qty.")
+            }
+        }
+    }
+    val abnormalWarnings = remember(delivery, items, currentTotal, rawPaid, totalDeliveredQty, totalReturnedEmpty, inventory) {
+        buildList {
+            if (rawPaid < delivery.paymentCollected - 0.01) {
+                val diff = (delivery.paymentCollected - rawPaid).toInt()
+                add("Paid amount reduced (Rs. ${delivery.paymentCollected.toInt()} → Rs. ${rawPaid.toInt()}): Linked payment records will be reconciled and customer due increases by Rs. $diff.")
+            }
+            if (delivery.totalAmount > 0.0 && kotlin.math.abs(currentTotal - delivery.totalAmount) >= delivery.totalAmount * 0.5) {
+                add("Large bill change detected: Rs. ${delivery.totalAmount.toInt()} → Rs. ${currentTotal.toInt()} (Qty: ${delivery.totalFullDelivered} → $totalDeliveredQty). Verify before saving.")
+            }
+            if (totalReturnedEmpty > totalDeliveredQty && totalDeliveredQty > 0) {
+                add("Returned empties ($totalReturnedEmpty) exceed delivered bottles ($totalDeliveredQty). Confirm customer returned previous empties.")
+            }
+            items.forEach { item ->
+                val oldQty = delivery.items
+                    .filter { it.bottleSizeId == item.bottleSizeId && it.variantId == item.variantId }
+                    .sumOf { it.quantity }
+                val delta = item.quantity - oldQty
+                if (delta > 0 && item.variantId.isBlank()) {
+                    val avail = inventory.find { it.bottleSizeId == item.bottleSizeId }?.atPlantFull ?: 0
+                    if (delta > avail) {
+                        add("Stock alert: ${item.bottleName} increase (+$delta) exceeds current full stock ($avail).")
+                    }
+                }
+            }
+        }
     }
 
     if (pendingSaveConfirm != null) {
@@ -1058,14 +1151,53 @@ fun EditDeliveryDialog(
         AlertDialog(
             onDismissRequest = { pendingSaveConfirm = null },
             containerColor = Color.White,
-            icon = { Icon(Icons.Default.EditNote, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(30.dp)) },
-            title = { Text("Confirm Edit Changes?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
-            text = {
-                Text(
-                    text = "Save edited Delivery ${candidate.deliveryNumber} for ${candidate.customerName} (Total: Rs. ${candidate.totalAmount.toInt()}, Paid: Rs. ${candidate.paymentCollected.toInt()})?\n\nکیا آپ واقعی اس ڈیلیوری میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
-                    fontSize = 11.sp,
-                    color = TextPrimaryDark
+            icon = {
+                Icon(
+                    imageVector = if (abnormalWarnings.isNotEmpty()) Icons.Default.Warning else Icons.Default.EditNote,
+                    contentDescription = null,
+                    tint = if (abnormalWarnings.isNotEmpty()) WarningOrange else WaterNavyPrimary,
+                    modifier = Modifier.size(30.dp)
                 )
+            },
+            title = {
+                Text(
+                    text = if (abnormalWarnings.isNotEmpty()) "Warning — Confirm Edit?" else "Confirm Edit Changes?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = if (abnormalWarnings.isNotEmpty()) WarningOrange else WaterNavyPrimary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Save edited Delivery ${candidate.deliveryNumber} for ${candidate.customerName}\nBill: Rs. ${delivery.totalAmount.toInt()} → Rs. ${candidate.totalAmount.toInt()} | Paid: Rs. ${delivery.paymentCollected.toInt()} → Rs. ${candidate.paymentCollected.toInt()}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimaryDark
+                    )
+                    if (abnormalWarnings.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = WarningOrangeLight,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                abnormalWarnings.forEach { w ->
+                                    Text("• $w", fontSize = 9.5.sp, color = Color(0xFF9A3412), lineHeight = 13.sp)
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = "کیا آپ واقعی اس ڈیلیوری میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
+                        fontSize = 10.5.sp,
+                        color = TextSecondaryDark
+                    )
+                }
             },
             confirmButton = {
                 Button(
@@ -1090,7 +1222,7 @@ fun EditDeliveryDialog(
 
     MobileFormDialog(
         title = "Edit Delivery ${delivery.deliveryNumber}",
-        subtitle = "${delivery.customerName} • Updates slip & detail",
+        subtitle = "${delivery.customerName} • Updates slip, payments & stock",
         hasUnsavedChanges = true,
         onDismiss = onDismiss,
         footerContent = {
@@ -1099,39 +1231,29 @@ fun EditDeliveryDialog(
             }
             Button(
                 onClick = {
-                    val charges = deliveryChargesText.toDoubleOrNull() ?: 0.0
-                    val paid = (paymentCollectedText.toDoubleOrNull() ?: 0.0).coerceAtMost(currentTotal)
-                    val totalDelivered = items.sumOf { it.quantity }
-                    val totalEmpty = items.sumOf { item ->
-                        val s = bottleSizes.find { it.id == item.bottleSizeId }
-                        val isRet = if (item.variantId.isNotBlank()) {
-                            false
-                        } else {
-                            s?.isReturnableBottle ?: (item.bottleSizeId in listOf("size_19l", "size_12l"))
-                        }
-                        if (isRet) item.emptyCollected else 0
-                    }
+                    if (blockingErrors.isNotEmpty()) return@Button
                     val modeLabel = if (isOnlineMode) "Online" else "Cash"
                     val methodStr = when {
-                        paid <= 0.0 -> "Unpaid"
-                        paid >= currentTotal && currentTotal > 0 -> modeLabel
+                        rawPaid <= 0.0 -> "Unpaid"
+                        rawPaid >= currentTotal && currentTotal > 0 -> modeLabel
                         else -> "Partial ($modeLabel)"
                     }
                     val updated = delivery.copy(
                         date = editDate.ifBlank { delivery.date },
                         items = items.filter { it.quantity > 0 || it.emptyCollected > 0 },
-                        totalFullDelivered = totalDelivered,
-                        totalEmptyCollected = totalEmpty,
-                        deliveryCharges = charges,
+                        totalFullDelivered = totalDeliveredQty,
+                        totalEmptyCollected = totalReturnedEmpty,
+                        deliveryCharges = rawCharges,
                         subtotal = subtotal,
                         totalAmount = currentTotal,
-                        paymentCollected = paid,
+                        paymentCollected = rawPaid,
                         paymentMethod = methodStr,
-                        notes = notesText
+                        notes = notesText,
+                        lastEditNote = editReasonText.trim()
                     )
                     pendingSaveConfirm = updated
                 },
-                enabled = items.any { it.quantity > 0 },
+                enabled = blockingErrors.isEmpty(),
                 colors = waterPrimaryButtonColors(),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.testTag("save_edit_delivery_btn")
@@ -1358,6 +1480,84 @@ fun EditDeliveryDialog(
             height = 38.dp,
             modifier = Modifier.fillMaxWidth()
         )
+
+        CompactFormTextField(
+            value = editReasonText,
+            onValueChange = { editReasonText = it },
+            label = "Edit Reason / Note (تبدیلی کی وجہ — Detail میں محفوظ ہوگا)",
+            height = 38.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("edit_delivery_reason_input")
+        )
+
+        if (blockingErrors.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = ErrorRedLight,
+                border = androidx.compose.foundation.BorderStroke(1.dp, ErrorRed.copy(alpha = 0.55f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("edit_delivery_error_banner")
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    blockingErrors.forEach { err ->
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(Icons.Default.ErrorOutline, contentDescription = "Error", tint = ErrorRed, modifier = Modifier.size(14.dp))
+                            Text(err, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = ErrorRed, lineHeight = 13.sp)
+                        }
+                    }
+                    if (isPaidExceedingBill && currentTotal >= 0.0) {
+                        Surface(
+                            onClick = { paymentCollectedText = currentTotal.toInt().toString() },
+                            shape = RoundedCornerShape(6.dp),
+                            color = ErrorRed,
+                            modifier = Modifier.testTag("btn_match_paid_to_bill")
+                        ) {
+                            Text(
+                                text = "Set Paid = Rs. ${currentTotal.toInt()}",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (abnormalWarnings.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = WarningOrangeLight,
+                border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("edit_delivery_warning_banner")
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    abnormalWarnings.forEach { warn ->
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = "Warning", tint = WarningOrange, modifier = Modifier.size(13.dp))
+                            Text(warn, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF9A3412), lineHeight = 12.5.sp)
+                        }
+                    }
+                }
+            }
+        }
 
         Surface(
             color = WaterNavyDark,

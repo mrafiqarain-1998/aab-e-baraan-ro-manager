@@ -141,13 +141,51 @@ object PdfGenerator {
         }
     }
 
+    /**
+     * Exact token match so e.g. "DEL-501" NEVER falsely matches "DEL-5010".
+     */
+    fun matchesDeliveryNumberToken(text: String, deliveryNumber: String): Boolean {
+        val token = deliveryNumber.trim()
+        if (token.isBlank() || text.isBlank()) return false
+        val pattern = Regex("(^|[^A-Za-z0-9])${Regex.escape(token)}($|[^A-Za-z0-9])", RegexOption.IGNORE_CASE)
+        return pattern.containsMatchIn(text)
+    }
+
+    /**
+     * Returns the exact allocated portion of [payment] that belongs to [delivery].
+     */
+    fun allocatedAmountForDelivery(delivery: Delivery, payment: Payment): Double {
+        val matched = payment.allocations.filter { alloc ->
+            (delivery.invoiceId.isNotBlank() && alloc.invoiceId == delivery.invoiceId) ||
+                alloc.invoiceId == delivery.id ||
+                alloc.invoiceId == "inv_${delivery.id}" ||
+                (delivery.deliveryNumber.isNotBlank() && alloc.invoiceNumber.equals(delivery.deliveryNumber, ignoreCase = true))
+        }.sumOf { it.allocatedAmount }
+        if (matched > 0.0) return matched
+        if (payment.allocations.isEmpty()) return payment.amount
+        // If payment has explicit allocations to other invoices only, do not count full amount unless matched by exact note
+        return if (delivery.deliveryNumber.isNotBlank() &&
+            (delivery.customerId.isBlank() || payment.customerId == delivery.customerId) &&
+            matchesDeliveryNumberToken(payment.notes, delivery.deliveryNumber)
+        ) {
+            payment.amount
+        } else {
+            0.0
+        }
+    }
+
     fun findRelatedPaymentsForDelivery(delivery: Delivery, payments: List<Payment>): List<Payment> {
         return payments.filter { p ->
-            p.allocations.any { alloc ->
+            val matchedByAlloc = p.allocations.any { alloc ->
                 (delivery.invoiceId.isNotBlank() && alloc.invoiceId == delivery.invoiceId) ||
                     alloc.invoiceId == delivery.id ||
-                    alloc.invoiceId == "inv_${delivery.id}"
-            } || (delivery.deliveryNumber.isNotBlank() && p.notes.contains(delivery.deliveryNumber))
+                    alloc.invoiceId == "inv_${delivery.id}" ||
+                    (delivery.deliveryNumber.isNotBlank() && alloc.invoiceNumber.equals(delivery.deliveryNumber, ignoreCase = true))
+            }
+            val matchedByNote = delivery.deliveryNumber.isNotBlank() &&
+                (delivery.customerId.isBlank() || p.customerId == delivery.customerId) &&
+                matchesDeliveryNumberToken(p.notes, delivery.deliveryNumber)
+            matchedByAlloc || matchedByNote
         }.sortedWith(compareBy<Payment> { it.date }.thenBy { it.createdAt })
     }
 
@@ -319,17 +357,9 @@ object PdfGenerator {
                 y += 6f
             }
 
-            // Payment Calculation Box
+            // Payment Calculation Box — single source of truth from delivery.paymentCollected
             val relatedPayments = findRelatedPaymentsForDelivery(delivery, payments)
-            val allocatedPaid = relatedPayments.sumOf { p ->
-                val matched = p.allocations.filter {
-                    (delivery.invoiceId.isNotBlank() && it.invoiceId == delivery.invoiceId) ||
-                        it.invoiceId == delivery.id ||
-                        it.invoiceId == "inv_${delivery.id}"
-                }.sumOf { it.allocatedAmount }
-                if (matched > 0.0) matched else p.amount
-            }
-            val totalPaid = maxOf(delivery.paymentCollected, allocatedPaid).coerceAtMost(delivery.totalAmount)
+            val totalPaid = delivery.paymentCollected.coerceIn(0.0, delivery.totalAmount)
             val outstandingBal = (delivery.totalAmount - totalPaid).coerceAtLeast(0.0)
 
             val boxHeight = if (delivery.deliveryCharges > 0.0) 118f else 84f
@@ -403,12 +433,8 @@ object PdfGenerator {
                 paint.textSize = 9.5f
                 relatedPayments.forEachIndexed { idx, p ->
                     ensureSpace(18f)
-                    val matched = p.allocations.find {
-                        (delivery.invoiceId.isNotBlank() && it.invoiceId == delivery.invoiceId) ||
-                            it.invoiceId == delivery.id ||
-                            it.invoiceId == "inv_${delivery.id}"
-                    }?.allocatedAmount
-                    val allocAmt = matched ?: p.amount
+                    val allocAmt = allocatedAmountForDelivery(delivery, p)
+                    if (allocAmt <= 0.0) return@forEachIndexed
                     paint.color = Color.rgb(51, 65, 85)
                     canvas.drawText(
                         "${idx + 1}. ${p.receiptNumber} (${p.date}) • Rs. ${allocAmt.toInt()} via ${p.paymentMethod.label}",
@@ -1255,7 +1281,149 @@ object PdfGenerator {
             y += 58f
 
             // ==========================================================
-            // SECTION 1: DAILY DELIVERY DETAILS (CUSTOMER & DATE WISE)
+            // SECTION 1: BOTTLE SIZE-WISE SALES & PAYMENT SUMMARY
+            // ==========================================================
+            data class BottleSizeSummaryAcc(
+                val sizeName: String,
+                var totalQty: Int = 0,
+                var totalAmount: Double = 0.0,
+                var paidAmount: Double = 0.0,
+                var unpaidAmount: Double = 0.0,
+                val ratesUsed: MutableSet<Int> = linkedSetOf()
+            )
+
+            val sizeSummaryMap = linkedMapOf<String, BottleSizeSummaryAcc>()
+            val sizeNameLookup = bottleSizes.associate { it.id to it.name }
+            sortedDeliveries.forEach { del ->
+                val relPays = findRelatedPaymentsForDelivery(del, sortedPayments)
+                val allocPaid = relPays.sumOf { p ->
+                    val m = p.allocations.filter {
+                        (del.invoiceId.isNotBlank() && it.invoiceId == del.invoiceId) ||
+                            it.invoiceId == del.id || it.invoiceId == "inv_${del.id}"
+                    }.sumOf { it.allocatedAmount }
+                    if (m > 0.0) m else p.amount
+                }
+                val delPaid = maxOf(del.paymentCollected, allocPaid).coerceAtMost(del.totalAmount)
+                val delPaidRatio = if (del.totalAmount > 0.0) (delPaid / del.totalAmount).coerceIn(0.0, 1.0) else 0.0
+                val itemsSubtotal = del.items.sumOf { if (it.lineTotal > 0.0) it.lineTotal else it.quantity * it.unitPrice }
+
+                if (del.items.isNotEmpty()) {
+                    del.items.forEach { item ->
+                        val resolvedName = item.bottleName.ifBlank { sizeNameLookup[item.bottleSizeId] ?: "Bottle" }
+                        val lineAmt = if (item.lineTotal > 0.0) item.lineTotal else item.quantity * item.unitPrice
+                        val effectiveAmt = if (itemsSubtotal > 0.0 && del.deliveryCharges > 0.0) {
+                            lineAmt * (del.totalAmount / itemsSubtotal)
+                        } else lineAmt
+                        val linePaid = effectiveAmt * delPaidRatio
+                        val lineUnpaid = (effectiveAmt - linePaid).coerceAtLeast(0.0)
+
+                        val acc = sizeSummaryMap.getOrPut(resolvedName) { BottleSizeSummaryAcc(resolvedName) }
+                        acc.totalQty += item.quantity
+                        acc.totalAmount += effectiveAmt
+                        acc.paidAmount += linePaid
+                        acc.unpaidAmount += lineUnpaid
+                        if (item.unitPrice > 0.0) acc.ratesUsed.add(item.unitPrice.toInt())
+                    }
+                } else if (del.totalFullDelivered > 0) {
+                    val acc = sizeSummaryMap.getOrPut("Water Bottles") { BottleSizeSummaryAcc("Water Bottles") }
+                    acc.totalQty += del.totalFullDelivered
+                    acc.totalAmount += del.totalAmount
+                    acc.paidAmount += delPaid
+                    acc.unpaidAmount += (del.totalAmount - delPaid).coerceAtLeast(0.0)
+                }
+            }
+            val sizeSummaryRows = sizeSummaryMap.values.toList()
+
+            fun drawBottleSizeSummaryHeader() {
+                paint.color = Color.rgb(224, 242, 254)
+                canvas.drawRect(30f, y, 565f, y + 20f, paint)
+                paint.color = Color.rgb(10, 37, 64)
+                paint.textSize = 8.2f
+                paint.isFakeBoldText = true
+                canvas.drawText("Bottle Size", 36f, y + 13.5f, paint)
+                canvas.drawText("Total Qty", 200f, y + 13.5f, paint)
+                canvas.drawText("Rate", 270f, y + 13.5f, paint)
+                canvas.drawText("Total Amount", 342f, y + 13.5f, paint)
+                canvas.drawText("Paid", 434f, y + 13.5f, paint)
+                canvas.drawText("Unpaid", 500f, y + 13.5f, paint)
+                y += 24f
+            }
+
+            drawSectionTitle(
+                "1. BOTTLE SIZE-WISE SUMMARY (${periodLabel.uppercase(Locale.ENGLISH)})",
+                "Period: $dateRangeLabel",
+                Color.rgb(2, 132, 199)
+            )
+            drawBottleSizeSummaryHeader()
+
+            if (sizeSummaryRows.isEmpty()) {
+                paint.color = Color.rgb(100, 116, 139)
+                paint.textSize = 9f
+                paint.isFakeBoldText = false
+                canvas.drawText("No bottle deliveries recorded for this period.", 38f, y + 10f, paint)
+                y += 24f
+            } else {
+                sizeSummaryRows.forEachIndexed { idx, row ->
+                    ensureSpace(22f) { drawBottleSizeSummaryHeader() }
+                    if (idx % 2 == 1) {
+                        paint.color = Color.rgb(248, 250, 252)
+                        canvas.drawRect(30f, y - 9f, 565f, y + 11f, paint)
+                    }
+                    val rateText = when {
+                        row.ratesUsed.size == 1 -> "Rs.${row.ratesUsed.first()}"
+                        row.totalQty > 0 -> "~Rs.${(row.totalAmount / row.totalQty).toInt()}"
+                        else -> "-"
+                    }
+                    paint.textSize = 8.2f
+                    paint.isFakeBoldText = true
+                    paint.color = Color.rgb(15, 23, 42)
+                    canvas.drawText(truncateText(row.sizeName, 26), 36f, y + 2f, paint)
+
+                    paint.isFakeBoldText = true
+                    paint.color = Color.rgb(10, 37, 64)
+                    canvas.drawText("${row.totalQty}", 206f, y + 2f, paint)
+
+                    paint.isFakeBoldText = false
+                    paint.color = Color.rgb(51, 65, 85)
+                    canvas.drawText(rateText, 270f, y + 2f, paint)
+
+                    paint.isFakeBoldText = true
+                    paint.color = Color.rgb(15, 23, 42)
+                    canvas.drawText("Rs.${row.totalAmount.toInt()}", 342f, y + 2f, paint)
+
+                    paint.color = Color.rgb(22, 101, 52)
+                    canvas.drawText("Rs.${row.paidAmount.toInt()}", 434f, y + 2f, paint)
+
+                    paint.color = if (row.unpaidAmount > 0.5) Color.rgb(185, 28, 28) else Color.rgb(100, 116, 139)
+                    canvas.drawText("Rs.${row.unpaidAmount.toInt()}", 500f, y + 2f, paint)
+
+                    paint.color = Color.rgb(226, 232, 240)
+                    canvas.drawLine(30f, y + 11f, 565f, y + 11f, paint)
+                    y += 19f
+                }
+
+                // Grand Total Row for Bottle Size-Wise Summary
+                ensureSpace(24f)
+                paint.color = Color.rgb(241, 245, 249)
+                canvas.drawRect(30f, y - 9f, 565f, y + 13f, paint)
+                paint.textSize = 8.5f
+                paint.isFakeBoldText = true
+                paint.color = Color.rgb(10, 37, 64)
+                canvas.drawText("GRAND TOTAL", 36f, y + 3f, paint)
+                canvas.drawText("${sizeSummaryRows.sumOf { it.totalQty }}", 206f, y + 3f, paint)
+                canvas.drawText("-", 270f, y + 3f, paint)
+                canvas.drawText("Rs.${sizeSummaryRows.sumOf { it.totalAmount }.toInt()}", 342f, y + 3f, paint)
+                paint.color = Color.rgb(22, 101, 52)
+                canvas.drawText("Rs.${sizeSummaryRows.sumOf { it.paidAmount }.toInt()}", 434f, y + 3f, paint)
+                paint.color = Color.rgb(185, 28, 28)
+                canvas.drawText("Rs.${sizeSummaryRows.sumOf { it.unpaidAmount }.toInt()}", 500f, y + 3f, paint)
+                y += 22f
+            }
+
+            y += 8f
+
+            // ==========================================================
+            // SECTION 2: DELIVERY DETAILS (CUSTOMER & DATE WISE)
             // ==========================================================
             fun drawDeliveryTableHeader() {
                 paint.color = Color.rgb(224, 242, 254)
@@ -1265,16 +1433,16 @@ object PdfGenerator {
                 paint.isFakeBoldText = true
                 canvas.drawText("Date", 34f, y + 13.5f, paint)
                 canvas.drawText("Customer / Voucher", 88f, y + 13.5f, paint)
-                canvas.drawText("Delivered Items", 214f, y + 13.5f, paint)
+                canvas.drawText("Delivered Items (Size Wise)", 214f, y + 13.5f, paint)
                 canvas.drawText("Bill", 374f, y + 13.5f, paint)
                 canvas.drawText("Paid", 420f, y + 13.5f, paint)
-                canvas.drawText("Due", 464f, y + 13.5f, paint)
+                canvas.drawText("Unpaid", 464f, y + 13.5f, paint)
                 canvas.drawText("Status", 506f, y + 13.5f, paint)
                 y += 24f
             }
 
             drawSectionTitle(
-                "1. DELIVERY DETAILS (CUSTOMER & DATE WISE)",
+                "2. DELIVERY DETAILS (CUSTOMER & SIZE WISE)",
                 "Total: ${sortedDeliveries.size} | Empties Ret: $totalEmptiesReturned",
                 Color.rgb(10, 37, 64)
             )
@@ -1386,7 +1554,7 @@ object PdfGenerator {
             }
 
             drawSectionTitle(
-                "2. DAILY CASH & ONLINE RECEIVED (CUSTOMER-WISE)",
+                "3. ${periodLabel.uppercase(Locale.ENGLISH)} PAYMENTS (CASH & ONLINE)",
                 "Cash: Rs.${totalCashReceived.toInt()} | Online: Rs.${totalOnlineReceived.toInt()}",
                 Color.rgb(22, 101, 52)
             )
@@ -1501,7 +1669,7 @@ object PdfGenerator {
             }
 
             drawSectionTitle(
-                "3. DAILY EXPENSE DETAILS (اخراجات کی تفصیل)",
+                "4. ${periodLabel.uppercase(Locale.ENGLISH)} EXPENSE DETAILS (اخراجات کی تفصیل)",
                 "Total Expenses: Rs.${totalExpenses.toInt()} (${sortedExpenses.size} Vouchers)",
                 Color.rgb(185, 28, 28)
             )

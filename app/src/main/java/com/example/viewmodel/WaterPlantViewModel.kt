@@ -771,7 +771,17 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         if (success) {
             _userFeedbackMessage.value = "Delivery updated successfully"
         } else {
-            _userFeedbackMessage.value = "Failed to update delivery (Admin permission required)"
+            _userFeedbackMessage.value = "Failed to update delivery (check values or Admin permission)"
+        }
+        return success
+    }
+
+    fun reconcileDeliveryPayments(deliveryId: String): Boolean {
+        val success = repository.reconcileDeliveryPayments(deliveryId)
+        if (success) {
+            _userFeedbackMessage.value = "Payment records reconciled with delivery"
+        } else {
+            _userFeedbackMessage.value = "Unable to reconcile payment records"
         }
         return success
     }
@@ -1118,7 +1128,8 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
 
     /**
      * Standardized plain-text report for Daily / Weekly / Monthly sharing:
-     * Brand Name -> Report Type + Date -> Customer-wise Deliveries -> Customer-wise Payments -> Expenses.
+     * Brand Name -> Report Type + Date -> One-line Customer Deliveries (Qty, Bill, Paid, Bal)
+     * -> Old Delivery Payments (only previous deliveries paid in this period) -> Expenses.
      */
     fun generatePeriodTextReport(
         periodLabel: String,
@@ -1128,9 +1139,26 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         periodExpenses: List<Expense>
     ): String {
         val adminPhone = repository.getPrimaryAdminPhone()
+        val allDeliveries = deliveries.value
+        val periodDeliveryKeys = buildSet {
+            periodDeliveries.forEach { d ->
+                add(d.id)
+                if (d.invoiceId.isNotBlank()) add(d.invoiceId)
+                add("inv_${d.id}")
+            }
+        }
+        val deliveryByKey = buildMap<String, Delivery> {
+            allDeliveries.forEach { d ->
+                put(d.id, d)
+                if (d.invoiceId.isNotBlank()) put(d.invoiceId, d)
+                put("inv_${d.id}", d)
+            }
+        }
+
         val totalSales = periodDeliveries.sumOf { it.totalAmount }
         val totalBottles = periodDeliveries.sumOf { it.totalFullDelivered }
-        val totalPayments = periodPayments.sumOf { it.amount }
+        var totalPeriodDeliveryPaid = 0.0
+        var totalPeriodDeliveryBal = 0.0
         val totalExpenseAmount = periodExpenses.sumOf { it.amount }
 
         val sb = StringBuilder()
@@ -1138,7 +1166,7 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         sb.appendLine("$periodLabel — $dateLabel")
         sb.appendLine("================================")
 
-        // 1. Customer-wise Deliveries
+        // 1. Customer-wise Deliveries (One clean line per customer: Name | Qty | Bill | Paid | Bal)
         sb.appendLine("DELIVERIES (Customer-wise):")
         if (periodDeliveries.isEmpty()) {
             sb.appendLine("  No deliveries recorded.")
@@ -1146,36 +1174,94 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
             val groupedDels = periodDeliveries.groupBy { it.customerName.ifBlank { "Walk-in Customer" } }
             var idx = 1
             groupedDels.forEach { (custName, dels) ->
-                val itemCounts = linkedMapOf<String, Int>()
-                dels.flatMap { it.items }.forEach { item ->
-                    itemCounts[item.bottleName] = (itemCounts[item.bottleName] ?: 0) + item.quantity
+                val custQty = dels.sumOf { it.totalFullDelivered }
+                val custBill = dels.sumOf { it.totalAmount }
+                val custPaid = dels.sumOf { d ->
+                    val linkedPaid = periodPayments.sumOf { p ->
+                        p.allocations.filter { alloc ->
+                            (d.invoiceId.isNotBlank() && alloc.invoiceId == d.invoiceId) ||
+                                alloc.invoiceId == d.id ||
+                                alloc.invoiceId == "inv_${d.id}"
+                        }.sumOf { it.allocatedAmount }
+                    }
+                    maxOf(d.paymentCollected, linkedPaid).coerceAtMost(d.totalAmount)
                 }
-                val itemsSummary = itemCounts.entries.joinToString(", ") { "${it.value}x ${it.key}" }
-                    .ifBlank { "${dels.sumOf { it.totalFullDelivered }} bottles" }
-                val custTotal = dels.sumOf { it.totalAmount }.toInt()
-                sb.appendLine("$idx. $custName — $itemsSummary | Rs. $custTotal")
+                val custBal = (custBill - custPaid).coerceAtLeast(0.0)
+                totalPeriodDeliveryPaid += custPaid
+                totalPeriodDeliveryBal += custBal
+                sb.appendLine(
+                    "$idx. $custName | Qty: $custQty | Bill: Rs.${custBill.toInt()} | Paid: Rs.${custPaid.toInt()} | Bal: Rs.${custBal.toInt()}"
+                )
                 idx++
             }
         }
-        sb.appendLine("Total Deliveries: ${periodDeliveries.size} ($totalBottles bottles) | Sale: Rs. ${totalSales.toInt()}")
+        sb.appendLine(
+            "Total: $totalBottles Btl | Bill: Rs.${totalSales.toInt()} | Paid: Rs.${totalPeriodDeliveryPaid.toInt()} | Bal: Rs.${totalPeriodDeliveryBal.toInt()}"
+        )
         sb.appendLine("--------------------------------")
 
-        // 2. Customer-wise Payments
-        sb.appendLine("PAYMENTS (Customer-wise):")
-        if (periodPayments.isEmpty()) {
-            sb.appendLine("  No payments received.")
-        } else {
-            val groupedPays = periodPayments.groupBy { it.customerName.ifBlank { "Customer" } }
-            var idx = 1
-            groupedPays.forEach { (custName, pays) ->
-                val custPaid = pays.sumOf { it.amount }.toInt()
-                val methods = pays.map { it.paymentMethod.label }.distinct().joinToString("/")
-                sb.appendLine("$idx. $custName — Rs. $custPaid ($methods)")
-                idx++
+        // 2. Old Delivery Payments ONLY (payments received in this period against earlier deliveries)
+        data class OldPaymentEntry(
+            val customerName: String,
+            val deliveryRef: String,
+            val amount: Double,
+            val mode: String
+        )
+
+        val periodCustomerIds = periodDeliveries.map { it.customerId }.filter { it.isNotBlank() }.toSet()
+        val oldDeliveryPayments = buildList {
+            periodPayments.forEach { p ->
+                val modeShort = p.paymentMethod.label.substringBefore(" (")
+                if (p.allocations.isNotEmpty()) {
+                    // Check each allocation — include ONLY allocations pointing to OLD deliveries (not in periodDeliveries)
+                    val oldAllocs = p.allocations.filter { it.invoiceId !in periodDeliveryKeys }
+                    oldAllocs.forEach { alloc ->
+                        val oldDel = deliveryByKey[alloc.invoiceId]
+                        val ref = if (oldDel != null) {
+                            "${oldDel.deliveryNumber.ifBlank { oldDel.id.take(8) }} (${oldDel.date})"
+                        } else {
+                            alloc.invoiceNumber.ifBlank { "Prev Bill" }
+                        }
+                        add(
+                            OldPaymentEntry(
+                                customerName = p.customerName.ifBlank { "Customer" },
+                                deliveryRef = ref,
+                                amount = alloc.allocatedAmount,
+                                mode = modeShort
+                            )
+                        )
+                    }
+                } else {
+                    // Unallocated payment: include ONLY if it's NOT already covered by this customer's period delivery spot collection
+                    val custPeriodPaid = periodDeliveries
+                        .filter { it.customerId == p.customerId || it.customerName.equals(p.customerName, ignoreCase = true) }
+                        .sumOf { it.paymentCollected }
+                    val isOldRecovery = p.customerId !in periodCustomerIds || custPeriodPaid <= 0.0
+                    if (isOldRecovery) {
+                        val ref = p.notes.trim().ifBlank { "Previous Balance" }
+                        add(
+                            OldPaymentEntry(
+                                customerName = p.customerName.ifBlank { "Customer" },
+                                deliveryRef = ref,
+                                amount = p.amount,
+                                mode = modeShort
+                            )
+                        )
+                    }
+                }
             }
         }
-        sb.appendLine("Total Payments Received: Rs. ${totalPayments.toInt()}")
-        sb.appendLine("--------------------------------")
+
+        if (oldDeliveryPayments.isNotEmpty()) {
+            sb.appendLine("OLD DELIVERY PAYMENTS (Previous Recovery):")
+            oldDeliveryPayments.forEachIndexed { idx, entry ->
+                sb.appendLine(
+                    "${idx + 1}. ${entry.customerName} | ${entry.deliveryRef} | Paid: Rs.${entry.amount.toInt()} (${entry.mode})"
+                )
+            }
+            sb.appendLine("Total Old Recovery: Rs.${oldDeliveryPayments.sumOf { it.amount }.toInt()}")
+            sb.appendLine("--------------------------------")
+        }
 
         // 3. Expenses
         sb.appendLine("EXPENSES:")

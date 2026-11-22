@@ -2667,16 +2667,22 @@ class WaterPlantBusinessLogicTest {
     @Test
     fun testUnifiedExpenseCategoriesReflectInInventory() {
         repository.switchUserRole(UserRole.ADMIN)
-        val customName = "Solar Inverter Spares"
-        repository.addExpenseCategory(customName, "سولر پارٹس", ExpenseType.OPEX)
+        val invName = "Solar Inverter Spares"
+        val nonInvName = "Office Internet Bill"
+        repository.addExpenseCategory(invName, "سولر پارٹس", ExpenseType.OPEX, isInventoryCategory = true)
+        repository.addExpenseCategory(nonInvName, "انٹرنیٹ بل", ExpenseType.OPEX, isInventoryCategory = false)
 
         val inventoryCats = repository.getAllInventoryCategories()
         assertTrue(
-            "New Expense category must appear in Other Material inventory categories",
-            inventoryCats.any { it.equals(customName, ignoreCase = true) }
+            "New Inventory Expense category must appear in inventory categories",
+            inventoryCats.any { it.equals(invName, ignoreCase = true) }
         )
-        assertTrue(
-            "Built-in Expense categories must also be present in inventory categories",
+        assertFalse(
+            "Non-Inventory category must NOT appear in inventory categories",
+            inventoryCats.any { it.equals(nonInvName, ignoreCase = true) }
+        )
+        assertFalse(
+            "Built-in Non-Inventory category Fuel / Rent must NOT appear in inventory categories",
             inventoryCats.any { it.equals("Fuel / Rent", ignoreCase = true) }
         )
     }
@@ -3232,16 +3238,28 @@ class WaterPlantBusinessLogicTest {
                 )
             ),
             totalFullDelivered = 5,
-            totalAmount = 750.0
+            totalAmount = 750.0,
+            paymentCollected = 500.0
         )
-        val pay = Payment(
-            id = "p_rep_1",
+        val todayLinkedPay = Payment(
+            id = "p_rep_today",
             receiptNumber = "RCP-101",
             customerId = "c1",
             customerName = "Ali Mart",
             date = "2026-11-21",
             amount = 500.0,
-            paymentMethod = PaymentMethod.CASH
+            paymentMethod = PaymentMethod.CASH,
+            allocations = listOf(PaymentAllocation("inv_d_rep_1", "DEL-101", 500.0))
+        )
+        val oldRecoveryPay = Payment(
+            id = "p_rep_old",
+            receiptNumber = "RCP-102",
+            customerId = "c2",
+            customerName = "Bilal Traders",
+            date = "2026-11-21",
+            amount = 400.0,
+            paymentMethod = PaymentMethod.CASH,
+            allocations = listOf(PaymentAllocation("inv_old_99", "DEL-055", 400.0))
         )
         val exp = Expense(
             id = "e_rep_1",
@@ -3256,20 +3274,24 @@ class WaterPlantBusinessLogicTest {
             periodLabel = "Daily Report",
             dateLabel = "21 Nov 2026",
             periodDeliveries = listOf(del),
-            periodPayments = listOf(pay),
+            periodPayments = listOf(todayLinkedPay, oldRecoveryPay),
             periodExpenses = listOf(exp)
         )
         assertTrue(reportText.startsWith("AAB E BARAAN RO PLANT"))
         assertTrue(reportText.contains("Daily Report — 21 Nov 2026"))
         assertTrue(reportText.contains("DELIVERIES (Customer-wise):"))
-        assertTrue(reportText.contains("Ali Mart"))
-        assertTrue(reportText.contains("PAYMENTS (Customer-wise):"))
+        // One clean line per customer: Name | Qty | Bill | Paid | Bal
+        assertTrue(reportText.contains("Ali Mart | Qty: 5 | Bill: Rs.750 | Paid: Rs.500 | Bal: Rs.250"))
+        // Only old delivery payments appear in OLD DELIVERY PAYMENTS section
+        assertTrue(reportText.contains("OLD DELIVERY PAYMENTS (Previous Recovery):"))
+        assertTrue(reportText.contains("Bilal Traders | DEL-055 | Paid: Rs.400"))
+        assertFalse(reportText.contains("Ali Mart | DEL-101 | Paid: Rs.500"))
         assertTrue(reportText.contains("EXPENSES:"))
         assertTrue(reportText.contains("0321-7654321"))
         assertFalse(reportText.contains("Pending Admin"))
 
         val cust = Customer(id = "c1", name = "Ali Mart", customerCode = "C-001", phone = "03001112222", currentBalance = 250.0)
-        val ledgerText = vm.generateCustomerLedgerText(cust, "2026-11-01", "2026-11-21", listOf(del), listOf(pay))
+        val ledgerText = vm.generateCustomerLedgerText(cust, "2026-11-01", "2026-11-21", listOf(del), listOf(todayLinkedPay))
         assertTrue(ledgerText.contains("Customer Ledger — 2026-11-01 to 2026-11-21"))
         assertTrue(ledgerText.contains("Total Delivered: Rs. 750"))
         assertTrue(ledgerText.contains("Total Paid: Rs. 500"))
@@ -3526,5 +3548,122 @@ class WaterPlantBusinessLogicTest {
         )
         assertEquals("Packing Material", repository.factoryMaterials.value.first { it.id == matId }.itemCategory)
         assertEquals("Bottle Purchase", repository.bottleSizes.value.first { it.id == bottleId }.categoryName)
+    }
+
+    @Test
+    fun testDeliveryEditPaymentReconciliationAbnormalGuardsAndEditNotes() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(
+            Customer(
+                id = "cust_del501_test",
+                name = "DEL-501 Test Customer",
+                phone = "03009998877",
+                area = "Model Town"
+            )
+        )
+        // 1. Record delivery Rs. 1000 with Rs. 1000 collected initially
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_19l",
+                    bottleName = "19 Litre Dispenser Bottle",
+                    quantity = 10,
+                    unitPrice = 100.0,
+                    emptyCollected = 10,
+                    lineTotal = 1000.0
+                )
+            ),
+            deliveryCharges = 0.0,
+            immediatePaymentAmount = 1000.0,
+            paymentMethod = PaymentMethod.CASH,
+            assignedStaffName = "Supervisor",
+            notes = "",
+            deliveryDate = "2026-11-21"
+        )
+        val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+        assertEquals(1000.0, del.totalAmount, 0.01)
+        assertEquals(1000.0, del.paymentCollected, 0.01)
+
+        // 2. Edit delivery paid amount from 1000 -> 500 with edit reason
+        assertTrue(
+            repository.updateDelivery(
+                del.copy(
+                    paymentCollected = 500.0,
+                    paymentMethod = "Partial (Cash)",
+                    lastEditNote = "Supervisor received only 500"
+                )
+            )
+        )
+        val afterReduce = repository.deliveries.value.first { it.id == del.id }
+        val invAfterReduce = repository.invoices.value.first { it.id == afterReduce.invoiceId }
+        val custAfterReduce = repository.getCustomerById(custId)!!
+        val linkedAfterReduce = com.example.util.PdfGenerator.findRelatedPaymentsForDelivery(afterReduce, repository.payments.value)
+
+        assertEquals(500.0, afterReduce.paymentCollected, 0.01)
+        assertEquals(500.0, invAfterReduce.paidAmount, 0.01)
+        assertEquals(500.0, invAfterReduce.balanceDue, 0.01)
+        assertEquals(InvoiceStatus.PARTIALLY_PAID, invAfterReduce.status)
+        assertEquals(500.0, custAfterReduce.currentBalance, 0.01)
+        assertEquals(1, linkedAfterReduce.size)
+        assertEquals(500.0, linkedAfterReduce.sumOf { com.example.util.PdfGenerator.allocatedAmountForDelivery(afterReduce, it) }, 0.01)
+        assertTrue(afterReduce.lastEditNote.contains("Supervisor received only 500"))
+        assertTrue(afterReduce.lastEditNote.contains("Paid: Rs.1000 → Rs.500"))
+
+        // 3. Pay remaining Rs. 500 via Direct Payment (now two Rs. 500 payments exist = Rs. 1000 total)
+        assertTrue(repository.markDeliveryAsPaid(afterReduce.id, amountPaid = 500.0, method = PaymentMethod.CASH))
+        val afterSecondPay = repository.deliveries.value.first { it.id == del.id }
+        assertEquals(1000.0, afterSecondPay.paymentCollected, 0.01)
+        assertEquals(2, com.example.util.PdfGenerator.findRelatedPaymentsForDelivery(afterSecondPay, repository.payments.value).size)
+
+        // 4. Now Admin lowers paid amount back to Rs. 300 (below the subsequent Rs. 500 payment!)
+        //    Reconciliation MUST trim excess payments so total linked payments == Rs. 300 (NEVER 1000 or 500!)
+        assertTrue(
+            repository.updateDelivery(
+                afterSecondPay.copy(
+                    paymentCollected = 300.0,
+                    paymentMethod = "Partial (Cash)"
+                )
+            )
+        )
+        val afterTrim = repository.deliveries.value.first { it.id == del.id }
+        val linkedAfterTrim = com.example.util.PdfGenerator.findRelatedPaymentsForDelivery(afterTrim, repository.payments.value)
+        assertEquals(300.0, afterTrim.paymentCollected, 0.01)
+        assertEquals(300.0, linkedAfterTrim.sumOf { com.example.util.PdfGenerator.allocatedAmountForDelivery(afterTrim, it) }, 0.01)
+        assertEquals(700.0, repository.invoices.value.first { it.id == afterTrim.invoiceId }.balanceDue, 0.01)
+
+        // 5. Abnormal Delivery Edit Guard: reducing bottle qty so Total Bill (Rs. 200) < Paid (Rs. 300) MUST be rejected
+        assertFalse(
+            repository.updateDelivery(
+                afterTrim.copy(
+                    items = listOf(afterTrim.items.first().copy(quantity = 2, lineTotal = 200.0)),
+                    subtotal = 200.0,
+                    totalAmount = 200.0,
+                    paymentCollected = 300.0
+                )
+            )
+        )
+
+        // 6. Exact token matching guard: DEL-501 must NEVER match DEL-5010
+        assertTrue(com.example.util.PdfGenerator.matchesDeliveryNumberToken("Collected on delivery DEL-501", "DEL-501"))
+        assertFalse(com.example.util.PdfGenerator.matchesDeliveryNumberToken("Collected on delivery DEL-5010", "DEL-501"))
+
+        // 7. Expense edit populates structured lastEditNote
+        val exp = repository.recordDailyPlantExpense(
+            categoryId = "cat_fuel",
+            categoryName = "Fuel / Rent",
+            description = "Suzuki Fuel",
+            amount = 1500.0,
+            paymentMethod = PaymentMethod.CASH,
+            date = "2026-11-21"
+        )
+        assertTrue(
+            repository.updateExpense(
+                exp.copy(amount = 1200.0, lastEditNote = "Receipt corrected")
+            )
+        )
+        val editedExp = repository.expenses.value.first { it.id == exp.id }
+        assertTrue(editedExp.lastEditNote.contains("Receipt corrected"))
+        assertTrue(editedExp.lastEditNote.contains("Amt: Rs.1500 → Rs.1200"))
     }
 }

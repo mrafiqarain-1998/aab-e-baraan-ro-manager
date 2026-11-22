@@ -361,11 +361,14 @@ fun DailyCashClosingScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
                                     Icon(
                                         imageVector = when {
                                             isBalanced -> Icons.Default.CheckCircle
@@ -377,46 +380,58 @@ fun DailyCashClosingScreen(
                                             isBalanced -> SuccessGreen
                                             isShortage -> ErrorRed
                                             else -> WarningAmber
-                                        }
+                                        },
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = when {
-                                                isBalanced -> "Balanced! Cash drawer matches 100%"
+                                                isBalanced -> "Balanced! Cash drawer matches"
                                                 isShortage -> "Shortage (کیش میں کمی ہے!)"
                                                 else -> "Surplus (کیش میں زیادتی ہے)"
                                             },
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 11.5.sp,
+                                            fontSize = 11.sp,
                                             color = when {
                                                 isBalanced -> SuccessGreen
                                                 isShortage -> ErrorRed
                                                 else -> WarningAmber
-                                            }
+                                            },
+                                            maxLines = 2
                                         )
                                         Text(
                                             text = when {
                                                 isBalanced -> "حساب بالکل برابر ہے"
-                                                isShortage -> "Will be sent to Admin for approval (فرق ایڈمن کو منظوری کیلئے جائے گا)"
-                                                else -> "Will be sent to Admin for approval (اضافی رقم ایڈمن کو منظوری کیلئے جائے گی)"
+                                                isShortage -> "Admin approval required (منظوری کیلئے جائے گا)"
+                                                else -> "Admin approval required (منظوری کیلئے جائے گی)"
                                             },
-                                            fontSize = 10.sp,
-                                            color = TextSecondaryDark
+                                            fontSize = 9.5.sp,
+                                            color = TextSecondaryDark,
+                                            lineHeight = 13.sp,
+                                            maxLines = 2
                                         )
                                     }
                                 }
 
-                                Text(
-                                    text = if (isBalanced) "Rs. 0" else "Rs. ${difference.toInt()}",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.5.sp,
-                                    color = when {
-                                        isBalanced -> SuccessGreen
-                                        isShortage -> ErrorRed
-                                        else -> WarningAmber
-                                    }
-                                )
+                                Surface(
+                                    shape = RoundedCornerShape(7.dp),
+                                    color = Color.White.copy(alpha = 0.85f)
+                                ) {
+                                    Text(
+                                        text = if (isBalanced) "Rs. 0" else "Rs. ${difference.toInt()}",
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 12.sp,
+                                        color = when {
+                                            isBalanced -> SuccessGreen
+                                            isShortage -> ErrorRed
+                                            else -> WarningAmber
+                                        },
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
                             }
                         }
                         if (!isBalanced) {

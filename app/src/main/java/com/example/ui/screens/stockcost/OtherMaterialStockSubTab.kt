@@ -83,7 +83,7 @@ fun OtherMaterialStockSubTab(
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. Top Bar: 5 Aligned Iconic Buttons in One Row
+        // 1. Top Bar: 3 Material Operations Buttons (Add Item & Add Stock live on Stock & Cost main header)
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -95,22 +95,10 @@ fun OtherMaterialStockSubTab(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
                     val canAddMaterialStock = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.ADD)
                     val canEditMaterials = viewModel.hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.EDIT) || canAddMaterialStock
-                    MaterialActionTile(
-                        label = "Add Items",
-                        icon = Icons.Default.AddBox,
-                        containerColor = WaterSkyLight,
-                        contentColor = WaterNavyPrimary,
-                        enabled = canAddNewItems,
-                        onClick = { showAddItemsDialog = true },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("btn_mat_add_items")
-                    )
                     MaterialActionTile(
                         label = "Issue Material",
                         icon = Icons.Default.Output,
@@ -121,17 +109,6 @@ fun OtherMaterialStockSubTab(
                         modifier = Modifier
                             .weight(1f)
                             .testTag("btn_mat_issue")
-                    )
-                    MaterialActionTile(
-                        label = "Add Stock",
-                        icon = Icons.Default.AddShoppingCart,
-                        containerColor = SuccessGreenLight,
-                        contentColor = SuccessGreen,
-                        enabled = canAddMaterialStock && activeMaterials.isNotEmpty(),
-                        onClick = { showRefillStockDialog = true },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("btn_mat_refill")
                     )
                     MaterialActionTile(
                         label = "Mark Damage",

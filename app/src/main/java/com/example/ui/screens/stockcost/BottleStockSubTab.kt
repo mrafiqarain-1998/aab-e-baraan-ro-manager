@@ -82,7 +82,7 @@ fun BottleStockSubTab(
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. Top Bar: 4 Properly Aligned Iconic Buttons in One Row
+        // 1. Top Bar: 3 Bottle Operations Buttons (Add Item & Add Stock live on Stock & Cost main header)
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -99,17 +99,6 @@ fun BottleStockSubTab(
                         val canIssueBottle = viewModel.hasPermission(AppModule.BOTTLE_ISSUE, PermissionAction.ADD)
                         val canRefillBatch = viewModel.hasPermission(AppModule.REFILL_BATCHES, PermissionAction.ADD)
                         val canEditBottleStock = viewModel.hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT) || canAddBottleStock
-                        BottleActionTile(
-                            label = "Add Stock",
-                            icon = Icons.Default.AddShoppingCart,
-                            containerColor = WaterSkyLight,
-                            contentColor = WaterNavyPrimary,
-                            enabled = canAddBottleStock && activeSizes.isNotEmpty(),
-                            onClick = { showAddStockDialog = true },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("btn_top_add_stock")
-                        )
                         BottleActionTile(
                             label = "Issue Bottle",
                             icon = Icons.Default.Upload,
@@ -148,51 +137,22 @@ fun BottleStockSubTab(
             }
         }
 
-        // 2. Unified Bottle Sizes Section Header + Add New Button
+        // 2. Unified Bottle Sizes Section Header
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Bottle Stock & Sizes (${activeSizes.size})",
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 13.sp,
-                        color = WaterNavyPrimary,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = "بوتل سائز، پلانٹ اسٹاک، گاہک استعمال اور نقصان",
-                        fontSize = 9.5.sp,
-                        color = TextSecondaryDark,
-                        maxLines = 1
-                    )
-                }
-
-                val canAddNewItems = viewModel.hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)
-                if (!isViewOnly && canAddNewItems) {
-                    Button(
-                        onClick = { showAddSizeDialog = true },
-                        colors = waterPrimaryButtonColors(),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .defaultMinSize(minHeight = 38.dp)
-                            .testTag("btn_add_bottle_size")
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Add New",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.5.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Bottle Stock & Sizes (${activeSizes.size})",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 13.sp,
+                    color = WaterNavyPrimary,
+                    maxLines = 1
+                )
+                Text(
+                    text = "بوتل سائز، پلانٹ اسٹاک، گاہک استعمال اور نقصان",
+                    fontSize = 9.5.sp,
+                    color = TextSecondaryDark,
+                    maxLines = 1
+                )
             }
         }
 

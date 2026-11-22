@@ -367,7 +367,7 @@ fun DashboardScreen(
             }
         }
 
-        // Admin Pending Acknowledgments Alert Banner (Payments, Expenses, Cash Closing Diffs, Password Resets)
+        // Approval counts used by the Approvals quick action button
         val canApproveAnything = user.role == UserRole.ADMIN ||
             viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE) ||
             viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE) ||
@@ -377,87 +377,6 @@ fun DashboardScreen(
         val pendingClosingDiffsCount = cashClosings.count { it.isDifferencePendingApproval }
         val pendingPasswordResetsCount = passwordResetRequests.count { !it.isResolved }
         val totalPendingApprovals = pendingPaymentsCount + pendingExpensesCount + pendingClosingDiffsCount + pendingPasswordResetsCount
-
-        if (canApproveAnything && totalPendingApprovals > 0) {
-            item {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = WarningOrangeLight),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.PendingActions,
-                                    contentDescription = null,
-                                    tint = WarningOrange,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(
-                                        text = "Verification Required (تصدیق طلب کارروائی)",
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = WarningOrange
-                                    )
-                                    Text(
-                                        text = buildString {
-                                            val parts = mutableListOf<String>()
-                                            if (pendingPaymentsCount > 0) parts.add("$pendingPaymentsCount Payment(s)")
-                                            if (pendingExpensesCount > 0) parts.add("$pendingExpensesCount Expense(s)")
-                                            if (pendingClosingDiffsCount > 0) parts.add("$pendingClosingDiffsCount Cash Diff(s)")
-                                            if (pendingPasswordResetsCount > 0) parts.add("$pendingPasswordResetsCount Password Reset(s)")
-                                            append(parts.joinToString(" • "))
-                                            append(" awaiting Admin approval")
-                                        },
-                                        fontSize = 10.sp,
-                                        color = TextSecondaryDark
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = onNavigateToApprovals,
-                                colors = waterPrimaryButtonColors(),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(36.dp)
-                                    .testTag("banner_open_approvals_btn"),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Icon(Icons.Default.FactCheck, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    "Review All Approvals ($totalPendingApprovals)",
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         // 2. Primary Financial Cards with Corner Period Filter Button (Today, Yesterday, Weekly, Monthly)
         item {

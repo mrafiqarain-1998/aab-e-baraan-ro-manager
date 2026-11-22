@@ -4395,21 +4395,19 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     /**
-     * Unified categories driven by Expense Categories.
-     * Prioritizes Inventory categories first, followed by other active Expense categories.
+     * Strictly returns Inventory categories configured in Expenses.
+     * Non-inventory categories (Fuel, Salary, Bills, etc.) are excluded from Inventory forms.
      * Deleting a category in Expenses removes it from inventory selection immediately.
      */
     fun getAllInventoryCategories(categories: List<ExpenseCategory> = _expenseCategories.value): List<String> {
         val seen = linkedSetOf<String>()
         val result = mutableListOf<String>()
-        fun addUnique(raw: String) {
-            val clean = raw.trim()
+        categories.filter { it.isInventoryCategory }.forEach { cat ->
+            val clean = cat.name.trim()
             if (clean.isNotEmpty() && seen.add(clean.lowercase())) {
                 result.add(clean)
             }
         }
-        categories.filter { it.isInventoryCategory }.forEach { addUnique(it.name) }
-        categories.filterNot { it.isInventoryCategory }.forEach { addUnique(it.name) }
         return result
     }
 
@@ -6658,12 +6656,48 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val sanitizedNewItems = updatedDelivery.items.map { item ->
             if (isItemReturnable(item)) item else item.copy(emptyCollected = 0)
         }
+        val computedTotalFull = sanitizedNewItems.sumOf { it.quantity }
+        val computedTotalEmpty = sanitizedNewItems.sumOf { it.emptyCollected }
+        if (computedTotalFull <= 0 && updatedDelivery.items.isNotEmpty()) return@synchronized false
+        if (updatedDelivery.totalAmount < 0.0 || updatedDelivery.paymentCollected < 0.0) return@synchronized false
+        if (updatedDelivery.paymentCollected > updatedDelivery.totalAmount + 0.01) return@synchronized false
+
+        val diffParts = mutableListOf<String>()
+        if (old.date != updatedDelivery.date && updatedDelivery.date.isNotBlank()) {
+            diffParts.add("Date: ${old.date} → ${updatedDelivery.date}")
+        }
+        if (old.totalFullDelivered != computedTotalFull) {
+            diffParts.add("Qty: ${old.totalFullDelivered} → $computedTotalFull")
+        }
+        if (old.totalEmptyCollected != computedTotalEmpty) {
+            diffParts.add("Empty Ret: ${old.totalEmptyCollected} → $computedTotalEmpty")
+        }
+        if (kotlin.math.abs(old.totalAmount - updatedDelivery.totalAmount) > 0.01) {
+            diffParts.add("Bill: Rs.${old.totalAmount.toInt()} → Rs.${updatedDelivery.totalAmount.toInt()}")
+        }
+        if (kotlin.math.abs(old.paymentCollected - updatedDelivery.paymentCollected) > 0.01) {
+            diffParts.add("Paid: Rs.${old.paymentCollected.toInt()} → Rs.${updatedDelivery.paymentCollected.toInt()}")
+        }
+        if (old.paymentMethod != updatedDelivery.paymentMethod) {
+            diffParts.add("Mode: ${old.paymentMethod} → ${updatedDelivery.paymentMethod}")
+        }
+        val userReason = updatedDelivery.lastEditNote.trim()
+        val autoSummary = diffParts.joinToString(" • ").ifBlank { "Details updated" }
+        val combinedEditNote = if (userReason.isNotBlank() && !userReason.contains("→")) {
+            "$userReason ($autoSummary)"
+        } else if (userReason.isNotBlank()) {
+            userReason
+        } else {
+            autoSummary
+        }
+
         val normalizedUpdatedDelivery = updatedDelivery.copy(
             items = sanitizedNewItems,
-            totalFullDelivered = sanitizedNewItems.sumOf { it.quantity },
-            totalEmptyCollected = sanitizedNewItems.sumOf { it.emptyCollected },
+            totalFullDelivered = computedTotalFull,
+            totalEmptyCollected = computedTotalEmpty,
             lastEditedAt = System.currentTimeMillis(),
-            lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
+            lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username },
+            lastEditNote = combinedEditNote
         )
 
         val oldRetFull = old.items.filter(::isItemReturnable).sumOf { it.quantity }
@@ -6870,97 +6904,237 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
         }
 
-        // 3.5 Reconcile Linked Payment Records (Prevent duplicate payment counting when delivery payment is edited)
-        val initialPayment = _payments.value.find { p ->
-            (old.deliveryNumber.isNotBlank() && p.notes.contains("Collected on delivery ${old.deliveryNumber}")) ||
-            ((old.invoiceId.isNotBlank() && p.allocations.any { it.invoiceId == old.invoiceId } || p.allocations.any { it.invoiceId == "inv_${old.id}" }) && p.notes.contains("delivery", ignoreCase = true) && !p.notes.contains("Direct payment", ignoreCase = true))
-        }
-
-        // Subsequent payments (wasooli payments recorded later for this delivery/invoice)
-        val subsequentPayments = _payments.value.filter { p ->
-            p.id != initialPayment?.id && (
-                (old.invoiceId.isNotBlank() && p.allocations.any { it.invoiceId == old.invoiceId }) ||
-                p.allocations.any { it.invoiceId == old.id || it.invoiceId == "inv_${old.id}" } ||
-                (old.deliveryNumber.isNotBlank() && p.notes.contains(old.deliveryNumber))
-            )
-        }
-        val subsequentTotal = subsequentPayments.sumOf { p ->
-            val matched = p.allocations.filter {
-                (old.invoiceId.isNotBlank() && it.invoiceId == old.invoiceId) ||
-                    it.invoiceId == old.id ||
-                    it.invoiceId == "inv_${old.id}"
-            }.sumOf { it.allocatedAmount }
-            if (matched > 0.0) matched else p.amount
-        }
-
-        // The revised initial payment collected directly on delivery
-        val revisedInitialAmount = (updatedDelivery.paymentCollected - subsequentTotal).coerceAtLeast(0.0)
-        val resolvedPayMethod = if (updatedDelivery.paymentMethod.contains("Online", ignoreCase = true) ||
-            updatedDelivery.paymentMethod.contains("Bank", ignoreCase = true)
-        ) PaymentMethod.BANK_TRANSFER else PaymentMethod.CASH
-
-        if (initialPayment != null) {
-            if (revisedInitialAmount <= 0.0) {
-                _payments.value = _payments.value.filterNot { it.id == initialPayment.id }
-                deleteDocument("payments", initialPayment.id)
-            } else {
-                val updatedAlloc = initialPayment.allocations.map { alloc ->
-                    if ((old.invoiceId.isNotBlank() && alloc.invoiceId == old.invoiceId) ||
-                        alloc.invoiceId == old.id ||
-                        alloc.invoiceId == "inv_${old.id}"
-                    ) {
-                        alloc.copy(allocatedAmount = revisedInitialAmount)
-                    } else alloc
-                }
-                val updatedPay = initialPayment.copy(
-                    customerId = updatedDelivery.customerId,
-                    customerName = updatedDelivery.customerName,
-                    date = updatedDelivery.date,
-                    amount = revisedInitialAmount,
-                    paymentMethod = resolvedPayMethod,
-                    allocations = updatedAlloc,
-                    lastEditedAt = System.currentTimeMillis(),
-                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
-                )
-                _payments.value = _payments.value.map { if (it.id == initialPayment.id) updatedPay else it }
-                syncDocument("payments", updatedPay.id, updatedPay)
-            }
-            storage.savePayments(_payments.value)
-        } else if (revisedInitialAmount > 0.0) {
-            val activeBusinessPlant = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
-            val newPay = Payment(
-                id = nextRecordId("pay"),
-                receiptNumber = "RCT-${_payments.value.size + 101}",
-                customerId = updatedDelivery.customerId,
-                customerName = updatedDelivery.customerName,
-                amount = revisedInitialAmount,
-                paymentMethod = resolvedPayMethod,
-                allocations = listOf(PaymentAllocation(updatedDelivery.invoiceId.ifEmpty { "inv_${updatedDelivery.id}" }, updatedDelivery.deliveryNumber, revisedInitialAmount)),
-                notes = "Collected on delivery ${updatedDelivery.deliveryNumber}",
-                date = updatedDelivery.date,
-                receivedBy = _currentUser.value.name,
-                receivedByRole = _currentUser.value.role,
-                isAcknowledged = true,
-                acknowledgedBy = _currentUser.value.name,
-                businessId = activeBusinessPlant
-            )
-            _payments.value = listOf(newPay) + _payments.value
-            storage.savePayments(_payments.value)
-            syncDocument("payments", newPay.id, newPay)
-        }
+        // 3.5 Reconcile ALL Linked Payment Records (Guarantees sum(linked payments) == paymentCollected exactly)
+        reconcilePaymentsForDeliveryLocked(old = old, updated = normalizedUpdatedDelivery)
 
         // 4. Update Delivery in state, storage, and Firestore
         _deliveries.value = _deliveries.value.map { if (it.id == normalizedUpdatedDelivery.id) normalizedUpdatedDelivery else it }
         storage.saveDeliveries(_deliveries.value)
         syncDocument("deliveries", normalizedUpdatedDelivery.id, normalizedUpdatedDelivery)
 
-        appendAuditLog(AuditActionType.UPDATE, AppModule.DELIVERIES, updatedDelivery.id, "${updatedDelivery.deliveryNumber} • ${updatedDelivery.customerName}", previousValue = "Rs. ${old.totalAmount.toInt()}", updatedValue = "Rs. ${normalizedUpdatedDelivery.totalAmount.toInt()}")
+        appendAuditLog(
+            AuditActionType.UPDATE,
+            AppModule.DELIVERIES,
+            updatedDelivery.id,
+            "${updatedDelivery.deliveryNumber} • ${updatedDelivery.customerName}",
+            previousValue = "Bill Rs.${old.totalAmount.toInt()}, Paid Rs.${old.paymentCollected.toInt()}",
+            updatedValue = "Bill Rs.${normalizedUpdatedDelivery.totalAmount.toInt()}, Paid Rs.${normalizedUpdatedDelivery.paymentCollected.toInt()} | ${normalizedUpdatedDelivery.lastEditNote}"
+        )
         addNotification(
             "Delivery Updated",
-            "Delivery ${updatedDelivery.deliveryNumber} for ${updatedDelivery.customerName} has been updated.",
+            "Delivery ${updatedDelivery.deliveryNumber} for ${updatedDelivery.customerName}: ${normalizedUpdatedDelivery.lastEditNote}",
             NotificationSeverity.INFO
         )
         true
+        }
+    }
+
+    /**
+     * Reconciles all Payment records linked to [old]/[updated] so that their total allocated amount
+     * matches [updated].paymentCollected EXACTLY — removing duplicate initial payments and trimming
+     * excess subsequent/direct payments when Admin lowers a delivery's paid amount.
+     */
+    private fun reconcilePaymentsForDeliveryLocked(old: Delivery, updated: Delivery) {
+        val linkedPayments = com.example.util.PdfGenerator.findRelatedPaymentsForDelivery(old, _payments.value)
+
+        fun isInitialDeliveryPayment(p: Payment): Boolean {
+            return (old.deliveryNumber.isNotBlank() &&
+                com.example.util.PdfGenerator.matchesDeliveryNumberToken(p.notes, old.deliveryNumber) &&
+                p.notes.contains("Collected on delivery", ignoreCase = true)) ||
+                (p.notes.contains("delivery", ignoreCase = true) &&
+                    !p.notes.contains("Direct payment", ignoreCase = true) &&
+                    !p.notes.contains("wasooli", ignoreCase = true))
+        }
+
+        val initialCandidates = linkedPayments.filter(::isInitialDeliveryPayment).sortedBy { it.createdAt }
+        val primaryInitial = initialCandidates.firstOrNull()
+        val duplicateInitials = if (initialCandidates.size > 1) initialCandidates.drop(1) else emptyList()
+
+        // Remove any duplicate initial delivery payments (e.g. from offline multi-device sync)
+        if (duplicateInitials.isNotEmpty()) {
+            val dupIds = duplicateInitials.map { it.id }.toSet()
+            _payments.value = _payments.value.filterNot { it.id in dupIds }
+            dupIds.forEach { deleteDocument("payments", it) }
+        }
+
+        val initialIds = initialCandidates.map { it.id }.toSet()
+        val subsequentPayments = linkedPayments.filterNot { it.id in initialIds }
+        val subsequentTotal = subsequentPayments.sumOf {
+            com.example.util.PdfGenerator.allocatedAmountForDelivery(old, it)
+        }
+
+        val targetPaid = updated.paymentCollected.coerceIn(0.0, updated.totalAmount)
+        val resolvedPayMethod = if (updated.paymentMethod.contains("Online", ignoreCase = true) ||
+            updated.paymentMethod.contains("Bank", ignoreCase = true)
+        ) PaymentMethod.BANK_TRANSFER else PaymentMethod.CASH
+        val editorName = _currentUser.value.name.ifBlank { _currentUser.value.username }
+        val nowMs = System.currentTimeMillis()
+
+        fun matchesDelAlloc(alloc: PaymentAllocation): Boolean {
+            return (old.invoiceId.isNotBlank() && alloc.invoiceId == old.invoiceId) ||
+                (updated.invoiceId.isNotBlank() && alloc.invoiceId == updated.invoiceId) ||
+                alloc.invoiceId == old.id ||
+                alloc.invoiceId == "inv_${old.id}" ||
+                (old.deliveryNumber.isNotBlank() && alloc.invoiceNumber.equals(old.deliveryNumber, ignoreCase = true))
+        }
+
+        if (subsequentTotal <= targetPaid + 0.01) {
+            // Keep subsequent payments intact (update customer info if delivery customer changed)
+            if (old.customerId != updated.customerId && subsequentPayments.isNotEmpty()) {
+                val subIds = subsequentPayments.map { it.id }.toSet()
+                _payments.value = _payments.value.map { p ->
+                    if (p.id in subIds) {
+                        val updatedSub = p.copy(
+                            customerId = updated.customerId,
+                            customerName = updated.customerName,
+                            lastEditedAt = nowMs,
+                            lastEditedBy = editorName
+                        )
+                        syncDocument("payments", updatedSub.id, updatedSub)
+                        updatedSub
+                    } else p
+                }
+            }
+
+            val revisedInitialAmount = (targetPaid - subsequentTotal).coerceAtLeast(0.0)
+            if (primaryInitial != null) {
+                if (revisedInitialAmount <= 0.01) {
+                    _payments.value = _payments.value.filterNot { it.id == primaryInitial.id }
+                    deleteDocument("payments", primaryInitial.id)
+                } else {
+                    val hasMatchedAlloc = primaryInitial.allocations.any(::matchesDelAlloc)
+                    val updatedAlloc = if (hasMatchedAlloc) {
+                        primaryInitial.allocations.map { alloc ->
+                            if (matchesDelAlloc(alloc)) alloc.copy(allocatedAmount = revisedInitialAmount) else alloc
+                        }
+                    } else {
+                        listOf(
+                            PaymentAllocation(
+                                invoiceId = updated.invoiceId.ifEmpty { "inv_${updated.id}" },
+                                invoiceNumber = updated.deliveryNumber,
+                                allocatedAmount = revisedInitialAmount
+                            )
+                        )
+                    }
+                    val updatedPay = primaryInitial.copy(
+                        customerId = updated.customerId,
+                        customerName = updated.customerName,
+                        date = updated.date,
+                        amount = revisedInitialAmount,
+                        paymentMethod = resolvedPayMethod,
+                        allocations = updatedAlloc,
+                        lastEditedAt = nowMs,
+                        lastEditedBy = editorName
+                    )
+                    _payments.value = _payments.value.map { if (it.id == primaryInitial.id) updatedPay else it }
+                    syncDocument("payments", updatedPay.id, updatedPay)
+                }
+            } else if (revisedInitialAmount > 0.01) {
+                val activeBusinessPlant = _activePlantId.value.ifBlank { PermissionDefaults.DEFAULT_PLANT_ID }
+                val newPay = Payment(
+                    id = nextRecordId("pay"),
+                    receiptNumber = "RCT-${_payments.value.size + 101}",
+                    customerId = updated.customerId,
+                    customerName = updated.customerName,
+                    amount = revisedInitialAmount,
+                    paymentMethod = resolvedPayMethod,
+                    allocations = listOf(
+                        PaymentAllocation(
+                            invoiceId = updated.invoiceId.ifEmpty { "inv_${updated.id}" },
+                            invoiceNumber = updated.deliveryNumber,
+                            allocatedAmount = revisedInitialAmount
+                        )
+                    ),
+                    notes = "Collected on delivery ${updated.deliveryNumber}",
+                    date = updated.date,
+                    receivedBy = _currentUser.value.name,
+                    receivedByRole = _currentUser.value.role,
+                    isAcknowledged = true,
+                    acknowledgedBy = _currentUser.value.name,
+                    businessId = activeBusinessPlant
+                )
+                _payments.value = listOf(newPay) + _payments.value
+                syncDocument("payments", newPay.id, newPay)
+            }
+        } else {
+            // Admin lowered delivery.paymentCollected BELOW existing subsequent/direct payment totals:
+            // 1. Delete primary initial payment (if any)
+            if (primaryInitial != null) {
+                _payments.value = _payments.value.filterNot { it.id == primaryInitial.id }
+                deleteDocument("payments", primaryInitial.id)
+            }
+            // 2. Trim excess from subsequent payments (newest first), preserving allocations to OTHER invoices
+            var excessToTrim = (subsequentTotal - targetPaid).coerceAtLeast(0.0)
+            val orderedSubs = subsequentPayments.sortedByDescending { it.createdAt }
+            for (subPay in orderedSubs) {
+                if (excessToTrim <= 0.01) break
+                val allocForDel = com.example.util.PdfGenerator.allocatedAmountForDelivery(old, subPay)
+                if (allocForDel <= 0.01) continue
+                val trimAmt = kotlin.math.min(excessToTrim, allocForDel)
+                excessToTrim = (excessToTrim - trimAmt).coerceAtLeast(0.0)
+
+                val newPayAmount = (subPay.amount - trimAmt).coerceAtLeast(0.0)
+                if (newPayAmount <= 0.01) {
+                    _payments.value = _payments.value.filterNot { it.id == subPay.id }
+                    deleteDocument("payments", subPay.id)
+                } else {
+                    var remainingTrimOnThis = trimAmt
+                    val updatedAllocs = subPay.allocations.mapNotNull { alloc ->
+                        if (matchesDelAlloc(alloc) && remainingTrimOnThis > 0.01) {
+                            val cut = kotlin.math.min(remainingTrimOnThis, alloc.allocatedAmount)
+                            remainingTrimOnThis -= cut
+                            val left = (alloc.allocatedAmount - cut).coerceAtLeast(0.0)
+                            if (left <= 0.01) null else alloc.copy(allocatedAmount = left)
+                        } else {
+                            alloc
+                        }
+                    }
+                    val updatedSub = subPay.copy(
+                        customerId = updated.customerId,
+                        customerName = updated.customerName,
+                        amount = newPayAmount,
+                        allocations = updatedAllocs,
+                        lastEditedAt = nowMs,
+                        lastEditedBy = editorName
+                    )
+                    _payments.value = _payments.value.map { if (it.id == subPay.id) updatedSub else it }
+                    syncDocument("payments", updatedSub.id, updatedSub)
+                }
+            }
+        }
+        storage.savePayments(_payments.value)
+    }
+
+    /**
+     * One-tap Admin repair for any legacy delivery whose linked Payment records got out of sync
+     * with delivery.paymentCollected (e.g. duplicate Rs. 500 + Rs. 500 entries on an edited slip).
+     */
+    fun reconcileDeliveryPayments(deliveryId: String): Boolean = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.DELIVERIES, PermissionAction.EDIT)) return@synchronized false
+        val del = _deliveries.value.find { it.id == deliveryId } ?: return@synchronized false
+        withSyncAction("Reconcile Payments ${del.deliveryNumber}") {
+            reconcilePaymentsForDeliveryLocked(old = del, updated = del)
+            if (del.invoiceId.isNotEmpty()) {
+                val oldInv = _invoices.value.find { it.id == del.invoiceId }
+                if (oldInv != null) {
+                    val paid = del.paymentCollected.coerceIn(0.0, del.totalAmount)
+                    val bal = (del.totalAmount - paid).coerceAtLeast(0.0)
+                    val st = when {
+                        bal <= 0.01 -> InvoiceStatus.PAID
+                        paid > 0.01 -> InvoiceStatus.PARTIALLY_PAID
+                        else -> InvoiceStatus.UNPAID
+                    }
+                    updateInvoice(oldInv.copy(paidAmount = paid, balanceDue = bal, status = st))
+                }
+            }
+            appendAuditLog(
+                AuditActionType.UPDATE,
+                AppModule.DELIVERIES,
+                del.id,
+                "${del.deliveryNumber} • Payment Records Reconciled",
+                updatedValue = "Paid synced to Rs. ${del.paymentCollected.toInt()}"
+            )
+            true
         }
     }
 
@@ -6998,7 +7172,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val newItemsRaw = updatedExpense.effectiveInventoryItems
             val isInvEdit = old.hasInventoryItems || updatedExpense.hasInventoryItems
 
-            val finalExpense = if (isInvEdit) {
+            val baseExpense = if (isInvEdit) {
                 // Reverse old inventory stock changes first, then apply edited items atomically
                 if (oldItems.isNotEmpty()) {
                     reverseInventoryLineItemsLocked(oldItems)
@@ -7040,16 +7214,48 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     linkedInventoryItemName = single?.itemName.orEmpty(),
                     linkedInventoryQty = single?.quantity ?: 0.0,
                     linkedInventoryUnitCost = single?.unitRate ?: 0.0,
-                    linkedInventoryTransactionId = single?.transactionId.orEmpty(),
-                    lastEditedAt = System.currentTimeMillis(),
-                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
+                    linkedInventoryTransactionId = single?.transactionId.orEmpty()
                 )
             } else {
-                updatedExpense.copy(
-                    lastEditedAt = System.currentTimeMillis(),
-                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
-                )
+                updatedExpense
             }
+
+            val expDiffParts = mutableListOf<String>()
+            if (old.date != baseExpense.date && baseExpense.date.isNotBlank()) {
+                expDiffParts.add("Date: ${old.date} → ${baseExpense.date}")
+            }
+            if (old.categoryName != baseExpense.categoryName) {
+                expDiffParts.add("Cat: ${old.categoryName} → ${baseExpense.categoryName}")
+            }
+            if (kotlin.math.abs(old.amount - baseExpense.amount) > 0.01) {
+                expDiffParts.add("Amt: Rs.${old.amount.toInt()} → Rs.${baseExpense.amount.toInt()}")
+            }
+            if (old.paymentSource != baseExpense.paymentSource) {
+                val oldSrc = if (old.paymentSource == PaymentSource.PAY_FROM_SALE) "Sale" else "Investment"
+                val newSrc = if (baseExpense.paymentSource == PaymentSource.PAY_FROM_SALE) "Sale" else "Investment"
+                expDiffParts.add("Source: $oldSrc → $newSrc")
+            }
+            if (old.paymentMethod.isCash != baseExpense.paymentMethod.isCash) {
+                expDiffParts.add("Mode: ${if (old.paymentMethod.isCash) "Cash" else "Online"} → ${if (baseExpense.paymentMethod.isCash) "Cash" else "Online"}")
+            }
+            if (isInvEdit && oldItems.size != baseExpense.effectiveInventoryItems.size) {
+                expDiffParts.add("Items: ${oldItems.size} → ${baseExpense.effectiveInventoryItems.size}")
+            }
+            val userEditReason = updatedExpense.lastEditNote.trim()
+            val autoExpSummary = expDiffParts.joinToString(" • ").ifBlank { "Voucher details updated" }
+            val combinedExpEditNote = if (userEditReason.isNotBlank() && !userEditReason.contains("→")) {
+                "$userEditReason ($autoExpSummary)"
+            } else if (userEditReason.isNotBlank()) {
+                userEditReason
+            } else {
+                autoExpSummary
+            }
+
+            val finalExpense = baseExpense.copy(
+                lastEditedAt = System.currentTimeMillis(),
+                lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username },
+                lastEditNote = combinedExpEditNote
+            )
 
             _expenses.value = _expenses.value.map { if (it.id == finalExpense.id) finalExpense else it }
             storage.saveExpenses(_expenses.value)
@@ -7060,12 +7266,12 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 finalExpense.id,
                 "${finalExpense.voucherNumber} • ${finalExpense.categoryName}",
                 previousValue = "Rs. ${old.amount.toInt()}",
-                updatedValue = "Rs. ${finalExpense.amount.toInt()}"
+                updatedValue = "Rs. ${finalExpense.amount.toInt()} | ${finalExpense.lastEditNote}"
             )
 
             addNotification(
                 "Expense Updated",
-                "Expense voucher ${finalExpense.voucherNumber} (Rs. ${finalExpense.amount.toInt()}) updated.",
+                "Expense voucher ${finalExpense.voucherNumber}: ${finalExpense.lastEditNote}",
                 NotificationSeverity.INFO
             )
             true
@@ -7111,6 +7317,45 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     mapOf("currentBalance" to payment.amount)
                 )
             }
+            // Revert linked invoices and deliveries so Dues / Delivery List / Detail stay 100% consistent
+            val touchedDeliveryIds = mutableSetOf<String>()
+            payment.allocations.forEach { alloc ->
+                val inv = _invoices.value.find { it.id == alloc.invoiceId }
+                if (inv != null) {
+                    val newPaid = (inv.paidAmount - alloc.allocatedAmount).coerceAtLeast(0.0)
+                    val newBal = (inv.totalAmount - newPaid).coerceAtLeast(0.0)
+                    val newStatus = when {
+                        newBal <= 0.01 -> InvoiceStatus.PAID
+                        newPaid > 0.01 -> InvoiceStatus.PARTIALLY_PAID
+                        else -> InvoiceStatus.UNPAID
+                    }
+                    updateInvoice(inv.copy(paidAmount = newPaid, balanceDue = newBal, status = newStatus))
+                }
+                _deliveries.value = _deliveries.value.map { del ->
+                    val matchesDel = (del.invoiceId.isNotBlank() && del.invoiceId == alloc.invoiceId) ||
+                        del.id == alloc.invoiceId ||
+                        "inv_${del.id}" == alloc.invoiceId ||
+                        (inv != null && del.id == inv.deliveryId)
+                    if (matchesDel) {
+                        touchedDeliveryIds.add(del.id)
+                        val newDelPaid = (del.paymentCollected - alloc.allocatedAmount).coerceAtLeast(0.0)
+                        val baseMode = if (del.paymentMethod.contains("Online", true) || del.paymentMethod.contains("Bank", true)) "Online" else "Cash"
+                        val newMethod = when {
+                            newDelPaid <= 0.01 -> "Unpaid"
+                            newDelPaid + 0.01 >= del.totalAmount -> baseMode
+                            else -> "Partial ($baseMode)"
+                        }
+                        del.copy(paymentCollected = newDelPaid, paymentMethod = newMethod)
+                    } else del
+                }
+            }
+            if (touchedDeliveryIds.isNotEmpty()) {
+                storage.saveDeliveries(_deliveries.value)
+                _deliveries.value.filter { it.id in touchedDeliveryIds }.forEach { del ->
+                    syncDocument("deliveries", del.id, del)
+                }
+            }
+
             _payments.value = _payments.value.filter { it.id != paymentId }
             storage.savePayments(_payments.value)
             deleteDocument("payments", paymentId)
@@ -7416,7 +7661,31 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadCustomerAllocations()?.let { _customerAllocations.value = it } ?: storage.saveCustomerAllocations(_customerAllocations.value)
         storage.loadCustomerRates()?.let { _customerRates.value = it } ?: storage.saveCustomerRates(_customerRates.value)
         storage.loadSecurityDeposits()?.let { _securityDeposits.value = it } ?: storage.saveSecurityDeposits(_securityDeposits.value)
-        storage.loadExpenseCategories()?.let { _expenseCategories.value = it } ?: storage.saveExpenseCategories(_expenseCategories.value)
+        storage.loadExpenseCategories()?.let { loadedCats ->
+            // Safe upgrade migration: if legacy stored categories all had isInventoryCategory=false,
+            // auto-tag known inventory categories without losing any custom categories.
+            val migratedCats = if (loadedCats.isNotEmpty() && loadedCats.none { it.isInventoryCategory }) {
+                val defaultInvIds = SampleData.expenseCategories.filter { it.isInventoryCategory }.map { it.id }.toSet()
+                val updated = loadedCats.map { cat ->
+                    val lc = cat.name.lowercase()
+                    val isKnownInv = cat.id in defaultInvIds ||
+                        lc.contains("bottle") ||
+                        lc.contains("filter") ||
+                        lc.contains("cartridge") ||
+                        lc.contains("packing") ||
+                        lc.contains("chemical") ||
+                        lc.contains("mineral") ||
+                        lc.contains("raw material") ||
+                        lc.contains("ro plant parts") ||
+                        lc.contains("asset") ||
+                        lc.contains("machinery")
+                    if (isKnownInv) cat.copy(isInventoryCategory = true) else cat
+                }
+                storage.saveExpenseCategories(updated)
+                updated
+            } else loadedCats
+            _expenseCategories.value = migratedCats
+        } ?: storage.saveExpenseCategories(_expenseCategories.value)
         storage.loadUserAccounts()?.let { _userAccounts.value = it } ?: storage.saveUserAccounts(_userAccounts.value)
         val (scrubbedAccounts, hadRetiredAdminPass) = scrubRetiredAdminDefaultPasswords(_userAccounts.value)
         if (hadRetiredAdminPass) {

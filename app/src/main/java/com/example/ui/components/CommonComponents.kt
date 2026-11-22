@@ -1345,9 +1345,10 @@ fun formatEditTimestamp(epochMillis: Long): String {
 fun EditMetadataBadge(
     lastEditedAt: Long,
     lastEditedBy: String,
+    lastEditNote: String = "",
     modifier: Modifier = Modifier
 ) {
-    if (lastEditedAt <= 0L && lastEditedBy.isBlank()) return
+    if (lastEditedAt <= 0L && lastEditedBy.isBlank() && lastEditNote.isBlank()) return
     val formattedTime = if (lastEditedAt > 0L) formatEditTimestamp(lastEditedAt) else ""
     val editor = lastEditedBy.ifBlank { "Staff" }
     Surface(
@@ -1360,16 +1361,21 @@ fun EditMetadataBadge(
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.EditNote,
                 contentDescription = "Edit History",
                 tint = WarningAmber,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier
+                    .padding(top = 1.dp)
+                    .size(16.dp)
             )
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
                 Text(
                     text = "Edited by $editor",
                     fontSize = 10.5.sp,
@@ -1382,6 +1388,16 @@ fun EditMetadataBadge(
                         fontSize = 9.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFFC2410C)
+                    )
+                }
+                if (lastEditNote.isNotBlank()) {
+                    Text(
+                        text = "Edit Note: $lastEditNote",
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFF7C2D12),
+                        lineHeight = 13.sp,
+                        modifier = Modifier.testTag("edit_metadata_note_text")
                     )
                 }
             }

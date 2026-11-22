@@ -47,5 +47,6 @@ data class Delivery(
     val createdByUid: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val lastEditedAt: Long = 0L,
-    val lastEditedBy: String = ""
+    val lastEditedBy: String = "",
+    val lastEditNote: String = ""
 )

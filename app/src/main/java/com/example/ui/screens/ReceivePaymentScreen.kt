@@ -510,7 +510,7 @@ fun ReceivePaymentScreen(
                 }
             }
 
-            // 2. Amount and Payment Method
+            // 2. Amount and Cash/Online Payment Mode (Compact — no Full Balance / Clear buttons)
             item {
                 Card(
                     shape = RoundedCornerShape(14.dp),
@@ -518,7 +518,7 @@ fun ReceivePaymentScreen(
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             text = "Payment Amount & Mode (وصولی کی رقم و طریقہ)",
                             fontWeight = FontWeight.Bold,
@@ -552,183 +552,112 @@ fun ReceivePaymentScreen(
                                 .testTag("payment_amount_input")
                         )
 
-                        // Quick Fill Buttons
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            val totalDueForCust = getCustomerDue(cust)
-                            if (totalDueForCust > 0) {
-                                OutlinedButton(
-                                    onClick = {
-                                        if (unpaidInvoices.isNotEmpty()) {
-                                            applyCheckedInvoices(unpaidInvoices.map { it.id }.toSet())
-                                            if (totalDueForCust > unpaidInvoices.sumOf { it.balanceDue }) {
-                                                paymentAmountText = totalDueForCust.toInt().toString()
-                                            }
-                                        } else {
-                                            paymentAmountText = totalDueForCust.toInt().toString()
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                    modifier = Modifier.weight(1f).height(34.dp)
-                                ) {
-                                    Text("Full Balance (Rs. ${totalDueForCust.toInt()})", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    selectedInvoiceIds = emptySet()
-                                    paymentAmountText = ""
-                                    allocations.clear()
-                                },
+                        // Cash / Online 2-Tab Selector immediately below Payment Amount
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(WaterSkyLight.copy(alpha = 0.7f))
+                                .padding(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            val isCashSelected = paymentMethod == PaymentMethod.CASH
+                            Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                modifier = Modifier.weight(0.5f).height(34.dp)
+                                color = if (isCashSelected) WaterNavyPrimary else Color.Transparent,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clickable { paymentMethod = PaymentMethod.CASH }
+                                    .testTag("payment_mode_cash_tab")
                             ) {
-                                Text("Clear", fontSize = 10.sp)
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                    Text(
+                                        text = "Cash (نقد)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCashSelected) Color.White else WaterNavyDark
+                                    )
+                                }
                             }
-                        }
-
-                        // Payment Methods
-                        Text("Payment Mode (طریقہ کار):", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = TextPrimaryDark)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(
-                                PaymentMethod.CASH,
-                                PaymentMethod.BANK_TRANSFER,
-                                PaymentMethod.JAZZCASH,
-                                PaymentMethod.EASYPAISA
-                            ).forEach { method ->
-                                val isSelected = paymentMethod == method
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isSelected) WaterNavyPrimary else WaterSkyLight.copy(alpha = 0.6f),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(34.dp)
-                                        .clickable { paymentMethod = method }
-                                ) {
-                                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                                        Text(
-                                            text = when (method) {
-                                                PaymentMethod.CASH -> "Cash (نقد)"
-                                                PaymentMethod.BANK_TRANSFER -> "Online"
-                                                PaymentMethod.JAZZCASH -> "JazzCash"
-                                                PaymentMethod.EASYPAISA -> "Easypaisa"
-                                                else -> method.label
-                                            },
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSelected) Color.White else WaterNavyDark
-                                        )
-                                    }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (!isCashSelected) WaterNavyPrimary else Color.Transparent,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clickable { paymentMethod = PaymentMethod.BANK_TRANSFER }
+                                    .testTag("payment_mode_online_tab")
+                            ) {
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                    Text(
+                                        text = "Online (آن لائن)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (!isCashSelected) Color.White else WaterNavyDark
+                                    )
                                 }
                             }
                         }
-
-                        // Notes Field
-                        OutlinedTextField(
-                            value = notes,
-                            onValueChange = { notes = it },
-                            label = { Text("Payment Notes / Reference (اختیاری نوٹ)", fontSize = 10.sp) },
-                            placeholder = { Text("e.g. Paid via mobile app or cash receipt", fontSize = 10.sp) },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimaryDark,
-                                unfocusedTextColor = TextPrimaryDark,
-                                focusedBorderColor = WaterNavyPrimary,
-                                unfocusedBorderColor = BorderLight
-                            ),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
                     }
                 }
             }
 
-            // 3. Pending Invoices with Multi-Select Checkboxes & Dynamic Total
+            // 3. Compact Pending Invoices Heading + Multi-Select Checkboxes with Running Total
             if (unpaidInvoices.isNotEmpty()) {
                 item {
-                    Card(
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = WaterSkyLight),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, WaterAqua.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        Text(
+                            text = "Pending Invoices (${unpaidInvoices.size})",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = WaterNavyPrimary
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Pending Invoices (${unpaidInvoices.size})",
-                                        fontWeight = FontWeight.ExtraBold,
-                                        fontSize = 12.sp,
-                                        color = WaterNavyPrimary
-                                    )
-                                    Text(
-                                        text = "جن انوائسز کی رقم وصول ہوئی ہے ان پر ٹک (✓) لگائیں",
-                                        fontSize = 9.5.sp,
-                                        color = TextSecondaryDark
-                                    )
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    val allChecked = selectedInvoiceIds.size == unpaidInvoices.size
-                                    OutlinedButton(
-                                        onClick = {
-                                            if (allChecked) {
-                                                applyCheckedInvoices(emptySet())
-                                            } else {
-                                                applyCheckedInvoices(unpaidInvoices.map { it.id }.toSet())
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier
-                                            .height(30.dp)
-                                            .testTag("toggle_all_invoices_btn")
-                                    ) {
-                                        Text(
-                                            text = if (allChecked) "Uncheck All" else "Select All",
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = WaterNavyPrimary
-                                        )
-                                    }
-                                }
-                            }
-
                             Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreenLight else Color.White,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("selected_invoices_total_banner")
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreenLight else WaterSkyLight,
+                                modifier = Modifier.testTag("selected_invoices_total_banner")
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 10.dp, vertical = 7.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Selected (${selectedInvoiceIds.size}/${unpaidInvoices.size}):",
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreen else TextSecondaryDark
-                                    )
-                                    Text(
-                                        text = "Rs. ${selectedInvoicesTotal.toInt()}",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreen else WaterNavyDark
-                                    )
-                                }
+                                Text(
+                                    text = "Selected (${selectedInvoiceIds.size}): Rs. ${selectedInvoicesTotal.toInt()}",
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreen else WaterNavyDark,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
+                            val allChecked = selectedInvoiceIds.size == unpaidInvoices.size
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Color.White,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, WaterNavyPrimary.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .clickable {
+                                        if (allChecked) {
+                                            applyCheckedInvoices(emptySet())
+                                        } else {
+                                            applyCheckedInvoices(unpaidInvoices.map { it.id }.toSet())
+                                        }
+                                    }
+                                    .testTag("toggle_all_invoices_btn")
+                            ) {
+                                Text(
+                                    text = if (allChecked) "Uncheck All" else "Select All",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WaterNavyPrimary,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
                             }
                         }
                     }
@@ -818,6 +747,36 @@ fun ReceivePaymentScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // 3.5 Notes Field right after Pending Invoices and right before the 2 Action Buttons
+            item {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        OutlinedTextField(
+                            value = notes,
+                            onValueChange = { notes = it },
+                            label = { Text("Payment Notes / Reference (اختیاری نوٹ)", fontSize = 10.sp) },
+                            placeholder = { Text("e.g. Paid via mobile app or cash receipt", fontSize = 10.sp) },
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = TextPrimaryDark,
+                                unfocusedTextColor = TextPrimaryDark,
+                                focusedBorderColor = WaterNavyPrimary,
+                                unfocusedBorderColor = BorderLight
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("payment_notes_input")
+                        )
                     }
                 }
             }

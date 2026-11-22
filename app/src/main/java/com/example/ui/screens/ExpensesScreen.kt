@@ -227,16 +227,22 @@ fun ExpensesScreen(
                     ExpensePeriod.CUSTOM -> if (customStartDate == customEndDate) customStartDate else "$customStartDate — $customEndDate"
                 }
 
-                // Title & Action Row
+                var showFilterDialog by remember { mutableStateOf(false) }
+                val activeFiltersCount = (if (selectedTypeFilter != null) 1 else 0) +
+                    (if (selectedCategoryFilter != null) 1 else 0) +
+                    (if (selectedStatusFilter != ExpenseStatusFilter.ALL) 1 else 0) +
+                    (if (selectedPaymentSourceFilter != null) 1 else 0)
+
+                // Title & Action Row: [Plant Expenses]  [Filter]  [Categories]  [+ Add]
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Plant Expenses",
-                            fontSize = 13.sp,
+                            fontSize = 12.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = WaterNavyDark,
                             maxLines = 1,
@@ -245,7 +251,7 @@ fun ExpensesScreen(
                         )
                         Text(
                             text = dateSubtitle,
-                            fontSize = 9.5.sp,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = WaterAqua,
                             maxLines = 1,
@@ -254,49 +260,75 @@ fun ExpensesScreen(
                         )
                     }
 
-                    if (!isViewOnly) {
+                    // Filter Button placed cleanly between Plant Expenses and Categories
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (activeFiltersCount > 0) WaterSkyButton else WaterSkyLight,
+                        modifier = Modifier
+                            .height(30.dp)
+                            .clickable { showFilterDialog = true }
+                            .testTag("expense_filter_button")
+                    ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (canAddNewItems) {
-                                OutlinedButton(
-                                    onClick = { showNewCategoryDialog = true },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(32.dp)
-                                ) {
-                                    Icon(Icons.Default.Category, contentDescription = "Manage Categories", modifier = Modifier.size(13.dp))
-                                    Spacer(modifier = Modifier.width(3.dp))
-                                    Text(
-                                        text = "Categories",
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
+                            Icon(
+                                imageVector = Icons.Default.FilterList,
+                                contentDescription = "Filter Expenses",
+                                tint = if (activeFiltersCount > 0) WaterSkyButtonContent else WaterNavyDark,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = if (activeFiltersCount > 0) "Filter ($activeFiltersCount)" else "Filter",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (activeFiltersCount > 0) WaterSkyButtonContent else WaterNavyDark,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
 
-                            Button(
-                                onClick = { showAddDialog = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White),
+                    if (!isViewOnly) {
+                        if (canAddNewItems) {
+                            OutlinedButton(
+                                onClick = { showNewCategoryDialog = true },
                                 shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                                modifier = Modifier
-                                    .height(32.dp)
-                                    .testTag("add_expense_button")
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
+                                modifier = Modifier.height(30.dp)
                             ) {
-                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Category, contentDescription = "Manage Categories", modifier = Modifier.size(12.dp))
                                 Spacer(modifier = Modifier.width(3.dp))
                                 Text(
-                                    text = "+ Add Expense",
-                                    fontSize = 9.5.sp,
+                                    text = "Categories",
+                                    fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     softWrap = false
                                 )
                             }
+                        }
+
+                        Button(
+                            onClick = { showAddDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("add_expense_button")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(13.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                text = "Add",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
                     }
                 }
@@ -451,121 +483,34 @@ fun ExpensesScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Payment Source Breakdown & Quick Filter Strip (Both From Sale & Investment Included)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("expense_source_summary_row"),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val sourceChips = listOf(
-                        Triple(null, "All Sources (${periodExpenses.size})", periodExpenses.sumOf { it.amount }),
-                        Triple(PaymentSource.PAY_FROM_SALE, "From Sale", totalFromSale),
-                        Triple(PaymentSource.PAY_FROM_INVESTMENT, "Investment", totalFromInvestment)
-                    )
-                    sourceChips.forEach { (src, title, amt) ->
-                        val isSel = selectedPaymentSourceFilter == src
-                        Surface(
-                            shape = RoundedCornerShape(7.dp),
-                            color = if (isSel) WaterSkyButton else WaterSkyLight.copy(alpha = 0.55f),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(30.dp)
-                                .clickable { selectedPaymentSourceFilter = src }
-                                .testTag("expense_source_filter_${src?.name?.lowercase() ?: "all"}")
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 4.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Text(
-                                    text = if (src == null) title else "$title: Rs.${amt.toInt()}",
-                                    fontSize = 8.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSel) WaterSkyButtonContent else WaterNavyDark,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Compact Filter Button & Count Row
-                var showFilterDialog by remember { mutableStateOf(false) }
-                val activeFiltersCount = (if (selectedTypeFilter != null) 1 else 0) +
-                    (if (selectedCategoryFilter != null) 1 else 0) +
-                    (if (selectedStatusFilter != ExpenseStatusFilter.ALL) 1 else 0) +
-                    (if (selectedPaymentSourceFilter != null) 1 else 0)
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(7.dp),
-                        color = if (activeFiltersCount > 0) WaterSkyButton else WaterSkyLight,
-                        modifier = Modifier
-                            .height(28.dp)
-                            .clickable { showFilterDialog = true }
-                            .testTag("expense_filter_button")
+                if (activeFiltersCount > 0) {
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FilterList,
-                                contentDescription = "Filter Expenses",
-                                tint = if (activeFiltersCount > 0) WaterSkyButtonContent else WaterNavyDark,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (activeFiltersCount > 0) "Filter ($activeFiltersCount Active)" else "Filter",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (activeFiltersCount > 0) WaterSkyButtonContent else WaterNavyDark,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (activeFiltersCount > 0) {
-                            Text(
-                                text = "Reset",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ErrorRed,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.clickable {
-                                    selectedTypeFilter = null
-                                    selectedCategoryFilter = null
-                                    selectedStatusFilter = ExpenseStatusFilter.ALL
-                                    selectedPaymentSourceFilter = null
-                                }
-                            )
-                        }
                         Text(
-                            text = "${filteredExpenses.size} Vouchers",
-                            fontSize = 9.5.sp,
+                            text = "${filteredExpenses.size} Vouchers (Filtered)",
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = TextSecondaryDark,
                             maxLines = 1,
                             softWrap = false
+                        )
+                        Text(
+                            text = "Reset Filters",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ErrorRed,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.clickable {
+                                selectedTypeFilter = null
+                                selectedCategoryFilter = null
+                                selectedStatusFilter = ExpenseStatusFilter.ALL
+                                selectedPaymentSourceFilter = null
+                            }
                         )
                     }
                 }
@@ -1678,7 +1623,8 @@ fun ExpenseDetailDialog(
 
         EditMetadataBadge(
             lastEditedAt = expense.lastEditedAt,
-            lastEditedBy = expense.lastEditedBy
+            lastEditedBy = expense.lastEditedBy,
+            lastEditNote = expense.lastEditNote
         )
 
         if (!expense.isAcknowledged && canApprove) {

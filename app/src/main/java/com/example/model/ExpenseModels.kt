@@ -63,7 +63,8 @@ data class Expense(
     val staffMemberId: String = "",
     val staffMemberName: String = "",
     val lastEditedAt: Long = 0L,
-    val lastEditedBy: String = ""
+    val lastEditedBy: String = "",
+    val lastEditNote: String = ""
 ) {
     /**
      * Unified inventory line items across both new multi-item inventory expenses
