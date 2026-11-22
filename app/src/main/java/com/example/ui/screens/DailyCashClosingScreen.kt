@@ -17,8 +17,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.AppModule
 import com.example.model.CashClosing
 import com.example.model.CashClosingSummary
+import com.example.model.PermissionAction
+import com.example.model.UserRole
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusBadge
 import com.example.ui.theme.*
@@ -32,15 +35,20 @@ fun DailyCashClosingScreen(
     onClosingSubmitted: () -> Unit
 ) {
     val today = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) }
+    val currentUser by viewModel.currentUser.collectAsState()
     val paymentsList by viewModel.payments.collectAsState()
     val expensesList by viewModel.expenses.collectAsState()
-    val cashSummary: CashClosingSummary = remember(today, paymentsList, expensesList) {
+    val previousClosings by viewModel.cashClosings.collectAsState()
+    val cashSummary: CashClosingSummary = remember(today, paymentsList, expensesList, previousClosings) {
         viewModel.getDailyCashSummary(today)
     }
-    val previousClosings by viewModel.cashClosings.collectAsState()
+    val canApproveClosing = currentUser.role == UserRole.ADMIN ||
+        viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)
 
     var actualCashText by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
+    var closingToApprove by remember { mutableStateOf<CashClosing?>(null) }
+    var closingToReject by remember { mutableStateOf<CashClosing?>(null) }
 
     val actualCash = actualCashText.toDoubleOrNull() ?: 0.0
     val difference = actualCash - cashSummary.expectedClosingCash
@@ -390,8 +398,8 @@ fun DailyCashClosingScreen(
                                         Text(
                                             text = when {
                                                 isBalanced -> "حساب بالکل برابر ہے"
-                                                isShortage -> "Check if any expense or refund was unrecorded"
-                                                else -> "Check if any payment was recorded incorrectly"
+                                                isShortage -> "Will be sent to Admin for approval (فرق ایڈمن کو منظوری کیلئے جائے گا)"
+                                                else -> "Will be sent to Admin for approval (اضافی رقم ایڈمن کو منظوری کیلئے جائے گی)"
                                             },
                                             fontSize = 10.sp,
                                             color = TextSecondaryDark
@@ -410,6 +418,13 @@ fun DailyCashClosingScreen(
                                     }
                                 )
                             }
+                        }
+                        if (!isBalanced) {
+                            Text(
+                                text = "Note: If Admin approves, next day opens with actual drawer cash (Rs. ${actualCash.toInt()}). If not approved, next day continues from expected cash (Rs. ${cashSummary.expectedClosingCash.toInt()}).",
+                                fontSize = 9.5.sp,
+                                color = TextSecondaryDark
+                            )
                         }
                     }
 
@@ -478,50 +493,156 @@ fun DailyCashClosingScreen(
                 }
             }
         } else {
-            items(previousClosings) { close ->
+            items(previousClosings, key = { it.id }) { close ->
+                val status = close.effectiveApprovalStatus
+                val (badgeLabel, badgeBg, badgeFg) = when {
+                    close.isBalanced -> Triple("Balanced", SuccessGreenLight, SuccessGreen)
+                    status == "APPROVED" -> Triple("Approved (Drawer Cash)", SuccessGreenLight, SuccessGreen)
+                    status == "REJECTED" -> Triple("Rejected (Expected Cash)", ErrorRedLight, ErrorRed)
+                    else -> Triple("Pending Admin (Diff: ${close.difference.toInt()})", WarningOrangeLight, WarningOrange)
+                }
+
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Column {
-                            Text(
-                                text = close.date,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.5.sp,
-                                color = WaterNavyPrimary
-                            )
-                            Text(
-                                text = "Closed by: ${close.closedBy}",
-                                fontSize = 10.sp,
-                                color = TextSecondaryDark
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = close.date,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    color = WaterNavyPrimary
+                                )
+                                Text(
+                                    text = "Closed by: ${close.closedBy}",
+                                    fontSize = 10.sp,
+                                    color = TextSecondaryDark
+                                )
+                                Text(
+                                    text = "Expected: Rs.${close.expectedClosingCash.toInt()} • Drawer: Rs.${close.actualClosingCash.toInt()}",
+                                    fontSize = 9.5.sp,
+                                    color = TextMuted
+                                )
+                                Text(
+                                    text = "Next Day Opening: Rs. ${close.carryForwardOpeningCash.toInt()}",
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = WaterNavyPrimary
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = "Rs. ${close.actualClosingCash.toInt()}",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = TextPrimaryDark
+                                )
+                                StatusBadge(
+                                    text = badgeLabel,
+                                    backgroundColor = badgeBg,
+                                    textColor = badgeFg
+                                )
+                            }
                         }
 
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = "Rs. ${close.actualClosingCash.toInt()}",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = TextPrimaryDark
-                            )
-                            StatusBadge(
-                                text = if (close.isBalanced) "Balanced" else "Diff: ${close.difference.toInt()}",
-                                backgroundColor = if (close.isBalanced) SuccessGreenLight else ErrorRedLight,
-                                textColor = if (close.isBalanced) SuccessGreen else ErrorRed
-                            )
+                        if (canApproveClosing && close.isDifferencePendingApproval) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { closingToReject = close },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f).height(36.dp)
+                                ) {
+                                    Text("Reject Diff", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Button(
+                                    onClick = { closingToApprove = close },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f).height(36.dp)
+                                ) {
+                                    Text("Approve Diff", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    closingToApprove?.let { closing ->
+        AlertDialog(
+            onDismissRequest = { closingToApprove = null },
+            containerColor = Color.White,
+            title = { Text("Approve Cash Closing Difference?", fontWeight = FontWeight.Bold, color = WaterNavyPrimary) },
+            text = {
+                Text(
+                    "Difference Rs. ${closing.difference.toInt()} will be settled. Next day opens with actual drawer cash (Rs. ${closing.actualClosingCash.toInt()}).",
+                    fontSize = 11.5.sp,
+                    color = TextPrimaryDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.approveCashClosingDifference(closing.id)
+                        closingToApprove = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White)
+                ) {
+                    Text("Approve (منظور)", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { closingToApprove = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    closingToReject?.let { closing ->
+        AlertDialog(
+            onDismissRequest = { closingToReject = null },
+            containerColor = Color.White,
+            title = { Text("Reject Cash Closing Difference?", fontWeight = FontWeight.Bold, color = ErrorRed) },
+            text = {
+                Text(
+                    "Difference will NOT be deducted. Next day continues from Expected Cash (Rs. ${closing.expectedClosingCash.toInt()}).",
+                    fontSize = 11.5.sp,
+                    color = TextPrimaryDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.rejectCashClosingDifference(closing.id)
+                        closingToReject = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White)
+                ) {
+                    Text("Reject (مسترد)", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { closingToReject = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 

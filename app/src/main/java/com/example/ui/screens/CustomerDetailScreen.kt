@@ -31,6 +31,8 @@ import com.example.model.Invoice
 import com.example.model.PermissionAction
 import com.example.model.UserRole
 import com.example.ui.components.BlinkingOrangeDot
+import com.example.ui.components.EditMetadataBadge
+import com.example.ui.components.FromToDateRangeDialog
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.SectionHeader
@@ -38,6 +40,10 @@ import com.example.ui.components.StatusBadge
 import com.example.ui.theme.*
 import com.example.util.PdfGenerator
 import com.example.viewmodel.WaterPlantViewModel
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +58,7 @@ fun CustomerDetailScreen(
     val allCustomers by viewModel.customers.collectAsState()
     val allInvoices by viewModel.invoices.collectAsState()
     val allDeliveries by viewModel.deliveries.collectAsState()
+    val allPayments by viewModel.payments.collectAsState()
     val bottleSizes by viewModel.bottleSizes.collectAsState()
     val inventory by viewModel.inventory.collectAsState()
     val allCustomerAllocations by viewModel.customerAllocations.collectAsState()
@@ -65,6 +72,7 @@ fun CustomerDetailScreen(
     }
     val customerInvoices = allInvoices.filter { it.customerId == currentCust.id }
     val customerDeliveries = allDeliveries.filter { it.customerId == currentCust.id }
+    val customerPayments = allPayments.filter { it.customerId == currentCust.id }
     val thisCustAllocations = allCustomerAllocations.filter { it.customerId == currentCust.id }
     val currentUser by viewModel.currentUser.collectAsState()
     val canEditCustomer = viewModel.hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT)
@@ -87,6 +95,29 @@ fun CustomerDetailScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showUnsafeDeleteWarningDialog by remember { mutableStateOf(false) }
     var selectedInvoiceForDetail by remember { mutableStateOf<Invoice?>(null) }
+
+    // Customer Ledger Date Range State (defaults to current month start .. today)
+    val ledgerSdf = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
+    val defaultLedgerEnd = remember { ledgerSdf.format(Date()) }
+    val defaultLedgerStart = remember {
+        Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1) }.let { ledgerSdf.format(it.time) }
+    }
+    var ledgerFromDate by remember { mutableStateOf(defaultLedgerStart) }
+    var ledgerToDate by remember { mutableStateOf(defaultLedgerEnd) }
+    var showLedgerDateDialog by remember { mutableStateOf(false) }
+    var isLedgerExpanded by remember { mutableStateOf(true) }
+    var ledgerPreviewPdfRequest by remember { mutableStateOf<PdfPreviewRequest?>(null) }
+
+    val ledgerDeliveries = remember(customerDeliveries, ledgerFromDate, ledgerToDate) {
+        val s = minOf(ledgerFromDate, ledgerToDate)
+        val e = maxOf(ledgerFromDate, ledgerToDate)
+        customerDeliveries.filter { it.date in s..e }.sortedWith(compareByDescending<com.example.model.Delivery> { it.date }.thenByDescending { it.createdAt })
+    }
+    val ledgerPayments = remember(customerPayments, ledgerFromDate, ledgerToDate) {
+        val s = minOf(ledgerFromDate, ledgerToDate)
+        val e = maxOf(ledgerFromDate, ledgerToDate)
+        customerPayments.filter { it.date in s..e }.sortedWith(compareByDescending<com.example.model.Payment> { it.date }.thenByDescending { it.createdAt })
+    }
 
     Scaffold(
         topBar = {
@@ -195,6 +226,13 @@ fun CustomerDetailScreen(
                         Text("Address: ${currentCust.address.ifBlank { "—" }} (${currentCust.area.ifBlank { "—" }})", fontSize = 11.5.sp, color = TextPrimaryDark, fontWeight = FontWeight.Medium)
                         Text("Payment Cycle: ${currentCust.paymentCycle.label} • Phone: ${currentCust.phone.ifBlank { "—" }}", fontSize = 10.5.sp, color = TextSecondaryDark)
                         Text("Bottles with Customer: ${currentCust.emptyBottlesOwed} bottles", fontSize = 10.5.sp, color = WaterBlueDeep, fontWeight = FontWeight.Bold)
+                        if (currentCust.lastEditedAt > 0L && currentCust.lastEditedBy.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            EditMetadataBadge(
+                                lastEditedAt = currentCust.lastEditedAt,
+                                lastEditedBy = currentCust.lastEditedBy
+                            )
+                        }
 
                         val missingFields = remember(currentCust.name, currentCust.phone, currentCust.whatsapp, currentCust.area, currentCust.address) {
                             currentCust.missingDetailLabels()
@@ -683,10 +721,229 @@ fun CustomerDetailScreen(
                 }
             }
 
+            // 3.5 Customer Ledger with Date Range (Deliveries + Payments + Totals + Share Text/PDF)
+            item {
+                val totalLedgerDelivered = ledgerDeliveries.sumOf { it.totalAmount }
+                val totalLedgerPaid = ledgerPayments.sumOf { it.amount }
+                val ledgerNet = totalLedgerDelivered - totalLedgerPaid
+                val rangeLabel = if (ledgerFromDate == ledgerToDate) ledgerFromDate else "$ledgerFromDate to $ledgerToDate"
+
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("customer_ledger_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { isLedgerExpanded = !isLedgerExpanded },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.MenuBook, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = "Customer Ledger (کسٹمر لیجر)",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = WaterNavyPrimary
+                                    )
+                                    Text(
+                                        text = "Range: $rangeLabel",
+                                        fontSize = 9.5.sp,
+                                        color = TextSecondaryDark
+                                    )
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = WaterSkyLight,
+                                    modifier = Modifier
+                                        .clickable { showLedgerDateDialog = true }
+                                        .testTag("customer_ledger_date_btn")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.CalendarMonth, contentDescription = "Select Ledger Date Range", tint = WaterNavyPrimary, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Date Range", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = if (isLedgerExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (isLedgerExpanded) "Collapse Ledger" else "Expand Ledger",
+                                    tint = WaterNavyPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
+                        // Totals Row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(shape = RoundedCornerShape(8.dp), color = WaterSkyLight, modifier = Modifier.weight(1f)) {
+                                Column(modifier = Modifier.padding(vertical = 6.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Delivered", fontSize = 8.5.sp, color = TextSecondaryDark)
+                                    Text("Rs. ${totalLedgerDelivered.toInt()}", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = WaterNavyPrimary, maxLines = 1)
+                                }
+                            }
+                            Surface(shape = RoundedCornerShape(8.dp), color = SuccessGreenLight, modifier = Modifier.weight(1f)) {
+                                Column(modifier = Modifier.padding(vertical = 6.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Paid", fontSize = 8.5.sp, color = SuccessGreen)
+                                    Text("Rs. ${totalLedgerPaid.toInt()}", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = SuccessGreen, maxLines = 1)
+                                }
+                            }
+                            Surface(shape = RoundedCornerShape(8.dp), color = if (ledgerNet > 0) ErrorRedLight else WaterSkyLight, modifier = Modifier.weight(1f)) {
+                                Column(modifier = Modifier.padding(vertical = 6.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Period Net", fontSize = 8.5.sp, color = if (ledgerNet > 0) ErrorRed else WaterNavyPrimary)
+                                    Text("Rs. ${ledgerNet.toInt()}", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = if (ledgerNet > 0) ErrorRed else WaterNavyPrimary, maxLines = 1)
+                                }
+                            }
+                        }
+
+                        // Share Text & Share PDF Buttons
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    val txt = viewModel.generateCustomerLedgerText(
+                                        customer = currentCust,
+                                        startDate = ledgerFromDate,
+                                        endDate = ledgerToDate,
+                                        periodDeliveries = ledgerDeliveries,
+                                        periodPayments = ledgerPayments
+                                    )
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_SUBJECT, "Customer Ledger - ${currentCust.name} ($rangeLabel)")
+                                        putExtra(Intent.EXTRA_TEXT, txt)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, "Share Customer Ledger Text"))
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(38.dp)
+                                    .testTag("customer_ledger_share_text_btn")
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Share Text", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Button(
+                                onClick = {
+                                    try {
+                                        val pdfFile = PdfGenerator.generateCustomerLedgerPdf(
+                                            context = context,
+                                            customer = currentCust,
+                                            startDate = ledgerFromDate,
+                                            endDate = ledgerToDate,
+                                            deliveries = ledgerDeliveries,
+                                            payments = ledgerPayments
+                                        )
+                                        ledgerPreviewPdfRequest = PdfPreviewRequest(
+                                            file = pdfFile,
+                                            title = "Ledger: ${currentCust.name} ($rangeLabel)",
+                                            chooserTitle = "Share Customer Ledger PDF",
+                                            whatsAppCaption = "Aab-e-Baraan Customer Ledger for ${currentCust.name} ($rangeLabel)"
+                                        )
+                                    } catch (_: Throwable) {}
+                                },
+                                colors = waterPrimaryButtonColors(),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(38.dp)
+                                    .testTag("customer_ledger_share_pdf_btn")
+                            ) {
+                                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Share PDF", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        if (isLedgerExpanded) {
+                            HorizontalDivider(color = DividerColor)
+                            if (ledgerDeliveries.isEmpty() && ledgerPayments.isEmpty()) {
+                                Text(
+                                    text = "No deliveries or payments in selected date range.",
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            } else {
+                                if (ledgerDeliveries.isNotEmpty()) {
+                                    Text(
+                                        text = "Deliveries (${ledgerDeliveries.size})",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = WaterNavyPrimary
+                                    )
+                                    ledgerDeliveries.forEach { del ->
+                                        val itemsStr = del.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("${del.date} • ${del.deliveryNumber}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = TextPrimaryDark)
+                                                Text(itemsStr.ifBlank { "${del.totalFullDelivered} bottles" }, fontSize = 9.5.sp, color = TextSecondaryDark, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                            Text("Rs. ${del.totalAmount.toInt()}", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+                                        }
+                                    }
+                                }
+                                if (ledgerPayments.isNotEmpty()) {
+                                    if (ledgerDeliveries.isNotEmpty()) HorizontalDivider(color = DividerColor.copy(alpha = 0.6f))
+                                    Text(
+                                        text = "Payments (${ledgerPayments.size})",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SuccessGreen
+                                    )
+                                    ledgerPayments.forEach { pay ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("${pay.date} • ${pay.receiptNumber}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = TextPrimaryDark)
+                                                Text(pay.paymentMethod.label, fontSize = 9.5.sp, color = TextSecondaryDark)
+                                            }
+                                            Text("- Rs. ${pay.amount.toInt()}", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = SuccessGreen)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 4. Invoices List
             item {
                 SectionHeader(
-                    title = "Invoices & Ledger History",
+                    title = "Invoices History",
                     urduTitle = "انوائسز اور بلز"
                 )
             }
@@ -790,6 +1047,27 @@ fun CustomerDetailScreen(
                 }
             }
         }
+    }
+
+    if (showLedgerDateDialog) {
+        FromToDateRangeDialog(
+            initialFromDate = ledgerFromDate,
+            initialToDate = ledgerToDate,
+            title = "Ledger Date Range (لیجر کی تاریخ منتخب کریں)",
+            onDismiss = { showLedgerDateDialog = false },
+            onConfirm = { from, to ->
+                ledgerFromDate = from
+                ledgerToDate = to
+                showLedgerDateDialog = false
+            }
+        )
+    }
+
+    ledgerPreviewPdfRequest?.let { req ->
+        PdfPreviewDialog(
+            request = req,
+            onDismiss = { ledgerPreviewPdfRequest = null }
+        )
     }
 
     val multiTimeBottleSizes = remember(bottleSizes) {

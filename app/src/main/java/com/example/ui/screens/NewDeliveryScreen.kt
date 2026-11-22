@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,14 +21,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.model.*
 import com.example.ui.components.CompactFormTextField
 import com.example.ui.components.MobileFormDialog
@@ -402,123 +408,207 @@ fun NewDeliveryScreen(
                             }
                         }
 
-                        // Dropdown Box for Added Customers
-                        ExposedDropdownMenuBox(
-                            expanded = customerDropdownExpanded,
-                            onExpandedChange = { customerDropdownExpanded = !customerDropdownExpanded },
-                            modifier = Modifier.fillMaxWidth()
+                        // Clickable Customer Picker Field -> opens Focusable Search Dialog so soft keyboard ALWAYS opens
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFF8FAFC),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (customerDropdownExpanded) WaterNavyPrimary else BorderLight
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 50.dp)
+                                .clickable { customerDropdownExpanded = true }
+                                .testTag("delivery_customer_dropdown")
                         ) {
-                            OutlinedTextField(
-                                value = selectedCustomer?.let { "${it.name} (${it.area})" } ?: "",
-                                onValueChange = {},
-                                readOnly = true,
-                                singleLine = true,
-                                placeholder = {
-                                    Text("Choose added customer...", fontSize = 10.5.sp, color = TextMuted, maxLines = 1)
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Person, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(18.dp))
-                                },
-                                trailingIcon = {
-                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = customerDropdownExpanded)
-                                },
-                                textStyle = LocalTextStyle.current.copy(
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimaryDark
-                                ),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = TextPrimaryDark,
-                                    unfocusedTextColor = TextPrimaryDark,
-                                    focusedBorderColor = WaterNavyPrimary,
-                                    unfocusedBorderColor = BorderLight,
-                                    focusedContainerColor = Color(0xFFF8FAFC),
-                                    unfocusedContainerColor = Color(0xFFF8FAFC)
-                                ),
-                                shape = RoundedCornerShape(8.dp),
+                            Row(
                                 modifier = Modifier
-                                    .menuAnchor()
                                     .fillMaxWidth()
-                                    .testTag("delivery_customer_dropdown")
-                            )
-
-                            ExposedDropdownMenu(
-                                expanded = customerDropdownExpanded,
-                                onDismissRequest = { customerDropdownExpanded = false },
-                                modifier = Modifier
-                                    .background(Color.White)
-                                    .heightIn(max = 280.dp)
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Search filter inside dropdown
-                                Box(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-                                    CompactFormTextField(
-                                        value = customerFilterText,
-                                        onValueChange = { customerFilterText = it },
-                                        placeholder = "Search name, phone, area...",
-                                        height = 36.dp,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("delivery_customer_search")
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = WaterNavyPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = selectedCustomer?.let { "${it.name} (${it.area})" }
+                                            ?: "Choose added customer (Search name, phone)...",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (selectedCustomer != null) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selectedCustomer != null) TextPrimaryDark else TextMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                HorizontalDivider(color = BorderLight)
+                                Icon(
+                                    Icons.Default.ArrowDropDown,
+                                    contentDescription = "Choose Customer",
+                                    tint = WaterNavyPrimary
+                                )
+                            }
+                        }
 
-                                val filteredCusts = customers.filter {
-                                    customerFilterText.isBlank() ||
-                                        it.name.contains(customerFilterText, ignoreCase = true) ||
-                                        it.phone.contains(customerFilterText) ||
-                                        it.area.contains(customerFilterText, ignoreCase = true)
-                                }
+                        if (customerDropdownExpanded) {
+                            val searchFocusRequester = remember { FocusRequester() }
+                            val keyboardController = LocalSoftwareKeyboardController.current
+                            LaunchedEffect(Unit) {
+                                kotlinx.coroutines.delay(120)
+                                try {
+                                    searchFocusRequester.requestFocus()
+                                    keyboardController?.show()
+                                } catch (_: Exception) {}
+                            }
 
-                                if (filteredCusts.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("No customers found", fontSize = 10.5.sp, color = TextMuted) },
-                                        onClick = { customerDropdownExpanded = false }
-                                    )
-                                } else {
-                                    filteredCusts.forEach { cust ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(
-                                                            text = cust.name + if (!cust.active) " (Inactive)" else "",
-                                                            fontSize = 11.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = if (cust.active) WaterNavyDark else ErrorRed,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                        Text(
-                                                            text = "${cust.area} • ${cust.phone}",
-                                                            fontSize = 9.5.sp,
-                                                            color = TextSecondaryDark,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
+                            Dialog(
+                                onDismissRequest = { customerDropdownExpanded = false },
+                                properties = DialogProperties(
+                                    usePlatformDefaultWidth = false,
+                                    decorFitsSystemWindows = true
+                                )
+                            ) {
+                                Card(
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.94f)
+                                        .heightIn(max = 520.dp)
+                                        .imePadding()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Select Customer (گاہک تلاش کریں)",
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = WaterNavyPrimary
+                                            )
+                                            IconButton(
+                                                onClick = { customerDropdownExpanded = false },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondaryDark)
+                                            }
+                                        }
+
+                                        OutlinedTextField(
+                                            value = customerFilterText,
+                                            onValueChange = { customerFilterText = it },
+                                            placeholder = { Text("Search name, phone, area...", fontSize = 11.sp) },
+                                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = WaterNavyPrimary) },
+                                            trailingIcon = {
+                                                if (customerFilterText.isNotEmpty()) {
+                                                    IconButton(onClick = { customerFilterText = "" }) {
+                                                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
                                                     }
-                                                    Text(
-                                                        text = if (cust.currentBalance > 0) "Due Rs.${cust.currentBalance.toInt()}" else "Clear",
-                                                        fontSize = 9.5.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = if (cust.currentBalance > 0) ErrorRed else SuccessGreen,
-                                                        maxLines = 1,
-                                                        softWrap = false
-                                                    )
                                                 }
                                             },
-                                            onClick = {
-                                                selectedCustomer = cust
-                                                deliveryLines = emptyList()
-                                                customerFilterText = ""
-                                                customerDropdownExpanded = false
-                                            },
-                                            modifier = Modifier.testTag("select_cust_${cust.id}")
+                                            singleLine = true,
+                                            colors = OutlinedTextFieldDefaults.colors(
+                                                focusedTextColor = TextPrimaryDark,
+                                                unfocusedTextColor = TextPrimaryDark,
+                                                focusedBorderColor = WaterNavyPrimary,
+                                                unfocusedBorderColor = BorderLight
+                                            ),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .focusRequester(searchFocusRequester)
+                                                .testTag("delivery_customer_search")
                                         )
+
+                                        val filteredCusts = remember(customers, customerFilterText) {
+                                            customers.filter {
+                                                customerFilterText.isBlank() ||
+                                                    it.name.contains(customerFilterText, ignoreCase = true) ||
+                                                    it.phone.contains(customerFilterText) ||
+                                                    it.area.contains(customerFilterText, ignoreCase = true)
+                                            }
+                                        }
+
+                                        if (filteredCusts.isEmpty()) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 24.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text("No customers found", fontSize = 11.sp, color = TextMuted)
+                                            }
+                                        } else {
+                                            LazyColumn(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .weight(1f, fill = false),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                items(filteredCusts, key = { it.id }) { cust ->
+                                                    Surface(
+                                                        shape = RoundedCornerShape(10.dp),
+                                                        color = if (selectedCustomer?.id == cust.id) WaterSkyLight else Color(0xFFF8FAFC),
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .clickable {
+                                                                keyboardController?.hide()
+                                                                selectedCustomer = cust
+                                                                deliveryLines = emptyList()
+                                                                customerFilterText = ""
+                                                                customerDropdownExpanded = false
+                                                            }
+                                                            .testTag("select_cust_${cust.id}")
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Column(modifier = Modifier.weight(1f)) {
+                                                                Text(
+                                                                    text = cust.name + if (!cust.active) " (Inactive)" else "",
+                                                                    fontSize = 11.5.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = if (cust.active) WaterNavyDark else ErrorRed,
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                                Text(
+                                                                    text = "${cust.area} • ${cust.phone}",
+                                                                    fontSize = 9.5.sp,
+                                                                    color = TextSecondaryDark,
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                            }
+                                                            Text(
+                                                                text = if (cust.currentBalance > 0) "Due Rs.${cust.currentBalance.toInt()}" else "Clear",
+                                                                fontSize = 9.5.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = if (cust.currentBalance > 0) ErrorRed else SuccessGreen,
+                                                                maxLines = 1,
+                                                                softWrap = false
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

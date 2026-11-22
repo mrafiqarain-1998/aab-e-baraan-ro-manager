@@ -25,14 +25,20 @@ import com.example.model.PaymentSource
 import com.example.viewmodel.DashboardStats
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 object PdfGenerator {
+
+    @Volatile
+    var defaultAdminPhone: String = "+92 300 1234567"
 
     @Volatile
     private var cachedHeaderLogo: Bitmap? = null
 
     @Volatile
     private var cachedWatermarkLogo: Bitmap? = null
+
+    private fun resolvedAdminPhone(): String = defaultAdminPhone.trim().ifBlank { "+92 300 1234567" }
 
     private fun computeInSampleSize(srcWidth: Int, srcHeight: Int, reqSize: Int): Int {
         var inSampleSize = 1
@@ -280,7 +286,7 @@ object PdfGenerator {
                 canvas.drawText(safeBottleName, 52f, y, paint)
                 paint.textSize = 10.5f
                 canvas.drawText("${item.quantity}", 255f, y, paint)
-                canvas.drawText(if (isReturnable) "${item.emptyCollected}" else "Locked", 315f, y, paint)
+                canvas.drawText(if (isReturnable) "${item.emptyCollected}" else "0", 315f, y, paint)
                 canvas.drawText("Rs. ${item.unitPrice.toInt()}", 385f, y, paint)
                 paint.isFakeBoldText = true
                 canvas.drawText("Rs. ${item.lineTotal.toInt()}", 468f, y, paint)
@@ -384,13 +390,13 @@ object PdfGenerator {
                 y += 18f
             }
 
-            // Payment Installments Log
+            // Payment Record Log
             if (relatedPayments.isNotEmpty()) {
                 ensureSpace(36f)
                 paint.isFakeBoldText = true
                 paint.textSize = 10.5f
                 paint.color = Color.rgb(10, 37, 64)
-                canvas.drawText("Payment Installments Record (وصولی تاریخ وار تفصیل):", 40f, y, paint)
+                canvas.drawText("Payment Record (وصولی تاریخ وار تفصیل):", 40f, y, paint)
                 y += 16f
 
                 paint.isFakeBoldText = false
@@ -403,10 +409,9 @@ object PdfGenerator {
                             it.invoiceId == "inv_${delivery.id}"
                     }?.allocatedAmount
                     val allocAmt = matched ?: p.amount
-                    val ackTag = if (p.isAcknowledged) "Cleared" else "Pending Admin Clear"
-                    paint.color = if (p.isAcknowledged) Color.rgb(71, 85, 105) else Color.rgb(180, 83, 9)
+                    paint.color = Color.rgb(51, 65, 85)
                     canvas.drawText(
-                        "${idx + 1}. ${p.receiptNumber} (${p.date}) • Rs. ${allocAmt.toInt()} via ${p.paymentMethod.label} [$ackTag]",
+                        "${idx + 1}. ${p.receiptNumber} (${p.date}) • Rs. ${allocAmt.toInt()} via ${p.paymentMethod.label}",
                         48f,
                         y,
                         paint
@@ -426,7 +431,7 @@ object PdfGenerator {
             paint.color = Color.rgb(148, 163, 184)
             paint.isFakeBoldText = false
             canvas.drawText("This is a computer generated delivery slip from Aab-e-Baraan RO Plant Management System.", 40f, y, paint)
-            canvas.drawText("For plant inquiries or deliveries contact helpline: +92 300 1234567", 40f, y + 14f, paint)
+            canvas.drawText("For plant inquiries or deliveries contact: ${resolvedAdminPhone()}", 40f, y + 14f, paint)
 
             document.finishPage(page)
 
@@ -562,7 +567,7 @@ object PdfGenerator {
         y += 18f
         paint.textSize = 9f
         paint.color = Color.rgb(148, 163, 184)
-        canvas.drawText("Thank you for your payment • Aab-e-Baraan RO Drinking Water Plant.", 40f, y, paint)
+        canvas.drawText("Thank you for your payment • Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 40f, y, paint)
 
         document.finishPage(page)
 
@@ -670,7 +675,7 @@ object PdfGenerator {
         paint.textSize = 10f
         paint.color = Color.rgb(148, 163, 184)
         paint.isFakeBoldText = false
-        canvas.drawText("Generated automatically by Aab-e-Baraan Enterprise Management System.", 40f, y, paint)
+        canvas.drawText("Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 40f, y, paint)
 
         document.finishPage(page)
 
@@ -807,7 +812,7 @@ object PdfGenerator {
         paint.textSize = 10f
         paint.color = Color.rgb(148, 163, 184)
         paint.isFakeBoldText = false
-        canvas.drawText("Thank you for choosing Aab-e-Baraan RO Drinking Water Plant.", 40f, y, paint)
+        canvas.drawText("Thank you for choosing Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 40f, y, paint)
 
         document.finishPage(page)
 
@@ -895,6 +900,7 @@ object PdfGenerator {
         y += 100f
 
         // Details Table Header
+        val invItems = expense.effectiveInventoryItems
         paint.color = Color.rgb(224, 242, 254)
         val tableHeaderRect = RectF(40f, y, 555f, y + 26f)
         canvas.drawRoundRect(tableHeaderRect, 4f, 4f, paint)
@@ -902,21 +908,68 @@ object PdfGenerator {
         paint.color = Color.rgb(10, 37, 64)
         paint.textSize = 11f
         paint.isFakeBoldText = true
-        canvas.drawText("Expense Description", 52f, y + 17f, paint)
-        canvas.drawText("Amount (PKR)", 440f, y + 17f, paint)
+        if (invItems.isNotEmpty()) {
+            canvas.drawText("Inventory Item & Category", 52f, y + 17f, paint)
+            canvas.drawText("Qty x Rate", 315f, y + 17f, paint)
+            canvas.drawText("Amount (PKR)", 445f, y + 17f, paint)
+        } else {
+            canvas.drawText("Expense Description", 52f, y + 17f, paint)
+            canvas.drawText("Amount (PKR)", 440f, y + 17f, paint)
+        }
 
         y += 40f
 
-        paint.color = Color.rgb(30, 41, 59)
-        paint.textSize = 11.5f
-        paint.isFakeBoldText = false
-        canvas.drawText(expense.description.ifBlank { expense.categoryName }, 52f, y, paint)
+        if (invItems.isNotEmpty()) {
+            invItems.forEachIndexed { idx, line ->
+                val qtyStr = if (line.quantity % 1.0 == 0.0) line.quantity.toInt().toString()
+                else String.format(Locale.ENGLISH, "%.2f", line.quantity)
+                val rateStr = if (line.unitRate % 1.0 == 0.0) line.unitRate.toInt().toString()
+                else String.format(Locale.ENGLISH, "%.2f", line.unitRate)
+                val lineTot = if (line.lineTotal > 0.0) line.lineTotal else line.quantity * line.unitRate
+                val catLabel = line.categoryName.ifBlank { "Uncategorized" }
 
-        paint.isFakeBoldText = true
-        paint.color = Color.rgb(185, 28, 28)
-        canvas.drawText("Rs. ${expense.amount.toInt()}", 440f, y, paint)
+                paint.color = Color.rgb(15, 23, 42)
+                paint.textSize = 11f
+                paint.isFakeBoldText = true
+                canvas.drawText("${idx + 1}. ${line.itemName.take(32)}", 52f, y, paint)
 
-        y += 22f
+                paint.isFakeBoldText = false
+                paint.textSize = 10f
+                paint.color = Color.rgb(51, 65, 85)
+                canvas.drawText("$qtyStr x Rs. $rateStr", 315f, y, paint)
+
+                paint.isFakeBoldText = true
+                paint.textSize = 11f
+                paint.color = Color.rgb(185, 28, 28)
+                canvas.drawText("Rs. ${lineTot.toInt()}", 445f, y, paint)
+
+                y += 14f
+                paint.isFakeBoldText = false
+                paint.textSize = 9f
+                paint.color = Color.rgb(100, 116, 139)
+                canvas.drawText("Category: $catLabel (${if (line.itemType == "BOTTLE") "Bottle Stock" else "Material Stock"})", 64f, y, paint)
+                y += 18f
+            }
+        } else {
+            paint.color = Color.rgb(30, 41, 59)
+            paint.textSize = 11.5f
+            paint.isFakeBoldText = false
+            canvas.drawText(expense.description.ifBlank { expense.categoryName }, 52f, y, paint)
+
+            paint.isFakeBoldText = true
+            paint.color = Color.rgb(185, 28, 28)
+            canvas.drawText("Rs. ${expense.amount.toInt()}", 440f, y, paint)
+
+            y += 22f
+        }
+
+        if (expense.invoiceNumber.isNotBlank()) {
+            paint.isFakeBoldText = false
+            paint.textSize = 10f
+            paint.color = Color.rgb(71, 85, 105)
+            canvas.drawText("Invoice / Bill #: ${expense.invoiceNumber}", 52f, y, paint)
+            y += 18f
+        }
         if (expense.notes.isNotBlank()) {
             paint.isFakeBoldText = false
             paint.textSize = 10f
@@ -940,21 +993,19 @@ object PdfGenerator {
         paint.textSize = 15f
         canvas.drawText("Rs. ${expense.amount.toInt()}", 334f, y + 39f, paint)
 
-        y += 78f
-        paint.color = Color.rgb(71, 85, 105)
-        paint.textSize = 10f
-        paint.isFakeBoldText = false
-        val statusText = if (expense.isAcknowledged) {
-            "Verification Status: Verified${if (expense.acknowledgedBy.isNotBlank()) " by ${expense.acknowledgedBy}" else ""}"
-        } else {
-            "Verification Status: Pending Admin Verification"
+        y += 74f
+        if (expense.isAcknowledged) {
+            paint.color = Color.rgb(22, 101, 52)
+            paint.textSize = 10f
+            paint.isFakeBoldText = false
+            val verifiedBySuffix = if (expense.acknowledgedBy.isNotBlank()) " by ${expense.acknowledgedBy}" else ""
+            canvas.drawText("Status: Verified$verifiedBySuffix", 40f, y, paint)
+            y += 20f
         }
-        canvas.drawText(statusText, 40f, y, paint)
 
-        y += 24f
         paint.color = Color.rgb(148, 163, 184)
         paint.textSize = 9f
-        canvas.drawText("Generated by Aab-e-Baraan RO Plant Management System.", 40f, y, paint)
+        canvas.drawText("Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 40f, y, paint)
 
         document.finishPage(page)
 
@@ -972,14 +1023,24 @@ object PdfGenerator {
     fun buildExpenseShareSummary(expense: Expense): String {
         val sourceTxt = if (expense.paymentSource == PaymentSource.PAY_FROM_INVESTMENT) "Investment Account" else "From Sale"
         val modeTxt = if (expense.paymentMethod.isCash) "Cash" else "Online"
+        val itemsBlock = if (expense.effectiveInventoryItems.isNotEmpty()) {
+            val lines = expense.effectiveInventoryItems.mapIndexed { idx, line ->
+                val qtyStr = if (line.quantity % 1.0 == 0.0) line.quantity.toInt().toString()
+                else String.format(Locale.ENGLISH, "%.2f", line.quantity)
+                val lineTot = if (line.lineTotal > 0.0) line.lineTotal else line.quantity * line.unitRate
+                "  ${idx + 1}. ${line.itemName} (${line.categoryName.ifBlank { "Uncategorized" }}): $qtyStr x Rs.${line.unitRate.toInt()} = Rs.${lineTot.toInt()}"
+            }.joinToString("\n")
+            "\nItems:\n$lines"
+        } else ""
+        val invoiceLine = if (expense.invoiceNumber.isNotBlank()) "\nInvoice #: ${expense.invoiceNumber}" else ""
         return """
             *AAB-E-BARAAN RO PLANT - EXPENSE VOUCHER*
             Voucher #: ${expense.voucherNumber}
             Date: ${expense.date}
-            Type: ${expense.expenseType.name}
-            Category: ${expense.categoryName}
-            Description: ${expense.description}
-            Amount: Rs. ${expense.amount.toInt()}
+            Type: ${expense.expenseType.name} (${if (expense.hasInventoryItems) "Inventory" else "Non-Inventory"})
+            Category: ${expense.categoryName.ifBlank { "Uncategorized" }}
+            Description: ${expense.description}$itemsBlock$invoiceLine
+            Total Amount: Rs. ${expense.amount.toInt()}
             Vendor: ${expense.payee.ifBlank { "General" }}
             Payment Source: $sourceTxt
             Payment Mode: $modeTxt
@@ -1086,7 +1147,7 @@ object PdfGenerator {
                 paint.color = Color.rgb(100, 116, 139)
                 paint.textSize = 8f
                 paint.isFakeBoldText = false
-                c.drawText("Aab-e-Baraan RO Plant Management System • Complete $periodLabel Statement", 30f, 828f, paint)
+                c.drawText("Aab-e-Baraan RO Plant • Contact: ${resolvedAdminPhone()} • $periodLabel Statement", 30f, 828f, paint)
                 c.drawText("Page $currentPage", 528f, 828f, paint)
             }
 
@@ -1185,36 +1246,13 @@ object PdfGenerator {
                 211f, y, cardW, if (netOperatingProfit >= 0) Color.rgb(22, 101, 52) else Color.rgb(185, 28, 28)
             )
             drawMiniKpi(
-                "Pending Admin Approval",
-                "${unapprovedDeliveriesCount + unapprovedPayments.size + unapprovedExpenses.size} Items",
-                "Del:$unapprovedDeliveriesCount Pay:${unapprovedPayments.size} Exp:${unapprovedExpenses.size}",
+                "Empties Returned",
+                "$totalEmptiesReturned Units",
+                "Full Delivered: $totalBottlesDelivered Units",
                 392f, y, cardW,
-                if (unapprovedDeliveriesCount + unapprovedPayments.size + unapprovedExpenses.size > 0) Color.rgb(180, 83, 9) else Color.rgb(22, 101, 52)
+                Color.rgb(2, 132, 199)
             )
-            y += 56f
-
-            // Prominent Unapproved Notice Banner if any unapproved records exist
-            if (unapprovedDeliveriesCount > 0 || unapprovedPayments.isNotEmpty() || unapprovedExpenses.isNotEmpty()) {
-                paint.color = Color.rgb(255, 247, 237)
-                val warnRect = RectF(30f, y, 565f, y + 24f)
-                canvas.drawRoundRect(warnRect, 5f, 5f, paint)
-                paint.color = Color.rgb(234, 88, 12)
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 0.8f
-                canvas.drawRoundRect(warnRect, 5f, 5f, paint)
-                paint.style = Paint.Style.FILL
-
-                paint.textSize = 8.4f
-                paint.isFakeBoldText = true
-                paint.color = Color.rgb(154, 52, 18)
-                val unapprovedPaySum = unapprovedPayments.sumOf { it.amount }.toInt()
-                val unapprovedExpSum = unapprovedExpenses.sumOf { it.amount }.toInt()
-                canvas.drawText(
-                    "Note: Includes UNAPPROVED items — ${unapprovedPayments.size} Pending Payments (Rs. $unapprovedPaySum) & ${unapprovedExpenses.size} Unverified Expenses (Rs. $unapprovedExpSum)",
-                    38f, y + 15.5f, paint
-                )
-                y += 32f
-            }
+            y += 58f
 
             // ==========================================================
             // SECTION 1: DAILY DELIVERY DETAILS (CUSTOMER & DATE WISE)
@@ -1231,7 +1269,7 @@ object PdfGenerator {
                 canvas.drawText("Bill", 374f, y + 13.5f, paint)
                 canvas.drawText("Paid", 420f, y + 13.5f, paint)
                 canvas.drawText("Due", 464f, y + 13.5f, paint)
-                canvas.drawText("Approval/Status", 502f, y + 13.5f, paint)
+                canvas.drawText("Status", 506f, y + 13.5f, paint)
                 y += 24f
             }
 
@@ -1307,20 +1345,18 @@ object PdfGenerator {
 
                     val statusLabel = when {
                         del.status == DeliveryStatus.CANCELLED -> "Cancelled"
-                        del.status == DeliveryStatus.PENDING -> "Unapproved"
-                        hasUnapprovedPay -> "Unapproved"
-                        dueAmt <= 0.0 -> "Approved/Paid"
+                        dueAmt <= 0.0 -> "Paid"
                         paidAmt > 0.0 -> "Partial Due"
                         else -> "Credit Due"
                     }
                     paint.textSize = 7.4f
                     paint.isFakeBoldText = true
                     paint.color = when {
-                        isUnapprovedDelivery -> Color.rgb(180, 83, 9)
+                        del.status == DeliveryStatus.CANCELLED -> Color.rgb(100, 116, 139)
                         dueAmt <= 0.0 -> Color.rgb(22, 101, 52)
                         else -> Color.rgb(185, 28, 28)
                     }
-                    canvas.drawText(statusLabel, 502f, y + 3f, paint)
+                    canvas.drawText(statusLabel, 506f, y + 3f, paint)
 
                     paint.color = Color.rgb(226, 232, 240)
                     canvas.drawLine(30f, y + 15f, 565f, y + 15f, paint)
@@ -1345,7 +1381,7 @@ object PdfGenerator {
                 canvas.drawText("Mode", 312f, y + 13.5f, paint)
                 canvas.drawText("Received By", 376f, y + 13.5f, paint)
                 canvas.drawText("Amount", 448f, y + 13.5f, paint)
-                canvas.drawText("Admin Status", 502f, y + 13.5f, paint)
+                canvas.drawText("Status", 506f, y + 13.5f, paint)
                 y += 24f
             }
 
@@ -1435,8 +1471,8 @@ object PdfGenerator {
                     canvas.drawText("Rs.${row.amount.toInt()}", 448f, y + 2f, paint)
 
                     paint.textSize = 7.4f
-                    paint.color = if (row.isApproved) Color.rgb(22, 101, 52) else Color.rgb(180, 83, 9)
-                    canvas.drawText(if (row.isApproved) "Cleared" else "Unapproved", 502f, y + 2f, paint)
+                    paint.color = Color.rgb(22, 101, 52)
+                    canvas.drawText("Received", 506f, y + 2f, paint)
 
                     paint.color = Color.rgb(226, 232, 240)
                     canvas.drawLine(30f, y + 11f, 565f, y + 11f, paint)
@@ -1460,7 +1496,7 @@ object PdfGenerator {
                 canvas.drawText("Description & Payee", 204f, y + 13.5f, paint)
                 canvas.drawText("Source/Mode", 374f, y + 13.5f, paint)
                 canvas.drawText("Amount", 448f, y + 13.5f, paint)
-                canvas.drawText("Admin Status", 502f, y + 13.5f, paint)
+                canvas.drawText("Type", 506f, y + 13.5f, paint)
                 y += 24f
             }
 
@@ -1519,8 +1555,8 @@ object PdfGenerator {
                     canvas.drawText("Rs.${exp.amount.toInt()}", 448f, y + 3f, paint)
 
                     paint.textSize = 7.4f
-                    paint.color = if (isVerified) Color.rgb(22, 101, 52) else Color.rgb(180, 83, 9)
-                    canvas.drawText(if (isVerified) "Verified" else "Unapproved", 502f, y + 3f, paint)
+                    paint.color = Color.rgb(51, 65, 85)
+                    canvas.drawText(exp.expenseType.name, 506f, y + 3f, paint)
 
                     paint.color = Color.rgb(226, 232, 240)
                     canvas.drawLine(30f, y + 15f, 565f, y + 15f, paint)
@@ -1564,6 +1600,259 @@ object PdfGenerator {
 
             val safePeriod = periodLabel.replace(Regex("[^a-zA-Z0-9_-]"), "_")
             val file = File(context.cacheDir, "Statement_${safePeriod}_${System.currentTimeMillis()}.pdf")
+            FileOutputStream(file).use { fos ->
+                document.writeTo(fos)
+                fos.flush()
+            }
+            return file
+        } finally {
+            try { document.close() } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * Generates a clean, multi-page A4 Customer Ledger Statement PDF for a custom date range.
+     * Shows Deliveries, Payments, Period Totals, and Account Balance with Admin Contact Number.
+     */
+    fun generateCustomerLedgerPdf(
+        context: Context,
+        customer: Customer,
+        startDate: String,
+        endDate: String,
+        deliveries: List<Delivery>,
+        payments: List<Payment>
+    ): File {
+        val document = PdfDocument()
+        try {
+            val rangeDeliveries = deliveries
+                .filter { it.customerId == customer.id && it.date in startDate..endDate }
+                .sortedWith(compareBy<Delivery> { it.date }.thenBy { it.createdAt })
+            val rangePayments = payments
+                .filter { it.customerId == customer.id && it.date in startDate..endDate }
+                .sortedWith(compareBy<Payment> { it.date }.thenBy { it.createdAt })
+
+            val totalDelivered = rangeDeliveries.sumOf { it.totalAmount }
+            val totalBottles = rangeDeliveries.sumOf { it.totalFullDelivered }
+            val totalEmpties = rangeDeliveries.sumOf { it.totalEmptyCollected }
+            val totalPaid = rangePayments.sumOf { it.amount }
+            val periodNet = totalDelivered - totalPaid
+
+            data class LedgerPdfEntry(
+                val date: String,
+                val createdAt: Long,
+                val ref: String,
+                val description: String,
+                val debit: Double,
+                val credit: Double
+            )
+
+            val entries = buildList {
+                rangeDeliveries.forEach { d ->
+                    val itemsDesc = d.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
+                        .ifBlank { "${d.totalFullDelivered} Bottles" }
+                    add(
+                        LedgerPdfEntry(
+                            date = d.date,
+                            createdAt = d.createdAt,
+                            ref = d.deliveryNumber,
+                            description = "Delivery: $itemsDesc (Ret: ${d.totalEmptyCollected})",
+                            debit = d.totalAmount,
+                            credit = 0.0
+                        )
+                    )
+                }
+                rangePayments.forEach { p ->
+                    add(
+                        LedgerPdfEntry(
+                            date = p.date,
+                            createdAt = p.createdAt,
+                            ref = p.receiptNumber,
+                            description = "Payment Received (${p.paymentMethod.label.substringBefore(" (")})",
+                            debit = 0.0,
+                            credit = p.amount
+                        )
+                    )
+                }
+            }.sortedWith(compareBy<LedgerPdfEntry> { it.date }.thenBy { it.createdAt })
+
+            val paint = Paint().apply { isAntiAlias = true }
+            var pageNum = 1
+            var page = document.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNum).create())
+            var canvas = page.canvas
+            var y = 104f
+
+            fun drawHeader(c: Canvas, pNum: Int) {
+                paint.color = Color.rgb(10, 37, 64)
+                c.drawRect(0f, 0f, 595f, 84f, paint)
+                drawHeaderLogoAndWatermark(context, c)
+
+                paint.color = Color.WHITE
+                paint.textSize = 17.5f
+                paint.isFakeBoldText = true
+                c.drawText("AAB-E-BARAAN RO DRINKING WATER PLANT", 30f, 34f, paint)
+
+                paint.textSize = 10f
+                paint.isFakeBoldText = true
+                paint.color = Color.rgb(186, 230, 253)
+                val rangeLabel = if (startDate == endDate) startDate else "$startDate to $endDate"
+                c.drawText("Customer Ledger Statement (کسٹمر کھاتہ) • $rangeLabel", 30f, 54f, paint)
+
+                paint.textSize = 8.6f
+                paint.isFakeBoldText = false
+                paint.color = Color.rgb(224, 242, 254)
+                c.drawText("Contact: ${resolvedAdminPhone()}  |  Page $pNum", 30f, 71f, paint)
+            }
+
+            fun drawFooter(c: Canvas, pNum: Int) {
+                paint.color = Color.rgb(226, 232, 240)
+                c.drawLine(30f, 814f, 565f, 814f, paint)
+                paint.color = Color.rgb(100, 116, 139)
+                paint.textSize = 8f
+                paint.isFakeBoldText = false
+                c.drawText("Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 30f, 828f, paint)
+                c.drawText("Page $pNum", 528f, 828f, paint)
+            }
+
+            fun drawLedgerTableHeader() {
+                paint.color = Color.rgb(224, 242, 254)
+                canvas.drawRect(30f, y, 565f, y + 22f, paint)
+                paint.color = Color.rgb(10, 37, 64)
+                paint.textSize = 8.5f
+                paint.isFakeBoldText = true
+                canvas.drawText("Date", 36f, y + 14.5f, paint)
+                canvas.drawText("Ref #", 94f, y + 14.5f, paint)
+                canvas.drawText("Particulars (تفصیل)", 168f, y + 14.5f, paint)
+                canvas.drawText("Bill (Debit)", 405f, y + 14.5f, paint)
+                canvas.drawText("Paid (Credit)", 485f, y + 14.5f, paint)
+                y += 28f
+            }
+
+            fun ensureSpace(needed: Float, redrawTableHeader: Boolean = false) {
+                if (y + needed > 800f) {
+                    drawFooter(canvas, pageNum)
+                    document.finishPage(page)
+                    pageNum += 1
+                    page = document.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNum).create())
+                    canvas = page.canvas
+                    drawHeader(canvas, pageNum)
+                    y = 104f
+                    if (redrawTableHeader) drawLedgerTableHeader()
+                }
+            }
+
+            drawHeader(canvas, pageNum)
+
+            // Customer Card
+            paint.color = Color.rgb(241, 245, 249)
+            canvas.drawRoundRect(RectF(30f, y, 565f, y + 52f), 8f, 8f, paint)
+            paint.color = Color.rgb(15, 23, 42)
+            paint.textSize = 11.5f
+            paint.isFakeBoldText = true
+            canvas.drawText("Customer: ${truncateText(customer.name, 36)}", 44f, y + 20f, paint)
+            paint.isFakeBoldText = false
+            paint.textSize = 9.8f
+            paint.color = Color.rgb(51, 65, 85)
+            canvas.drawText("Phone: ${customer.phone.ifBlank { "N/A" }}   |   Area: ${customer.area.ifBlank { "-" }}", 44f, y + 39f, paint)
+            paint.isFakeBoldText = true
+            paint.color = if (customer.currentBalance > 0) Color.rgb(185, 28, 28) else Color.rgb(22, 101, 52)
+            canvas.drawText("Current Balance: Rs. ${customer.currentBalance.toInt()}", 380f, y + 22f, paint)
+            paint.isFakeBoldText = false
+            paint.color = Color.rgb(71, 85, 105)
+            canvas.drawText("Bottles: $totalBottles Full / $totalEmpties Ret", 380f, y + 39f, paint)
+            y += 66f
+
+            // 3 Summary Cards
+            fun drawSummaryPill(label: String, value: String, x: Float, valColor: Int) {
+                paint.color = Color.rgb(248, 250, 252)
+                val r = RectF(x, y, x + 172f, y + 44f)
+                canvas.drawRoundRect(r, 6f, 6f, paint)
+                paint.color = Color.rgb(203, 213, 225)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 0.8f
+                canvas.drawRoundRect(r, 6f, 6f, paint)
+                paint.style = Paint.Style.FILL
+
+                paint.color = Color.rgb(100, 116, 139)
+                paint.textSize = 8.2f
+                paint.isFakeBoldText = false
+                canvas.drawText(label, x + 10f, y + 15f, paint)
+
+                paint.color = valColor
+                paint.textSize = 12.5f
+                paint.isFakeBoldText = true
+                canvas.drawText(value, x + 10f, y + 34f, paint)
+            }
+
+            drawSummaryPill("Period Deliveries (${rangeDeliveries.size})", "Rs. ${totalDelivered.toInt()}", 30f, Color.rgb(10, 37, 64))
+            drawSummaryPill("Period Payments (${rangePayments.size})", "Rs. ${totalPaid.toInt()}", 211f, Color.rgb(22, 101, 52))
+            drawSummaryPill("Period Net Difference", "Rs. ${periodNet.toInt()}", 392f, if (periodNet > 0) Color.rgb(185, 28, 28) else Color.rgb(22, 101, 52))
+            y += 58f
+
+            drawLedgerTableHeader()
+
+            if (entries.isEmpty()) {
+                paint.color = Color.rgb(100, 116, 139)
+                paint.textSize = 10f
+                paint.isFakeBoldText = false
+                canvas.drawText("No deliveries or payments recorded in this date range.", 40f, y + 8f, paint)
+                y += 28f
+            } else {
+                entries.forEachIndexed { idx, entry ->
+                    ensureSpace(22f, redrawTableHeader = true)
+                    if (idx % 2 == 1) {
+                        paint.color = Color.rgb(248, 250, 252)
+                        canvas.drawRect(30f, y - 10f, 565f, y + 10f, paint)
+                    }
+                    paint.textSize = 8.2f
+                    paint.isFakeBoldText = false
+                    paint.color = Color.rgb(51, 65, 85)
+                    canvas.drawText(entry.date, 36f, y + 2f, paint)
+                    canvas.drawText(truncateText(entry.ref, 12), 94f, y + 2f, paint)
+
+                    paint.color = Color.rgb(15, 23, 42)
+                    canvas.drawText(truncateText(entry.description, 44), 168f, y + 2f, paint)
+
+                    paint.isFakeBoldText = true
+                    if (entry.debit > 0.0) {
+                        paint.color = Color.rgb(10, 37, 64)
+                        canvas.drawText("Rs. ${entry.debit.toInt()}", 405f, y + 2f, paint)
+                    } else {
+                        paint.color = Color.rgb(148, 163, 184)
+                        canvas.drawText("-", 405f, y + 2f, paint)
+                    }
+
+                    if (entry.credit > 0.0) {
+                        paint.color = Color.rgb(22, 101, 52)
+                        canvas.drawText("Rs. ${entry.credit.toInt()}", 485f, y + 2f, paint)
+                    } else {
+                        paint.color = Color.rgb(148, 163, 184)
+                        canvas.drawText("-", 485f, y + 2f, paint)
+                    }
+
+                    paint.color = Color.rgb(226, 232, 240)
+                    canvas.drawLine(30f, y + 10f, 565f, y + 10f, paint)
+                    y += 20f
+                }
+            }
+
+            // Totals Footer Row
+            ensureSpace(54f)
+            y += 6f
+            paint.color = Color.rgb(241, 245, 249)
+            canvas.drawRoundRect(RectF(30f, y, 565f, y + 36f), 6f, 6f, paint)
+            paint.color = Color.rgb(10, 37, 64)
+            paint.textSize = 9.5f
+            paint.isFakeBoldText = true
+            canvas.drawText("PERIOD TOTALS:", 42f, y + 22f, paint)
+            canvas.drawText("Rs. ${totalDelivered.toInt()}", 405f, y + 22f, paint)
+            paint.color = Color.rgb(22, 101, 52)
+            canvas.drawText("Rs. ${totalPaid.toInt()}", 485f, y + 22f, paint)
+
+            drawFooter(canvas, pageNum)
+            document.finishPage(page)
+
+            val safeName = customer.name.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(24)
+            val file = File(context.cacheDir, "Ledger_${safeName}_${startDate}_to_${endDate}.pdf")
             FileOutputStream(file).use { fos ->
                 document.writeTo(fos)
                 fos.flush()

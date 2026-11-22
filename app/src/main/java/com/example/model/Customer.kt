@@ -42,7 +42,9 @@ data class Customer(
     val businessId: String = "aab_e_baraan_plant_01",
     val createdBy: String = "",
     val createdByUid: String = "",
-    val createdAt: Long = 0L
+    val createdAt: Long = 0L,
+    val lastEditedAt: Long = 0L,
+    val lastEditedBy: String = ""
 ) {
     val effectiveSecurityDeposit: Double get() = if (securityDeposit > 0) securityDeposit else bottleDeposit
 

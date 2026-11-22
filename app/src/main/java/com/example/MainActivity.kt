@@ -65,7 +65,8 @@ enum class AppScreen(val title: String, val urduTitle: String, val icon: ImageVe
     USER_MANAGEMENT("Staff Login Accounts", "عملہ لاگ ان", Icons.Default.AdminPanelSettings),
     BACKUP_RESTORE("Backup & Restore", "بیک اپ اور بحالی", Icons.Default.CloudSync),
     AUDIT_HISTORY("Audit Trail", "آڈٹ ریکارڈ", Icons.Default.History),
-    SYNC_CENTER("Sync & Branches", "سنک و برانچز", Icons.Default.CloudDone)
+    SYNC_CENTER("Sync & Branches", "سنک و برانچز", Icons.Default.CloudDone),
+    APPROVALS("Approvals", "منظوریاں", Icons.Default.FactCheck)
 }
 
 class MainActivity : ComponentActivity() {
@@ -159,21 +160,25 @@ fun MainAppScaffold(
     val canManageStaff = viewModel.hasPermission(com.example.model.AppModule.STAFF_MANAGEMENT, com.example.model.PermissionAction.VIEW)
     val canManageBackup = viewModel.hasPermission(com.example.model.AppModule.SETTINGS, com.example.model.PermissionAction.VIEW)
     val canViewAudit = viewModel.hasPermission(com.example.model.AppModule.AUDIT_HISTORY, com.example.model.PermissionAction.VIEW)
+    val canAccessApprovals = currentUser.role == com.example.model.UserRole.ADMIN ||
+        viewModel.hasPermission(com.example.model.AppModule.EXPENSES, com.example.model.PermissionAction.APPROVE) ||
+        viewModel.hasPermission(com.example.model.AppModule.PAYMENTS_BALANCES, com.example.model.PermissionAction.APPROVE) ||
+        viewModel.hasPermission(com.example.model.AppModule.STAFF_MANAGEMENT, com.example.model.PermissionAction.MANAGE)
     val notificationsEnabled by viewModel.notificationsEnabled.collectAsState()
 
     val permittedNavItems = remember(
         currentUser,
         canViewDashboard,
         canViewDeliveries,
-        canViewCustomers,
         canViewExpenses,
+        canViewCustomers,
         canViewStock
     ) {
         buildList {
             if (canViewDashboard) add(AppScreen.DASHBOARD)
             if (canViewDeliveries) add(AppScreen.DELIVERIES)
-            if (canViewCustomers) add(AppScreen.CUSTOMERS)
             if (canViewExpenses) add(AppScreen.EXPENSES)
+            if (canViewCustomers) add(AppScreen.CUSTOMERS)
             if (canViewStock) add(AppScreen.STOCK)
         }
     }
@@ -193,6 +198,7 @@ fun MainAppScaffold(
         AppScreen.BACKUP_RESTORE -> canManageBackup
         AppScreen.AUDIT_HISTORY -> canViewAudit
         AppScreen.SYNC_CENTER -> true
+        AppScreen.APPROVALS -> canAccessApprovals
     }
 
     val initialTab = permittedNavItems.firstOrNull() ?: AppScreen.SYNC_CENTER
@@ -293,7 +299,8 @@ fun MainAppScaffold(
         AppScreen.USER_MANAGEMENT,
         AppScreen.BACKUP_RESTORE,
         AppScreen.AUDIT_HISTORY,
-        AppScreen.SYNC_CENTER
+        AppScreen.SYNC_CENTER,
+        AppScreen.APPROVALS
     )
 
     Scaffold(
@@ -542,7 +549,8 @@ fun MainAppScaffold(
                         onNavigateToSizes = { navigateTo(AppScreen.BOTTLE_SIZES) },
                         onNavigateToUserManagement = { navigateTo(AppScreen.USER_MANAGEMENT) },
                         onNavigateToReports = { navigateTo(AppScreen.REPORTS) },
-                        onNavigateToBackupRestore = { navigateTo(AppScreen.BACKUP_RESTORE) }
+                        onNavigateToBackupRestore = { navigateTo(AppScreen.BACKUP_RESTORE) },
+                        onNavigateToApprovals = { navigateTo(AppScreen.APPROVALS) }
                     )
                 }
 
@@ -656,6 +664,10 @@ fun MainAppScaffold(
 
                 AppScreen.SYNC_CENTER -> {
                     SyncAndUpdatesScreen(viewModel = viewModel)
+                }
+
+                AppScreen.APPROVALS -> {
+                    AdminApprovalsScreen(viewModel = viewModel)
                 }
             }
             AabLogoWatermarkOverlay()

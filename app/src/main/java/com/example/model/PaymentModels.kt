@@ -32,7 +32,9 @@ data class Payment(
     val acknowledgedBy: String = "",
     val businessId: String = "aab_e_baraan_plant_01",
     val createdByUid: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastEditedAt: Long = 0L,
+    val lastEditedBy: String = ""
 )
 
 data class LedgerEntry(

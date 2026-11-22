@@ -758,6 +758,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
         loadExtraPlatformState()
         normalizeLegacyBottleRecords()
+        syncAdminPhoneForPdfs()
         offlineSyncManager.clearFalsePositiveWorkflowConflicts()
 
         // 3. Auth-gated Firestore listener lifecycle (no unauthenticated cold-start queries)
@@ -1537,6 +1538,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
         _userAccounts.value = _userAccounts.value.map { if (it.id == updated.id) updated else it }
         storage.saveUserAccounts(_userAccounts.value)
+        syncAdminPhoneForPdfs()
         refreshCurrentProfileIfMatches(updated)
 
         syncStaffAccountDocuments(updated, previousEmail = existing?.googleEmail.orEmpty())
@@ -2019,16 +2021,36 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
+    fun getPrimaryAdminPhone(): String {
+        val accounts = _userAccounts.value
+        val adminAcc = accounts.firstOrNull { it.id == "user_admin_01" && it.phone.isNotBlank() }
+            ?: accounts.firstOrNull { it.isSuperAdmin && it.phone.isNotBlank() }
+            ?: accounts.firstOrNull { it.role == UserRole.ADMIN && it.phone.isNotBlank() }
+        return adminAcc?.phone?.trim()?.takeIf { it.isNotBlank() }
+            ?: _currentUser.value.takeIf { it.role == UserRole.ADMIN && it.phone.isNotBlank() }?.phone?.trim()
+            ?: "+92 300 1234567"
+    }
+
+    private fun syncAdminPhoneForPdfs() {
+        com.example.util.PdfGenerator.defaultAdminPhone = getPrimaryAdminPhone()
+    }
+
     fun updateCustomer(customer: Customer) {
         if (!hasPermission(AppModule.CUSTOMERS, PermissionAction.EDIT)) return
         val existing = _customers.value.find { it.id == customer.id }
+        val now = System.currentTimeMillis()
+        val editorName = _currentUser.value.name.ifBlank { _currentUser.value.username }
         val preserved = if (existing != null) {
             customer.copy(
                 createdBy = customer.createdBy.ifBlank { existing.createdBy },
                 createdByUid = customer.createdByUid.ifBlank { existing.createdByUid },
-                createdAt = if (customer.createdAt > 0L) customer.createdAt else existing.createdAt
+                createdAt = if (customer.createdAt > 0L) customer.createdAt else existing.createdAt,
+                lastEditedAt = now,
+                lastEditedBy = editorName
             )
-        } else customer
+        } else {
+            customer.copy(lastEditedAt = now, lastEditedBy = editorName)
+        }
         withSyncAction("Update Customer • ${preserved.name}") {
             _customers.value = _customers.value.map { if (it.id == preserved.id) preserved else it }
             storage.saveCustomers(_customers.value)
@@ -2825,89 +2847,98 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val paymentId = nextRecordId("pay")
 
             return withSyncAction("Payment $receiptNumber • ${customer.name}") {
-            val unpaidInvoices = getUnpaidInvoicesForCustomer(customerId)
             val finalAllocations = mutableListOf<PaymentAllocation>()
             val touchedDeliveryIds = mutableSetOf<String>()
+            val manuallyTouchedInvoiceIds = mutableSetOf<String>()
             var remainingPayment = amount
+
+            fun applyPaidToDeliveryMatching(deliveryId: String, invoiceId: String, addAmount: Double) {
+                if (addAmount <= 0.0) return
+                _deliveries.value = _deliveries.value.map { del ->
+                    val matches = (deliveryId.isNotBlank() && del.id == deliveryId) ||
+                        (invoiceId.isNotBlank() && (del.invoiceId == invoiceId || "inv_${del.id}" == invoiceId || del.id == invoiceId))
+                    if (matches) {
+                        touchedDeliveryIds.add(del.id)
+                        val newDelPaid = (del.paymentCollected + addAmount).coerceAtMost(del.totalAmount)
+                        val newMethod = if (newDelPaid + 0.01 >= del.totalAmount) method.label else "Partial (${method.label})"
+                        del.copy(paymentCollected = newDelPaid, paymentMethod = newMethod)
+                    } else del
+                }
+            }
 
             if (manualAllocations != null && manualAllocations.isNotEmpty()) {
                 manualAllocations.forEach { (invOrDelId, allocatedAmount) ->
-                    if (allocatedAmount > 0.0) {
-                        val inv = _invoices.value.find { it.id == invOrDelId || it.deliveryId == invOrDelId }
-                        if (inv != null) {
-                            val actualAllocated = kotlin.math.min(allocatedAmount, inv.balanceDue)
-                            finalAllocations.add(PaymentAllocation(inv.id, inv.invoiceNumber, actualAllocated))
-                            remainingPayment -= actualAllocated
+                    if (allocatedAmount > 0.0 && remainingPayment > 0.0) {
+                        val effectiveReq = kotlin.math.min(allocatedAmount, remainingPayment)
+                        val inv = _invoices.value.find {
+                            it.id == invOrDelId || it.deliveryId == invOrDelId || "inv_${it.deliveryId}" == invOrDelId
+                        }
+                        if (inv != null && inv.balanceDue > 0.0) {
+                            val actualAllocated = kotlin.math.min(effectiveReq, inv.balanceDue)
+                            if (actualAllocated > 0.0) {
+                                finalAllocations.add(PaymentAllocation(inv.id, inv.invoiceNumber, actualAllocated))
+                                manuallyTouchedInvoiceIds.add(inv.id)
+                                remainingPayment = (remainingPayment - actualAllocated).coerceAtLeast(0.0)
 
-                            val newPaid = inv.paidAmount + actualAllocated
-                            val newBalance = (inv.totalAmount - newPaid).coerceAtLeast(0.0)
-                            val newStatus = if (newBalance <= 0.0) InvoiceStatus.PAID else InvoiceStatus.PARTIALLY_PAID
-                            updateInvoice(inv.copy(paidAmount = newPaid, balanceDue = newBalance, status = newStatus))
-
-                            if (inv.deliveryId.isNotEmpty()) {
-                                _deliveries.value = _deliveries.value.map { del ->
-                                    if (del.id == inv.deliveryId) {
-                                        touchedDeliveryIds.add(del.id)
-                                        val newDelPaid = (del.paymentCollected + actualAllocated).coerceAtMost(del.totalAmount)
-                                        val newMethod = if (newDelPaid >= del.totalAmount) method.label else "Partial (${method.label})"
-                                        del.copy(paymentCollected = newDelPaid, paymentMethod = newMethod)
-                                    } else del
-                                }
+                                val newPaid = inv.paidAmount + actualAllocated
+                                val newBalance = (inv.totalAmount - newPaid).coerceAtLeast(0.0)
+                                val newStatus = if (newBalance <= 0.01) InvoiceStatus.PAID else InvoiceStatus.PARTIALLY_PAID
+                                updateInvoice(inv.copy(paidAmount = newPaid, balanceDue = newBalance, status = newStatus))
+                                applyPaidToDeliveryMatching(inv.deliveryId, inv.id, actualAllocated)
                             }
                         } else {
-                            // Check if invOrDelId directly matches a delivery (e.g. synthetic ID "inv_del_..." or "del_...")
-                            val del = _deliveries.value.find { it.id == invOrDelId || "inv_${it.id}" == invOrDelId || it.invoiceId == invOrDelId }
+                            // Direct match against a delivery (e.g. synthetic ID "inv_del_..." or "del_...")
+                            val del = _deliveries.value.find {
+                                it.id == invOrDelId || "inv_${it.id}" == invOrDelId || it.invoiceId == invOrDelId
+                            }
                             if (del != null) {
                                 val due = (del.totalAmount - del.paymentCollected).coerceAtLeast(0.0)
-                                val actualAllocated = kotlin.math.min(allocatedAmount, due)
-                                finalAllocations.add(PaymentAllocation(del.invoiceId.ifEmpty { "inv_${del.id}" }, del.deliveryNumber, actualAllocated))
-                                remainingPayment -= actualAllocated
-
-                                touchedDeliveryIds.add(del.id)
-                                val newDelPaid = (del.paymentCollected + actualAllocated).coerceAtMost(del.totalAmount)
-                                val newMethod = if (newDelPaid >= del.totalAmount) method.label else "Partial (${method.label})"
-                                _deliveries.value = _deliveries.value.map { if (it.id == del.id) it.copy(paymentCollected = newDelPaid, paymentMethod = newMethod) else it }
+                                val actualAllocated = kotlin.math.min(effectiveReq, due)
+                                if (actualAllocated > 0.0) {
+                                    val allocInvId = del.invoiceId.ifEmpty { "inv_${del.id}" }
+                                    finalAllocations.add(PaymentAllocation(allocInvId, del.deliveryNumber, actualAllocated))
+                                    manuallyTouchedInvoiceIds.add(allocInvId)
+                                    remainingPayment = (remainingPayment - actualAllocated).coerceAtLeast(0.0)
+                                    applyPaidToDeliveryMatching(del.id, allocInvId, actualAllocated)
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 1. FIFO auto-allocation across any unpaid invoices for this customer
-            for (inv in unpaidInvoices) {
-                if (remainingPayment <= 0.0) break
-                if (inv.balanceDue <= 0.0) continue
-                val allocate = kotlin.math.min(remainingPayment, inv.balanceDue)
-                finalAllocations.add(PaymentAllocation(inv.id, inv.invoiceNumber, allocate))
-                remainingPayment -= allocate
+            // 1. FIFO auto-allocation across remaining unpaid invoices ONLY when manualAllocations wasn't provided OR excess payment remains
+            if (remainingPayment > 0.01) {
+                val freshUnpaidInvoices = getUnpaidInvoicesForCustomer(customerId)
+                for (inv in freshUnpaidInvoices) {
+                    if (remainingPayment <= 0.01) break
+                    if (inv.id in manuallyTouchedInvoiceIds) continue
+                    if (inv.balanceDue <= 0.01) continue
+                    val allocate = kotlin.math.min(remainingPayment, inv.balanceDue)
+                    finalAllocations.add(PaymentAllocation(inv.id, inv.invoiceNumber, allocate))
+                    remainingPayment = (remainingPayment - allocate).coerceAtLeast(0.0)
 
-                val newPaid = inv.paidAmount + allocate
-                val newBalance = (inv.totalAmount - newPaid).coerceAtLeast(0.0)
-                val newStatus = if (newBalance <= 0.0) InvoiceStatus.PAID else InvoiceStatus.PARTIALLY_PAID
-                updateInvoice(inv.copy(paidAmount = newPaid, balanceDue = newBalance, status = newStatus))
-
-                if (inv.deliveryId.isNotEmpty()) {
-                    _deliveries.value = _deliveries.value.map { del ->
-                        if (del.id == inv.deliveryId) {
-                            touchedDeliveryIds.add(del.id)
-                            val newDelPaid = (del.paymentCollected + allocate).coerceAtMost(del.totalAmount)
-                            val newMethod = if (newDelPaid >= del.totalAmount) method.label else "Partial (${method.label})"
-                            del.copy(paymentCollected = newDelPaid, paymentMethod = newMethod)
-                        } else del
-                    }
+                    val newPaid = inv.paidAmount + allocate
+                    val newBalance = (inv.totalAmount - newPaid).coerceAtLeast(0.0)
+                    val newStatus = if (newBalance <= 0.01) InvoiceStatus.PAID else InvoiceStatus.PARTIALLY_PAID
+                    updateInvoice(inv.copy(paidAmount = newPaid, balanceDue = newBalance, status = newStatus))
+                    applyPaidToDeliveryMatching(inv.deliveryId, inv.id, allocate)
                 }
             }
 
-            // 2. FIFO auto-allocation across ANY remaining unpaid deliveries for this customer
-            if (remainingPayment > 0.0) {
+            // 2. FIFO auto-allocation across ANY remaining unpaid deliveries for this customer (without linked invoice)
+            if (remainingPayment > 0.01) {
                 _deliveries.value = _deliveries.value.map { del ->
-                    if (del.customerId == customerId && del.paymentCollected < del.totalAmount && remainingPayment > 0.0) {
+                    val alreadyTouched = del.id in touchedDeliveryIds
+                    if (!alreadyTouched && del.customerId == customerId && del.paymentCollected + 0.01 < del.totalAmount && remainingPayment > 0.01) {
                         touchedDeliveryIds.add(del.id)
                         val due = (del.totalAmount - del.paymentCollected).coerceAtLeast(0.0)
                         val allocate = kotlin.math.min(remainingPayment, due)
-                        remainingPayment -= allocate
-                        val newDelPaid = del.paymentCollected + allocate
-                        val newMethod = if (newDelPaid >= del.totalAmount) method.label else "Partial (${method.label})"
+                        remainingPayment = (remainingPayment - allocate).coerceAtLeast(0.0)
+                        val allocInvId = del.invoiceId.ifEmpty { "inv_${del.id}" }
+                        finalAllocations.add(PaymentAllocation(allocInvId, del.deliveryNumber, allocate))
+                        val newDelPaid = (del.paymentCollected + allocate).coerceAtMost(del.totalAmount)
+                        val newMethod = if (newDelPaid + 0.01 >= del.totalAmount) method.label else "Partial (${method.label})"
                         del.copy(paymentCollected = newDelPaid, paymentMethod = newMethod)
                     } else del
                 }
@@ -3761,7 +3792,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         linkedInventoryItemName: String = "",
         linkedInventoryQty: Double = 0.0,
         linkedInventoryUnitCost: Double = 0.0,
-        linkedInventoryTransactionId: String = ""
+        linkedInventoryTransactionId: String = "",
+        isInventoryExpense: Boolean = false,
+        inventoryItems: List<ExpenseInventoryLineItem> = emptyList()
     ): String {
         if (!hasPermission(AppModule.EXPENSES, PermissionAction.ADD)) return ""
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
@@ -3771,6 +3804,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
         return withSyncAction("Expense $voucher • $categoryName") {
             val isAdmin = hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE)
+            val resolvedIsInv = isInventoryExpense || inventoryItems.isNotEmpty() || linkedInventoryType.isNotBlank()
             val expense = Expense(
                 id = expId,
                 voucherNumber = voucher,
@@ -3790,6 +3824,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 acknowledgedBy = if (isAdmin) _currentUser.value.name else "",
                 isApprovedByOwner = isAdmin,
                 createdByUid = _currentUser.value.id.ifBlank { _currentUser.value.uid },
+                isInventoryExpense = resolvedIsInv,
+                inventoryItems = inventoryItems,
                 linkedInventoryType = linkedInventoryType,
                 linkedInventoryItemId = linkedInventoryItemId,
                 linkedInventoryItemName = linkedInventoryItemName,
@@ -3807,8 +3843,337 @@ class WaterPlantRepository private constructor(private val context: Context) {
             appendAuditLog(AuditActionType.CREATE, AppModule.EXPENSES, expId, "$voucher • $categoryName", updatedValue = "Rs. ${amount.toInt()} (${type.name})")
 
             val roleNotice = if (isAdmin) "Verified" else "Pending Admin Acknowledgment"
-            addNotification("Expense Added", "Rs. $amount for $categoryName ($payee) [$roleNotice]", NotificationSeverity.INFO)
+            addNotification("Expense Added", "Rs. ${amount.toInt()} for $categoryName ($payee) [$roleNotice]", NotificationSeverity.INFO)
             voucher
+        }
+    }
+
+    private fun formatQtyLabel(qty: Double): String {
+        return if (qty % 1.0 == 0.0) qty.toInt().toString() else String.format(Locale.US, "%.2f", qty)
+    }
+
+    private fun resolveSummaryCategoryForItems(
+        items: List<ExpenseInventoryLineItem>,
+        expenseType: ExpenseType
+    ): Pair<String, String> {
+        val distinctCats = items.map { it.categoryName.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        val summaryName = when {
+            distinctCats.isEmpty() -> "Uncategorized"
+            distinctCats.size == 1 -> distinctCats.first()
+            distinctCats.size == 2 -> "${distinctCats[0]} & ${distinctCats[1]}"
+            else -> "${distinctCats[0]} & ${distinctCats[1]} +${distinctCats.size - 2}"
+        }
+        val matchedCat = distinctCats.firstOrNull()?.let { firstCat ->
+            _expenseCategories.value.firstOrNull { it.name.equals(firstCat, ignoreCase = true) }
+        }
+        val summaryId = matchedCat?.id ?: if (expenseType == ExpenseType.CAPEX) "cat_asset_machinery" else "cat_bottles_opex"
+        return Pair(summaryId, summaryName)
+    }
+
+    private fun buildInventoryItemsSummaryDescription(items: List<ExpenseInventoryLineItem>): String {
+        if (items.isEmpty()) return "Inventory Purchase"
+        return items.joinToString(", ") { line ->
+            val qtyStr = formatQtyLabel(line.quantity)
+            "$qtyStr x ${line.itemName}"
+        }
+    }
+
+    /**
+     * Applies stock increments for a list of inventory line items (both Bottles & Factory Materials)
+     * and returns the resolved items stamped with transaction IDs and auto-picked categories.
+     * Must be called inside synchronized(mutationLock).
+     */
+    private fun applyInventoryLineItemsLocked(
+        items: List<ExpenseInventoryLineItem>,
+        effectiveDate: String,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod
+    ): List<ExpenseInventoryLineItem> {
+        val cleanSupplier = supplierName.trim().ifBlank { "Supplier" }
+        val stockPayMode = if (paymentMethod.isCash) StockPaymentMode.CASH else StockPaymentMode.ONLINE_TRANSFER
+        val resolvedLines = mutableListOf<ExpenseInventoryLineItem>()
+
+        for (rawLine in items) {
+            if (rawLine.quantity <= 0.0 || rawLine.itemId.isBlank()) continue
+            val lineTotal = rawLine.quantity * rawLine.unitRate
+
+            if (rawLine.itemType.equals("BOTTLE", ignoreCase = true)) {
+                val size = _bottleSizes.value.find { it.id == rawLine.itemId } ?: continue
+                val qtyInt = rawLine.quantity.toInt().coerceAtLeast(1)
+                val exactLineTotal = qtyInt * rawLine.unitRate
+
+                val updatedSize = size.copy(
+                    latestPurchaseRate = if (rawLine.unitRate > 0.0) rawLine.unitRate else size.latestPurchaseRate,
+                    purchaseCost = if (rawLine.unitRate > 0.0) rawLine.unitRate else size.purchaseCost
+                )
+                _bottleSizes.value = _bottleSizes.value.map { if (it.id == size.id) updatedSize else it }
+                storage.saveBottleSizes(_bottleSizes.value)
+                syncDocument("bottleSizes", size.id, updatedSize)
+
+                val curInv = _inventory.value.find { it.bottleSizeId == size.id } ?: BottleInventory(
+                    id = "inv_${size.id}",
+                    bottleSizeId = size.id,
+                    sizeName = size.name
+                )
+                val updatedInv = curInv.copy(
+                    atPlantEmpty = curInv.atPlantEmpty + qtyInt,
+                    totalPurchased = curInv.totalPurchased + qtyInt
+                )
+                _inventory.value = _inventory.value.filterNot { it.bottleSizeId == size.id } + updatedInv
+                storage.saveInventory(_inventory.value)
+                syncIncrementalDelta(
+                    "bottleInventory",
+                    updatedInv.id,
+                    updatedInv,
+                    mapOf("atPlantEmpty" to qtyInt, "totalPurchased" to qtyInt)
+                )
+
+                val purchase = BottlePurchaseRecord(
+                    id = nextRecordId("bp"),
+                    date = effectiveDate,
+                    bottleSizeId = size.id,
+                    sizeName = size.name,
+                    quantity = qtyInt,
+                    unitCost = rawLine.unitRate,
+                    totalCost = exactLineTotal,
+                    supplierName = cleanSupplier,
+                    invoiceOrBillNo = invoiceNo.trim(),
+                    paymentSource = paymentSource.label,
+                    paymentMode = stockPayMode.label,
+                    notes = notes.trim(),
+                    recordedBy = _currentUser.value.name
+                )
+                _bottlePurchases.value = listOf(purchase) + _bottlePurchases.value
+                storage.saveBottlePurchases(_bottlePurchases.value)
+                syncDocument("bottlePurchases", purchase.id, purchase)
+
+                val mov = BottleMovement(
+                    id = nextRecordId("mov"),
+                    date = effectiveDate,
+                    bottleSizeId = size.id,
+                    sizeName = size.name,
+                    movementType = BottleMovementType.PURCHASE_NEW,
+                    quantity = qtyInt,
+                    referenceType = "Expense Purchase (${paymentSource.label})",
+                    referenceId = purchase.id,
+                    notes = "Purchased $qtyInt ${size.name} @ Rs. ${rawLine.unitRate} from $cleanSupplier. ${notes.trim()}".trim(),
+                    createdBy = _currentUser.value.name
+                )
+                _bottleMovements.value = listOf(mov) + _bottleMovements.value
+                storage.saveBottleMovements(_bottleMovements.value)
+                syncDocument("bottleMovements", mov.id, mov)
+
+                val autoCatName = size.categoryName.trim()
+                val autoCatId = _expenseCategories.value
+                    .firstOrNull { it.name.equals(autoCatName, ignoreCase = true) }?.id.orEmpty()
+                resolvedLines.add(
+                    ExpenseInventoryLineItem(
+                        itemType = "BOTTLE",
+                        itemId = size.id,
+                        itemName = size.name,
+                        categoryId = autoCatId,
+                        categoryName = autoCatName,
+                        uom = size.uom.ifBlank { "Bottles" },
+                        quantity = qtyInt.toDouble(),
+                        unitRate = rawLine.unitRate,
+                        lineTotal = exactLineTotal,
+                        transactionId = purchase.id
+                    )
+                )
+            } else {
+                val mat = _factoryMaterials.value.find { it.id == rawLine.itemId } ?: continue
+                val newStock = mat.currentStock + rawLine.quantity
+                val updatedMat = mat.copy(
+                    currentStock = newStock,
+                    purchaseRate = if (rawLine.unitRate > 0.0) rawLine.unitRate else mat.purchaseRate,
+                    supplierName = if (supplierName.isNotBlank()) supplierName.trim() else mat.supplierName,
+                    lastUpdated = System.currentTimeMillis()
+                )
+                _factoryMaterials.value = _factoryMaterials.value.map { if (it.id == mat.id) updatedMat else it }
+                storage.saveFactoryMaterials(_factoryMaterials.value)
+                syncDocument("factoryMaterials", mat.id, updatedMat)
+
+                val tx = MaterialTransaction(
+                    id = nextRecordId("mtx"),
+                    materialId = mat.id,
+                    materialName = mat.name,
+                    date = effectiveDate,
+                    actionType = MaterialActionType.REFILL,
+                    quantity = rawLine.quantity,
+                    unitCost = rawLine.unitRate,
+                    totalCost = lineTotal,
+                    uom = mat.uom,
+                    supplierOrReceiver = cleanSupplier,
+                    invoiceNo = invoiceNo.trim(),
+                    paymentSource = paymentSource.label,
+                    paymentMode = stockPayMode.label,
+                    notes = notes.trim(),
+                    balanceAfter = newStock,
+                    performedBy = _currentUser.value.name
+                )
+                _materialTransactions.value = listOf(tx) + _materialTransactions.value
+                storage.saveMaterialTransactions(_materialTransactions.value)
+                syncDocument("materialTransactions", tx.id, tx)
+
+                val autoCatName = mat.itemCategory.trim()
+                val autoCatId = _expenseCategories.value
+                    .firstOrNull { it.name.equals(autoCatName, ignoreCase = true) }?.id.orEmpty()
+                resolvedLines.add(
+                    ExpenseInventoryLineItem(
+                        itemType = "MATERIAL",
+                        itemId = mat.id,
+                        itemName = mat.name,
+                        categoryId = autoCatId,
+                        categoryName = autoCatName,
+                        uom = mat.uom,
+                        quantity = rawLine.quantity,
+                        unitRate = rawLine.unitRate,
+                        lineTotal = lineTotal,
+                        transactionId = tx.id
+                    )
+                )
+            }
+        }
+        return resolvedLines
+    }
+
+    /**
+     * Reverses stock increments & transaction logs for all line items in an inventory expense.
+     * Must be called inside synchronized(mutationLock).
+     */
+    private fun reverseInventoryLineItemsLocked(items: List<ExpenseInventoryLineItem>) {
+        for (line in items) {
+            if (line.itemId.isBlank() || line.quantity <= 0.0) continue
+            if (line.itemType.equals("BOTTLE", ignoreCase = true)) {
+                val qtyInt = line.quantity.toInt()
+                val inv = _inventory.value.find { it.bottleSizeId == line.itemId }
+                if (inv != null && qtyInt > 0) {
+                    val actualEmptyDelta = -minOf(inv.atPlantEmpty, qtyInt)
+                    val actualPurchasedDelta = -minOf(inv.totalPurchased, qtyInt)
+                    val updatedInv = inv.copy(
+                        atPlantEmpty = (inv.atPlantEmpty + actualEmptyDelta).coerceAtLeast(0),
+                        totalPurchased = (inv.totalPurchased + actualPurchasedDelta).coerceAtLeast(0)
+                    )
+                    _inventory.value = _inventory.value.map { if (it.bottleSizeId == inv.bottleSizeId) updatedInv else it }
+                    storage.saveInventory(_inventory.value)
+                    syncIncrementalDelta(
+                        "bottleInventory",
+                        updatedInv.id,
+                        updatedInv,
+                        mapOf("atPlantEmpty" to actualEmptyDelta, "totalPurchased" to actualPurchasedDelta)
+                    )
+                }
+                if (line.transactionId.isNotBlank()) {
+                    _bottlePurchases.value = _bottlePurchases.value.filterNot { it.id == line.transactionId }
+                    storage.saveBottlePurchases(_bottlePurchases.value)
+                    deleteDocument("bottlePurchases", line.transactionId)
+
+                    val relatedMovs = _bottleMovements.value.filter { it.referenceId == line.transactionId }
+                    if (relatedMovs.isNotEmpty()) {
+                        _bottleMovements.value = _bottleMovements.value.filterNot { it.referenceId == line.transactionId }
+                        storage.saveBottleMovements(_bottleMovements.value)
+                        relatedMovs.forEach { deleteDocument("bottleMovements", it.id) }
+                    }
+                }
+            } else {
+                val mat = _factoryMaterials.value.find { it.id == line.itemId }
+                if (mat != null) {
+                    val reversedStock = (mat.currentStock - line.quantity).coerceAtLeast(0.0)
+                    val updatedMat = mat.copy(currentStock = reversedStock, lastUpdated = System.currentTimeMillis())
+                    _factoryMaterials.value = _factoryMaterials.value.map { if (it.id == mat.id) updatedMat else it }
+                    storage.saveFactoryMaterials(_factoryMaterials.value)
+                    syncDocument("factoryMaterials", mat.id, updatedMat)
+                }
+                if (line.transactionId.isNotBlank()) {
+                    _materialTransactions.value = _materialTransactions.value.filterNot { it.id == line.transactionId }
+                    storage.saveMaterialTransactions(_materialTransactions.value)
+                    deleteDocument("materialTransactions", line.transactionId)
+                }
+            }
+        }
+    }
+
+    /**
+     * Multi-item Inventory Expense atomic purchase & stock update.
+     * Supports selecting 1 or more Bottle Sizes and/or Factory Materials in a single Expense voucher.
+     * Auto-picks each item's stored category and maintains accurate stock for every item.
+     */
+    fun recordMultiItemInventoryExpense(
+        items: List<ExpenseInventoryLineItem>,
+        expenseType: ExpenseType,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod
+    ): Pair<Boolean, String> = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Permission required to add expenses.")
+        }
+        val validItems = items.filter { it.itemId.isNotBlank() && it.quantity > 0.0 }
+        if (validItems.isEmpty()) {
+            return@synchronized Pair(false, "Please select at least one inventory item with quantity > 0.")
+        }
+        if (validItems.any { it.unitRate < 0.0 }) {
+            return@synchronized Pair(false, "Rate cannot be negative.")
+        }
+        val hasBottles = validItems.any { it.itemType.equals("BOTTLE", ignoreCase = true) }
+        val hasMaterials = validItems.any { !it.itemType.equals("BOTTLE", ignoreCase = true) }
+        if (hasBottles && !hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding bottle stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
+        if (hasMaterials && !hasPermission(AppModule.FACTORY_MATERIALS, PermissionAction.ADD)) {
+            return@synchronized Pair(false, "Admin has restricted adding material stock (ایڈمن نے اسٹاک شامل کرنے کی اجازت نہیں دی)")
+        }
+
+        val effectiveDate = expenseDate.ifBlank { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) }
+        val cleanSupplier = supplierName.trim().ifBlank { "Supplier" }
+
+        withSyncAction("Inventory Expense (${validItems.size} items)") {
+            val resolvedLines = applyInventoryLineItemsLocked(
+                items = validItems,
+                effectiveDate = effectiveDate,
+                supplierName = cleanSupplier,
+                invoiceNo = invoiceNo.trim(),
+                notes = notes.trim(),
+                paymentSource = paymentSource,
+                paymentMethod = paymentMethod
+            )
+            if (resolvedLines.isEmpty()) {
+                return@withSyncAction Pair(false, "Selected inventory items were not found.")
+            }
+
+            val totalAmount = resolvedLines.sumOf { it.lineTotal }
+            val (summaryCatId, summaryCatName) = resolveSummaryCategoryForItems(resolvedLines, expenseType)
+            val summaryDesc = buildInventoryItemsSummaryDescription(resolvedLines)
+            val single = resolvedLines.singleOrNull()
+
+            val voucher = addExpense(
+                categoryId = summaryCatId,
+                categoryName = summaryCatName,
+                description = summaryDesc,
+                amount = totalAmount,
+                method = paymentMethod,
+                payee = cleanSupplier,
+                notes = notes.trim(),
+                type = expenseType,
+                expenseDate = effectiveDate,
+                paymentSource = paymentSource,
+                invoiceNumber = invoiceNo.trim(),
+                linkedInventoryType = single?.itemType.orEmpty(),
+                linkedInventoryItemId = single?.itemId.orEmpty(),
+                linkedInventoryItemName = single?.itemName.orEmpty(),
+                linkedInventoryQty = single?.quantity ?: 0.0,
+                linkedInventoryUnitCost = single?.unitRate ?: 0.0,
+                linkedInventoryTransactionId = single?.transactionId.orEmpty(),
+                isInventoryExpense = true,
+                inventoryItems = resolvedLines
+            )
+            Pair(true, "Voucher $voucher saved (${resolvedLines.size} item${if (resolvedLines.size > 1) "s" else ""} • Rs. ${totalAmount.toInt()}) & stock updated.")
         }
     }
 
@@ -4030,8 +4395,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     /**
-     * Unified categories shared between Expenses and Other Material Inventory.
-     * Any new Expense Category added by the user immediately appears in Other Material Inventory too.
+     * Unified categories driven by Expense Categories.
+     * Prioritizes Inventory categories first, followed by other active Expense categories.
+     * Deleting a category in Expenses removes it from inventory selection immediately.
      */
     fun getAllInventoryCategories(categories: List<ExpenseCategory> = _expenseCategories.value): List<String> {
         val seen = linkedSetOf<String>()
@@ -4042,8 +4408,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 result.add(clean)
             }
         }
-        StockMasterOptions.MATERIAL_CATEGORIES.forEach { addUnique(it) }
-        categories.forEach { addUnique(it.name) }
+        categories.filter { it.isInventoryCategory }.forEach { addUnique(it.name) }
+        categories.filterNot { it.isInventoryCategory }.forEach { addUnique(it.name) }
         return result
     }
 
@@ -4336,7 +4702,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
         salePrice: Double,
         customUsageType: String = "",
         capacityLitres: Double? = null,
-        depositAmount: Double = 0.0
+        depositAmount: Double = 0.0,
+        categoryName: String = "Bottle Purchase"
     ): String = withSyncAction("Add Bottle Size: ${name.trim()}") {
         if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
             addNotification("Access Restricted", "Admin has restricted adding new bottle sizes/items.", NotificationSeverity.WARNING)
@@ -4367,7 +4734,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             uom = uom.ifBlank { "Bottle" },
             openingStock = openingStock.coerceAtLeast(0),
             usageType = usageType,
-            customUsageType = customUsageType.trim()
+            customUsageType = customUsageType.trim(),
+            categoryName = categoryName.trim()
         )
         _bottleSizes.value = _bottleSizes.value + newSize
         storage.saveBottleSizes(_bottleSizes.value)
@@ -4421,7 +4789,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
         defaultRefillPrice: Double,
         purchaseCost: Double,
         depositAmount: Double,
-        uom: String
+        uom: String,
+        categoryName: String? = null
     ): Pair<Boolean, String> {
         if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT)) {
             return Pair(false, "Permission required to edit bottle sizes in Stock & Cost.")
@@ -4443,7 +4812,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             purchaseCost = purchaseCost,
             latestPurchaseRate = purchaseCost,
             depositAmount = depositAmount,
-            uom = uom.ifBlank { "Bottle" }
+            uom = uom.ifBlank { "Bottle" },
+            categoryName = categoryName?.trim() ?: existing.categoryName
         )
         return withSyncAction("Update Bottle Size • $cleanName") {
             _bottleSizes.value = _bottleSizes.value.map { if (it.id == bottleSizeId) updated else it }
@@ -6291,7 +6661,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val normalizedUpdatedDelivery = updatedDelivery.copy(
             items = sanitizedNewItems,
             totalFullDelivered = sanitizedNewItems.sumOf { it.quantity },
-            totalEmptyCollected = sanitizedNewItems.sumOf { it.emptyCollected }
+            totalEmptyCollected = sanitizedNewItems.sumOf { it.emptyCollected },
+            lastEditedAt = System.currentTimeMillis(),
+            lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
         )
 
         val oldRetFull = old.items.filter(::isItemReturnable).sumOf { it.quantity }
@@ -6546,7 +6918,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     date = updatedDelivery.date,
                     amount = revisedInitialAmount,
                     paymentMethod = resolvedPayMethod,
-                    allocations = updatedAlloc
+                    allocations = updatedAlloc,
+                    lastEditedAt = System.currentTimeMillis(),
+                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
                 )
                 _payments.value = _payments.value.map { if (it.id == initialPayment.id) updatedPay else it }
                 syncDocument("payments", updatedPay.id, updatedPay)
@@ -6590,56 +6964,15 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    // Delete Expense (atomically reverses linked Material or Bottle stock purchase to prevent drift)
+    // Delete Expense (atomically reverses all linked Material or Bottle stock purchases — both multi-item & legacy)
     fun deleteExpense(expenseId: String): Boolean = synchronized(mutationLock) {
         if (!hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)) return@synchronized false
         val expense = _expenses.value.find { it.id == expenseId } ?: return@synchronized false
         withSyncAction("Delete Expense ${expense.voucherNumber}") {
-            // 1. Reverse linked inventory addition if this expense purchased stock
-            if (expense.linkedInventoryType == "MATERIAL" &&
-                expense.linkedInventoryItemId.isNotBlank() &&
-                expense.linkedInventoryQty > 0.0
-            ) {
-                val mat = _factoryMaterials.value.find { it.id == expense.linkedInventoryItemId }
-                if (mat != null) {
-                    val reversedStock = (mat.currentStock - expense.linkedInventoryQty).coerceAtLeast(0.0)
-                    val updatedMat = mat.copy(currentStock = reversedStock, lastUpdated = System.currentTimeMillis())
-                    _factoryMaterials.value = _factoryMaterials.value.map { if (it.id == mat.id) updatedMat else it }
-                    storage.saveFactoryMaterials(_factoryMaterials.value)
-                    syncDocument("factoryMaterials", mat.id, updatedMat)
-                }
-                if (expense.linkedInventoryTransactionId.isNotBlank()) {
-                    _materialTransactions.value = _materialTransactions.value.filterNot { it.id == expense.linkedInventoryTransactionId }
-                    storage.saveMaterialTransactions(_materialTransactions.value)
-                    deleteDocument("materialTransactions", expense.linkedInventoryTransactionId)
-                }
-            } else if (expense.linkedInventoryType == "BOTTLE" &&
-                expense.linkedInventoryItemId.isNotBlank() &&
-                expense.linkedInventoryQty > 0.0
-            ) {
-                val qtyInt = expense.linkedInventoryQty.toInt()
-                val inv = _inventory.value.find { it.bottleSizeId == expense.linkedInventoryItemId }
-                if (inv != null && qtyInt > 0) {
-                    val actualEmptyDelta = -minOf(inv.atPlantEmpty, qtyInt)
-                    val actualPurchasedDelta = -minOf(inv.totalPurchased, qtyInt)
-                    val updatedInv = inv.copy(
-                        atPlantEmpty = (inv.atPlantEmpty + actualEmptyDelta).coerceAtLeast(0),
-                        totalPurchased = (inv.totalPurchased + actualPurchasedDelta).coerceAtLeast(0)
-                    )
-                    _inventory.value = _inventory.value.map { if (it.bottleSizeId == inv.bottleSizeId) updatedInv else it }
-                    storage.saveInventory(_inventory.value)
-                    syncIncrementalDelta(
-                        "bottleInventory",
-                        updatedInv.id,
-                        updatedInv,
-                        mapOf("atPlantEmpty" to actualEmptyDelta, "totalPurchased" to actualPurchasedDelta)
-                    )
-                }
-                if (expense.linkedInventoryTransactionId.isNotBlank()) {
-                    _bottlePurchases.value = _bottlePurchases.value.filterNot { it.id == expense.linkedInventoryTransactionId }
-                    storage.saveBottlePurchases(_bottlePurchases.value)
-                    deleteDocument("bottlePurchases", expense.linkedInventoryTransactionId)
-                }
+            // 1. Reverse all linked inventory line items if this expense purchased stock
+            val lineItemsToReverse = expense.effectiveInventoryItems
+            if (lineItemsToReverse.isNotEmpty()) {
+                reverseInventoryLineItemsLocked(lineItemsToReverse)
             }
 
             _expenses.value = _expenses.value.filter { it.id != expenseId }
@@ -6655,21 +6988,110 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    // Update Expense
-    fun updateExpense(updatedExpense: Expense): Boolean {
-        if (!hasPermission(AppModule.EXPENSES, PermissionAction.EDIT)) return false
-        val old = _expenses.value.find { it.id == updatedExpense.id } ?: return false
-        return withSyncAction("Edit Expense ${updatedExpense.voucherNumber}") {
-            _expenses.value = _expenses.value.map { if (it.id == updatedExpense.id) updatedExpense else it }
+    // Update Expense (supports full editing of both Non-Inventory and Multi-Item Inventory expenses with atomic stock reconciliation)
+    fun updateExpense(updatedExpense: Expense): Boolean = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.EDIT)) return@synchronized false
+        val old = _expenses.value.find { it.id == updatedExpense.id } ?: return@synchronized false
+
+        withSyncAction("Edit Expense ${updatedExpense.voucherNumber}") {
+            val oldItems = old.effectiveInventoryItems
+            val newItemsRaw = updatedExpense.effectiveInventoryItems
+            val isInvEdit = old.hasInventoryItems || updatedExpense.hasInventoryItems
+
+            val finalExpense = if (isInvEdit) {
+                // Reverse old inventory stock changes first, then apply edited items atomically
+                if (oldItems.isNotEmpty()) {
+                    reverseInventoryLineItemsLocked(oldItems)
+                }
+                val appliedItems = if (newItemsRaw.isNotEmpty()) {
+                    applyInventoryLineItemsLocked(
+                        items = newItemsRaw,
+                        effectiveDate = updatedExpense.date.ifBlank { old.date },
+                        supplierName = updatedExpense.payee.ifBlank { "Supplier" },
+                        invoiceNo = updatedExpense.invoiceNumber,
+                        notes = updatedExpense.notes,
+                        paymentSource = updatedExpense.paymentSource,
+                        paymentMethod = updatedExpense.paymentMethod
+                    )
+                } else emptyList()
+
+                val totalAmount = if (appliedItems.isNotEmpty()) appliedItems.sumOf { it.lineTotal } else updatedExpense.amount
+                val (summaryCatId, summaryCatName) = if (appliedItems.isNotEmpty()) {
+                    resolveSummaryCategoryForItems(appliedItems, updatedExpense.expenseType)
+                } else {
+                    Pair(updatedExpense.categoryId, updatedExpense.categoryName)
+                }
+                val resolvedDesc = if (appliedItems.isNotEmpty()) {
+                    buildInventoryItemsSummaryDescription(appliedItems)
+                } else {
+                    updatedExpense.description.ifBlank { old.description }
+                }
+                val single = appliedItems.singleOrNull()
+
+                updatedExpense.copy(
+                    categoryId = summaryCatId,
+                    categoryName = summaryCatName,
+                    description = resolvedDesc,
+                    amount = totalAmount,
+                    isInventoryExpense = appliedItems.isNotEmpty(),
+                    inventoryItems = appliedItems,
+                    linkedInventoryType = single?.itemType.orEmpty(),
+                    linkedInventoryItemId = single?.itemId.orEmpty(),
+                    linkedInventoryItemName = single?.itemName.orEmpty(),
+                    linkedInventoryQty = single?.quantity ?: 0.0,
+                    linkedInventoryUnitCost = single?.unitRate ?: 0.0,
+                    linkedInventoryTransactionId = single?.transactionId.orEmpty(),
+                    lastEditedAt = System.currentTimeMillis(),
+                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
+                )
+            } else {
+                updatedExpense.copy(
+                    lastEditedAt = System.currentTimeMillis(),
+                    lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
+                )
+            }
+
+            _expenses.value = _expenses.value.map { if (it.id == finalExpense.id) finalExpense else it }
             storage.saveExpenses(_expenses.value)
-            syncDocument("expenses", updatedExpense.id, updatedExpense)
-            appendAuditLog(AuditActionType.UPDATE, AppModule.EXPENSES, updatedExpense.id, "${updatedExpense.voucherNumber} • ${updatedExpense.categoryName}", previousValue = "Rs. ${old.amount.toInt()}", updatedValue = "Rs. ${updatedExpense.amount.toInt()}")
+            syncDocument("expenses", finalExpense.id, finalExpense)
+            appendAuditLog(
+                AuditActionType.UPDATE,
+                AppModule.EXPENSES,
+                finalExpense.id,
+                "${finalExpense.voucherNumber} • ${finalExpense.categoryName}",
+                previousValue = "Rs. ${old.amount.toInt()}",
+                updatedValue = "Rs. ${finalExpense.amount.toInt()}"
+            )
 
             addNotification(
                 "Expense Updated",
-                "Expense voucher ${updatedExpense.voucherNumber} (Rs. ${updatedExpense.amount.toInt()}) updated.",
+                "Expense voucher ${finalExpense.voucherNumber} (Rs. ${finalExpense.amount.toInt()}) updated.",
                 NotificationSeverity.INFO
             )
+            true
+        }
+    }
+
+    // Update Payment (tracks lastEditedAt/lastEditedBy for audit visibility in detail view)
+    fun updatePayment(updatedPayment: Payment): Boolean = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.EDIT)) return@synchronized false
+        val old = _payments.value.find { it.id == updatedPayment.id } ?: return@synchronized false
+        val stampedPayment = updatedPayment.copy(
+            lastEditedAt = System.currentTimeMillis(),
+            lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username }
+        )
+        withSyncAction("Edit Payment ${stampedPayment.receiptNumber}") {
+            val amountDelta = stampedPayment.amount - old.amount
+            if (kotlin.math.abs(amountDelta) > 0.001) {
+                getCustomerById(stampedPayment.customerId)?.let { cust ->
+                    val updatedCust = cust.copy(currentBalance = cust.currentBalance - amountDelta)
+                    applyCustomerDeltaLocalAndCloud(updatedCust, mapOf("currentBalance" to -amountDelta))
+                }
+            }
+            _payments.value = _payments.value.map { if (it.id == stampedPayment.id) stampedPayment else it }
+            storage.savePayments(_payments.value)
+            syncDocument("payments", stampedPayment.id, stampedPayment)
+            appendAuditLog(AuditActionType.UPDATE, AppModule.PAYMENTS_BALANCES, stampedPayment.id, "${stampedPayment.receiptNumber} • ${stampedPayment.customerName}", previousValue = "Rs. ${old.amount.toInt()}", updatedValue = "Rs. ${stampedPayment.amount.toInt()}")
             true
         }
     }
@@ -6702,35 +7124,81 @@ class WaterPlantRepository private constructor(private val context: Context) {
         }
     }
 
-    fun addExpenseCategory(name: String, urdu: String, type: ExpenseType = ExpenseType.OPEX) {
+    fun addExpenseCategory(
+        name: String,
+        urdu: String,
+        type: ExpenseType = ExpenseType.OPEX,
+        isInventoryCategory: Boolean = false
+    ) {
         if (!hasPermission(AppModule.NEW_ITEMS, PermissionAction.ADD)) {
             addNotification("Access Restricted", "Admin has restricted adding new categories/items.", NotificationSeverity.WARNING)
             return
         }
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) return
         val newCat = ExpenseCategory(
             id = nextRecordId("cat"),
-            name = name,
-            urduName = urdu,
+            name = cleanName,
+            urduName = urdu.trim(),
             type = type,
-            isDefault = false
+            isDefault = false,
+            isInventoryCategory = isInventoryCategory
         )
         _expenseCategories.value = _expenseCategories.value + newCat
         storage.saveExpenseCategories(_expenseCategories.value)
         syncDocument("expenseCategories", newCat.id, newCat)
     }
 
-    fun deleteExpenseCategory(categoryId: String): Boolean {
-        if (!hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)) return false
-        val cat = _expenseCategories.value.find { it.id == categoryId } ?: return false
-        _expenseCategories.value = _expenseCategories.value.filterNot { it.id == categoryId }
-        storage.saveExpenseCategories(_expenseCategories.value)
-        deleteDocument("expenseCategories", categoryId)
-        addNotification(
-            "Category Deleted",
-            "Deleted expense category: ${cat.name}",
-            NotificationSeverity.INFO
-        )
-        return true
+    /**
+     * Deletes an Expense Category safely:
+     * Any stock items (FactoryMaterial or BottleSize) referencing this category are preserved
+     * with an empty category ("") so they appear as Uncategorized and can be reassigned later.
+     */
+    fun deleteExpenseCategory(categoryId: String): Boolean = synchronized(mutationLock) {
+        if (!hasPermission(AppModule.EXPENSES, PermissionAction.DELETE)) return@synchronized false
+        val cat = _expenseCategories.value.find { it.id == categoryId } ?: return@synchronized false
+        withSyncAction("Delete Category • ${cat.name}") {
+            _expenseCategories.value = _expenseCategories.value.filterNot { it.id == categoryId }
+            storage.saveExpenseCategories(_expenseCategories.value)
+            deleteDocument("expenseCategories", categoryId)
+
+            // Clear category on FactoryMaterials that belonged to this deleted category (never delete stock items)
+            var materialsChanged = false
+            val updatedMaterials = _factoryMaterials.value.map { mat ->
+                if (mat.itemCategory.equals(cat.name, ignoreCase = true)) {
+                    materialsChanged = true
+                    val cleared = mat.copy(itemCategory = "", lastUpdated = System.currentTimeMillis())
+                    syncDocument("factoryMaterials", cleared.id, cleared)
+                    cleared
+                } else mat
+            }
+            if (materialsChanged) {
+                _factoryMaterials.value = updatedMaterials
+                storage.saveFactoryMaterials(updatedMaterials)
+            }
+
+            // Clear category on BottleSizes that belonged to this deleted category (never delete bottle sizes)
+            var bottlesChanged = false
+            val updatedBottles = _bottleSizes.value.map { size ->
+                if (size.categoryName.equals(cat.name, ignoreCase = true)) {
+                    bottlesChanged = true
+                    val cleared = size.copy(categoryName = "")
+                    syncDocument("bottleSizes", cleared.id, cleared)
+                    cleared
+                } else size
+            }
+            if (bottlesChanged) {
+                _bottleSizes.value = updatedBottles
+                storage.saveBottleSizes(updatedBottles)
+            }
+
+            addNotification(
+                "Category Deleted",
+                "Deleted category '${cat.name}'. Existing stock items moved to Uncategorized.",
+                NotificationSeverity.INFO
+            )
+            true
+        }
     }
 
     // Cash Closing: Deducts ONLY OPEX expenses paid from Sale (excludes CAPEX & Investment Account)
@@ -6770,11 +7238,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
             .sumOf { it.amount }
 
         val cashRefunds = 0.0
-        // Previous closing must strictly come from a day BEFORE `date`
+        // Previous closing must strictly come from a day BEFORE `date`.
+        // Carry forward rule:
+        // - If balanced OR Admin APPROVED the difference -> carry forward actualClosingCash (physical drawer cash)
+        // - If difference is PENDING or REJECTED -> carry forward expectedClosingCash (past drawer + actual sales - expenses)
         val previousClosing = _cashClosings.value
             .filter { it.date < date }
             .maxByOrNull { it.date }
-        val openingCash = previousClosing?.actualClosingCash ?: 0.0
+        val openingCash = previousClosing?.carryForwardOpeningCash ?: 0.0
 
         val dailyNetReceived = totalReceived - opexFromSaleExpenses
         val expected = openingCash + cashCollected + otherCashIncome - cashExpenses - cashRefunds
@@ -6799,6 +7270,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
     fun submitCashClosing(summary: CashClosingSummary, actualCountedCash: Double, notes: String): CashClosing {
         return withSyncAction("Cash Closing • ${summary.date}") {
             val diff = actualCountedCash - summary.expectedClosingCash
+            val balanced = kotlin.math.abs(diff) < 0.01
+            // Any non-zero difference goes to Admin for explicit approval; balanced closings are auto-approved.
+            val initialApprovalStatus = if (balanced) "APPROVED" else "PENDING"
             val closing = CashClosing(
                 id = nextRecordId("close"),
                 date = summary.date,
@@ -6812,7 +7286,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 difference = diff,
                 notes = notes,
                 closedBy = _currentUser.value.name,
-                isApprovedByOwner = hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)
+                isApprovedByOwner = balanced,
+                approvalStatus = initialApprovalStatus,
+                approvedBy = if (balanced) _currentUser.value.name else "",
+                approvedAt = if (balanced) System.currentTimeMillis() else 0L
             )
 
             // Check if an existing closing exists for today; update in-place instead of creating duplicate!
@@ -6833,7 +7310,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 closing
             }
 
-            val diffLabel = if (finalClosing.isBalanced) "Balanced" else if (finalClosing.isShortage) "Shortage: Rs. ${kotlin.math.abs(diff)}" else "Surplus: Rs. $diff"
+            val diffLabel = if (finalClosing.isBalanced) "Balanced" else if (finalClosing.isShortage) "Shortage: Rs. ${kotlin.math.abs(diff)} (Pending Admin Approval)" else "Surplus: Rs. $diff (Pending Admin Approval)"
             appendAuditLog(AuditActionType.CREATE, AppModule.PAYMENTS_BALANCES, finalClosing.id, "Cash Closing ${summary.date}", updatedValue = "Actual Rs. ${actualCountedCash.toInt()} ($diffLabel)")
             addNotification(
                 "Daily Cash Closed",
@@ -6842,6 +7319,58 @@ class WaterPlantRepository private constructor(private val context: Context) {
             )
 
             finalClosing
+        }
+    }
+
+    /**
+     * Admin approves a Cash Closing difference -> difference is accepted/cut and next day opens with actual drawer cash.
+     */
+    fun approveCashClosingDifference(closingId: String): Boolean {
+        if (!hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)) return false
+        val target = _cashClosings.value.find { it.id == closingId } ?: return false
+        return withSyncAction("Approve Cash Closing Diff • ${target.date}") {
+            val updated = target.copy(
+                isApprovedByOwner = true,
+                approvalStatus = "APPROVED",
+                approvedBy = _currentUser.value.name,
+                approvedAt = System.currentTimeMillis()
+            )
+            _cashClosings.value = _cashClosings.value.map { if (it.id == closingId) updated else it }
+            storage.saveCashClosings(_cashClosings.value)
+            syncDocument("cashClosings", closingId, updated)
+            appendAuditLog(AuditActionType.APPROVE, AppModule.PAYMENTS_BALANCES, closingId, "Cash Closing ${target.date}", updatedValue = "Approved Diff Rs. ${target.difference.toInt()} -> Next Opening Rs. ${target.actualClosingCash.toInt()}")
+            addNotification(
+                "Cash Closing Difference Approved",
+                "${target.date}: Difference approved. Next day opening drawer cash set to Rs. ${target.actualClosingCash.toInt()}.",
+                NotificationSeverity.SUCCESS
+            )
+            true
+        }
+    }
+
+    /**
+     * Admin rejects a Cash Closing difference -> difference is NOT cut; next day continues from expectedClosingCash (past drawer + actual sales - expenses).
+     */
+    fun rejectCashClosingDifference(closingId: String): Boolean {
+        if (!hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)) return false
+        val target = _cashClosings.value.find { it.id == closingId } ?: return false
+        return withSyncAction("Reject Cash Closing Diff • ${target.date}") {
+            val updated = target.copy(
+                isApprovedByOwner = false,
+                approvalStatus = "REJECTED",
+                approvedBy = _currentUser.value.name,
+                approvedAt = System.currentTimeMillis()
+            )
+            _cashClosings.value = _cashClosings.value.map { if (it.id == closingId) updated else it }
+            storage.saveCashClosings(_cashClosings.value)
+            syncDocument("cashClosings", closingId, updated)
+            appendAuditLog(AuditActionType.UPDATE, AppModule.PAYMENTS_BALANCES, closingId, "Cash Closing ${target.date}", updatedValue = "Rejected Diff Rs. ${target.difference.toInt()} -> Next Opening stays Expected Rs. ${target.expectedClosingCash.toInt()}")
+            addNotification(
+                "Cash Closing Difference Not Approved",
+                "${target.date}: Difference rejected. Next day continues from expected balance Rs. ${target.expectedClosingCash.toInt()}.",
+                NotificationSeverity.WARNING
+            )
+            true
         }
     }
 

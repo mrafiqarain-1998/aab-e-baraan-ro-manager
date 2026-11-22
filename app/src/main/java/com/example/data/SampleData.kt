@@ -179,21 +179,25 @@ object SampleData {
     val initialMonthlyRecurringExpenses: List<MonthlyRecurringExpense> = emptyList()
 
     val expenseCategories: List<ExpenseCategory> = listOf(
-        // OPEX (Operating Expenses)
-        ExpenseCategory("cat_entertainment", "Entertainment", "مہمان نوازی", ExpenseType.OPEX),
-        ExpenseCategory("cat_fuel", "Fuel / Rent", "ایندھن / کرایہ", ExpenseType.OPEX),
-        ExpenseCategory("cat_electricity", "Electricity Bill", "بجلی کا بل", ExpenseType.OPEX),
-        ExpenseCategory("cat_maint", "Plant Maintenance", "پلانٹ مینٹیننس", ExpenseType.OPEX),
-        ExpenseCategory("cat_vehicle_maint", "Vehicle Maintenance", "گاڑی کی مرمت", ExpenseType.OPEX),
-        ExpenseCategory("cat_filters", "Filter and Cartridge", "فلٹر اور کارٹریج", ExpenseType.OPEX),
-        ExpenseCategory("cat_packing", "Packing Material", "پیکنگ مٹیریل", ExpenseType.OPEX),
-        ExpenseCategory("cat_minerals", "Chemical and Mineral", "کیمیکلز اور منرلز", ExpenseType.OPEX),
-        ExpenseCategory("cat_misc", "General", "عمومی اخراجات", ExpenseType.OPEX),
-        ExpenseCategory("cat_salary", "Staff Salary", "عملے کی تنخواہ", ExpenseType.OPEX),
-        ExpenseCategory("cat_raw_material", "Raw Material", "خام مال", ExpenseType.OPEX),
-        ExpenseCategory("cat_others", "Others", "دیگر اخراجات", ExpenseType.OPEX),
+        // Non-Inventory OPEX Categories
+        ExpenseCategory("cat_entertainment", "Entertainment", "مہمان نوازی", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_fuel", "Fuel / Rent", "ایندھن / کرایہ", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_electricity", "Electricity Bill", "بجلی کا بل", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_maint", "Plant Maintenance", "پلانٹ مینٹیننس", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_vehicle_maint", "Vehicle Maintenance", "گاڑی کی مرمت", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_misc", "General", "عمومی اخراجات", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_salary", "Staff Salary", "عملے کی تنخواہ", ExpenseType.OPEX, isInventoryCategory = false),
+        ExpenseCategory("cat_others", "Others", "دیگر اخراجات", ExpenseType.OPEX, isInventoryCategory = false),
+        // Inventory OPEX Categories
+        ExpenseCategory("cat_bottles_opex", "Bottle Purchase", "بوتل کی خریداری", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_filters", "Filter and Cartridge", "فلٹر اور کارٹریج", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_packing", "Packing Material", "پیکنگ مٹیریل", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_minerals", "Chemical and Mineral", "کیمیکلز اور منرلز", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_raw_material", "Raw Material", "خام مال", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_ro_parts", "RO Plant Parts", "آر او پلانٹ پارٹس", ExpenseType.OPEX, isInventoryCategory = true),
+        ExpenseCategory("cat_bottle_cap", "Bottle & Cap", "بوتل اور کیپ", ExpenseType.OPEX, isInventoryCategory = true),
         // CAPEX (Capital Expenses)
-        ExpenseCategory("cat_asset_machinery", "Asset / Machinery", "اثاثہ جات / مشینری", ExpenseType.CAPEX)
+        ExpenseCategory("cat_asset_machinery", "Asset / Machinery", "اثاثہ جات / مشینری", ExpenseType.CAPEX, isInventoryCategory = true)
     )
 
     val initialInvoices: List<Invoice> = emptyList()

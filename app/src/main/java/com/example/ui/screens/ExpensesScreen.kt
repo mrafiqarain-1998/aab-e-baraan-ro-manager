@@ -25,8 +25,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import com.example.ui.components.CompactDropdownField
 import com.example.ui.components.CompactFormTextField
+import com.example.ui.components.EditMetadataBadge
+import com.example.ui.components.EditableDateField
+import com.example.ui.components.FromToDateRangeDialog
 import com.example.ui.components.MobileFormDialog
 import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
@@ -44,6 +49,7 @@ enum class ExpensePeriod(val label: String, val urduLabel: String) {
     YESTERDAY("Yesterday", "گزشتہ کل"),
     LAST_7_DAYS("Last 7 Days", "آخری 7 دن"),
     THIS_MONTH("This Month", "اس ماہ"),
+    CUSTOM("Custom Date", "مخصوص تاریخ"),
     ALL("All Expense", "تمام اخراجات")
 }
 
@@ -99,6 +105,9 @@ fun ExpensesScreen(
     val todayCal = remember { Calendar.getInstance() }
     val todayStr = remember { sdf.format(todayCal.time) }
     val todayDisplay = remember { sdfDisplay.format(todayCal.time) }
+    var customStartDate by remember { mutableStateOf(todayStr) }
+    var customEndDate by remember { mutableStateOf(todayStr) }
+    var showCustomDateDialog by remember { mutableStateOf(false) }
 
     val yesterdayStr = remember {
         val c = Calendar.getInstance()
@@ -139,7 +148,7 @@ fun ExpensesScreen(
     var selectedStatusFilter by remember { mutableStateOf(ExpenseStatusFilter.ALL) }
     var selectedPaymentSourceFilter by remember { mutableStateOf<PaymentSource?>(null) }
 
-    val periodExpenses = remember(expenses, selectedPeriod) {
+    val periodExpenses = remember(expenses, selectedPeriod, customStartDate, customEndDate) {
         expenses.filter { exp ->
             when (selectedPeriod) {
                 ExpensePeriod.ALL -> true
@@ -147,6 +156,7 @@ fun ExpensesScreen(
                 ExpensePeriod.YESTERDAY -> exp.date == yesterdayStr
                 ExpensePeriod.LAST_7_DAYS -> exp.date >= weekStartStr
                 ExpensePeriod.THIS_MONTH -> exp.date >= monthStartStr
+                ExpensePeriod.CUSTOM -> exp.date in customStartDate..customEndDate
             }
         }
     }
@@ -214,6 +224,7 @@ fun ExpensesScreen(
                     ExpensePeriod.YESTERDAY -> yesterdayDisplay
                     ExpensePeriod.LAST_7_DAYS -> "$weekStartDisplay — $todayDisplay"
                     ExpensePeriod.THIS_MONTH -> "$monthStartDisplay — $todayDisplay"
+                    ExpensePeriod.CUSTOM -> if (customStartDate == customEndDate) customStartDate else "$customStartDate — $customEndDate"
                 }
 
                 // Title & Action Row
@@ -292,42 +303,51 @@ fun ExpensesScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Single-Line Aligned Period Tabs: Today | Yesterday | Last 7 Days | This Month | All Expense
+                // Single-Line Scrollable Period Tabs including Custom Date
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
                         .testTag("expense_period_tabs"),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val tabConfigs = listOf(
-                        Triple(ExpensePeriod.TODAY, "Today", 0.78f),
-                        Triple(ExpensePeriod.YESTERDAY, "Yesterday", 1.05f),
-                        Triple(ExpensePeriod.LAST_7_DAYS, "Last 7 Days", 1.12f),
-                        Triple(ExpensePeriod.THIS_MONTH, "This Month", 1.10f),
-                        Triple(ExpensePeriod.ALL, "All Expense", 1.12f)
+                        ExpensePeriod.TODAY to "Today",
+                        ExpensePeriod.YESTERDAY to "Yesterday",
+                        ExpensePeriod.LAST_7_DAYS to "Last 7 Days",
+                        ExpensePeriod.THIS_MONTH to "This Month",
+                        ExpensePeriod.CUSTOM to if (selectedPeriod == ExpensePeriod.CUSTOM) {
+                            if (customStartDate == customEndDate) customStartDate else "$customStartDate..$customEndDate"
+                        } else "Custom Date",
+                        ExpensePeriod.ALL to "All Expense"
                     )
 
-                    tabConfigs.forEach { (period, label, weightVal) ->
+                    tabConfigs.forEach { (period, label) ->
                         val isSelected = selectedPeriod == period
                         Surface(
                             shape = RoundedCornerShape(7.dp),
                             color = if (isSelected) WaterSkyButton else WaterSkyLight.copy(alpha = 0.75f),
                             modifier = Modifier
-                                .weight(weightVal)
-                                .height(29.dp)
-                                .clickable { selectedPeriod = period }
+                                .height(30.dp)
+                                .clickable {
+                                    if (period == ExpensePeriod.CUSTOM) {
+                                        showCustomDateDialog = true
+                                    } else {
+                                        selectedPeriod = period
+                                    }
+                                }
                                 .testTag("expense_tab_${period.name.lowercase()}")
                         ) {
                             Box(
                                 contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 2.dp)
+                                    .fillMaxHeight()
+                                    .padding(horizontal = 10.dp)
                             ) {
                                 Text(
                                     text = label,
-                                    fontSize = 8.5.sp,
+                                    fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isSelected) WaterSkyButtonContent else WaterNavyDark,
                                     maxLines = 1,
@@ -897,7 +917,7 @@ fun ExpensesScreen(
         )
     }
 
-    // Add Expense Dialog
+    // Add Expense Dialog (Choice -> Inventory Multi-Item OR Non-Inventory)
     if (showAddDialog) {
         AddExpenseDialog(
             categories = categories,
@@ -971,8 +991,42 @@ fun ExpensesScreen(
                 )
                 showAddDialog = false
             },
+            onSaveMultiItemInventory = { items, expType, supplier, invoiceNo, notes, date, source, method ->
+                viewModel.recordMultiItemInventoryExpense(
+                    items = items,
+                    expenseType = expType,
+                    supplierName = supplier,
+                    invoiceNo = invoiceNo,
+                    notes = notes,
+                    expenseDate = date,
+                    paymentSource = source,
+                    paymentMethod = method
+                )
+                showAddDialog = false
+            },
             onAddCategory = { name, urdu, type ->
-                viewModel.addExpenseCategory(name, urdu, type)
+                viewModel.addExpenseCategory(name, urdu, type, false)
+            },
+            onAddCategoryWithType = { name, urdu, type, isInv ->
+                viewModel.addExpenseCategory(name, urdu, type, isInv)
+            },
+            onAddNewMaterial = { mat ->
+                viewModel.addFactoryMaterial(mat)
+            },
+            onAddNewBottleSize = { name, cap, usage, refill, cost, uom, catName ->
+                viewModel.addNewBottleSize(
+                    name = name,
+                    purchaseRate = cost,
+                    packQty = 1,
+                    uom = uom,
+                    openingStock = 0,
+                    usageType = usage,
+                    defaultRefillPrice = refill,
+                    salePrice = refill,
+                    capacityLitres = cap,
+                    depositAmount = 0.0,
+                    categoryName = catName
+                )
             }
         )
     }
@@ -980,7 +1034,9 @@ fun ExpensesScreen(
     if (showNewCategoryDialog) {
         ManageExpenseCategoriesDialog(
             categories = categories,
-            onAddCategory = { name, urdu, type -> viewModel.addExpenseCategory(name, urdu, type) },
+            onAddCategory = { name, urdu, type, isInv ->
+                viewModel.addExpenseCategory(name, urdu, type, isInv)
+            },
             onDeleteCategory = { catId -> viewModel.deleteExpenseCategory(catId) },
             onDismiss = { showNewCategoryDialog = false }
         )
@@ -1037,15 +1093,58 @@ fun ExpensesScreen(
         )
     }
 
-    // Admin Edit Expense Dialog
+    // Full Edit Expense Dialog (Both Inventory & Non-Inventory)
     if (expenseToEdit != null) {
         EditExpenseDialog(
             expense = expenseToEdit!!,
             categories = categories,
+            isAdmin = isAdmin,
+            factoryMaterials = factoryMaterials,
+            bottleSizes = bottleSizes,
+            plantWorkers = plantWorkers,
+            onGetWorkerSalarySummary = { workerId, month ->
+                viewModel.getWorkerMonthlySalarySummary(workerId, month)
+            },
+            onAddCategoryWithType = { name, urdu, type, isInv ->
+                viewModel.addExpenseCategory(name, urdu, type, isInv)
+            },
+            onAddNewMaterial = { mat ->
+                viewModel.addFactoryMaterial(mat)
+            },
+            onAddNewBottleSize = { name, cap, usage, refill, cost, uom, catName ->
+                viewModel.addNewBottleSize(
+                    name = name,
+                    purchaseRate = cost,
+                    packQty = 1,
+                    uom = uom,
+                    openingStock = 0,
+                    usageType = usage,
+                    defaultRefillPrice = refill,
+                    salePrice = refill,
+                    capacityLitres = cap,
+                    depositAmount = 0.0,
+                    categoryName = catName
+                )
+            },
             onDismiss = { expenseToEdit = null },
             onSave = { updated ->
                 viewModel.updateExpense(updated)
                 expenseToEdit = null
+            }
+        )
+    }
+
+    if (showCustomDateDialog) {
+        FromToDateRangeDialog(
+            initialFromDate = customStartDate,
+            initialToDate = customEndDate,
+            title = "Expense Custom Date (تاریخ منتخب کریں)",
+            onDismiss = { showCustomDateDialog = false },
+            onConfirm = { from, to ->
+                customStartDate = from
+                customEndDate = to
+                selectedPeriod = ExpensePeriod.CUSTOM
+                showCustomDateDialog = false
             }
         )
     }
@@ -1189,18 +1288,25 @@ fun ExpenseItemCard(
                         )
                     }
 
-                    if (expense.linkedInventoryType.isNotBlank() && expense.linkedInventoryQty > 0.0) {
-                        val qtyLabel = if (expense.linkedInventoryQty % 1.0 == 0.0) {
-                            expense.linkedInventoryQty.toInt().toString()
+                    val invLines = expense.effectiveInventoryItems
+                    if (invLines.isNotEmpty()) {
+                        val badgeLabel = if (invLines.size > 1) {
+                            val totalUnits = invLines.sumOf { it.quantity }
+                            val uStr = if (totalUnits % 1.0 == 0.0) totalUnits.toInt().toString()
+                            else String.format(Locale.ENGLISH, "%.1f", totalUnits)
+                            "${invLines.size} Items • +$uStr"
                         } else {
-                            String.format(Locale.ENGLISH, "%.1f", expense.linkedInventoryQty)
+                            val single = invLines.first()
+                            val qtyLabel = if (single.quantity % 1.0 == 0.0) single.quantity.toInt().toString()
+                            else String.format(Locale.ENGLISH, "%.1f", single.quantity)
+                            if (single.itemType == "BOTTLE") "Bottle +$qtyLabel" else "Stock +$qtyLabel"
                         }
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = SuccessGreenLight
                         ) {
                             Text(
-                                text = if (expense.linkedInventoryType == "BOTTLE") "Bottle +$qtyLabel" else "Stock +$qtyLabel",
+                                text = badgeLabel,
                                 color = SuccessGreen,
                                 fontSize = 7.5.sp,
                                 fontWeight = FontWeight.ExtraBold,
@@ -1452,6 +1558,93 @@ fun ExpenseDetailDialog(
             }
         }
 
+        // Item-wise Breakdown Card for Inventory Expenses
+        val invItems = expense.effectiveInventoryItems
+        if (invItems.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = SuccessGreenLight.copy(alpha = 0.55f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, SuccessGreen.copy(alpha = 0.35f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("expense_detail_items_breakdown")
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Purchased Inventory Items (${invItems.size})",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SuccessGreen
+                        )
+                        Text(
+                            text = "اسٹاک آئٹمز کی تفصیل",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SuccessGreen
+                        )
+                    }
+                    HorizontalDivider(color = SuccessGreen.copy(alpha = 0.25f))
+                    invItems.forEachIndexed { idx, item ->
+                        val qtyStr = if (item.quantity % 1.0 == 0.0) item.quantity.toInt().toString()
+                        else String.format(Locale.ENGLISH, "%.2f", item.quantity)
+                        val rateStr = if (item.unitRate % 1.0 == 0.0) item.unitRate.toInt().toString()
+                        else String.format(Locale.ENGLISH, "%.2f", item.unitRate)
+                        val lineTotalVal = if (item.lineTotal > 0.0) item.lineTotal else item.quantity * item.unitRate
+                        val catLabel = item.categoryName.ifBlank { "Uncategorized" }
+                        val kindLabel = if (item.itemType == "BOTTLE") "Bottle" else "Material"
+
+                        Surface(
+                            shape = RoundedCornerShape(7.dp),
+                            color = Color.White,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                    Text(
+                                        text = "${idx + 1}. ${item.itemName}",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = WaterNavyDark,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "$kindLabel • Cat: $catLabel • $qtyStr ${item.uom.ifBlank { "pcs" }} × Rs. $rateStr",
+                                        fontSize = 8.5.sp,
+                                        color = TextSecondaryDark,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Text(
+                                    text = "Rs. ${lineTotalVal.toInt()}",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = WaterNavyPrimary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Detail Rows Card
         Surface(
             shape = RoundedCornerShape(10.dp),
@@ -1463,19 +1656,10 @@ fun ExpenseDetailDialog(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
-                ExpenseDetailRow("Expense Type", expense.expenseType.name)
-                ExpenseDetailRow("Category", expense.categoryName)
+                ExpenseDetailRow("Expense Type", "${expense.expenseType.name} (${if (expense.hasInventoryItems) "Inventory" else "Non-Inventory"})")
+                ExpenseDetailRow("Category", expense.categoryName.ifBlank { "Uncategorized" })
                 if (expense.staffMemberName.isNotBlank()) {
                     ExpenseDetailRow("Staff Member", expense.staffMemberName)
-                }
-                if (expense.linkedInventoryType.isNotBlank() && expense.linkedInventoryItemName.isNotBlank()) {
-                    val qtyText = if (expense.linkedInventoryQty % 1.0 == 0.0) {
-                        expense.linkedInventoryQty.toInt().toString()
-                    } else {
-                        String.format(Locale.ENGLISH, "%.2f", expense.linkedInventoryQty)
-                    }
-                    val stockKind = if (expense.linkedInventoryType == "BOTTLE") "Bottle Stock" else "Material Stock"
-                    ExpenseDetailRow("Linked Stock", "${expense.linkedInventoryItemName} (+$qtyText • $stockKind)")
                 }
                 if (expense.invoiceNumber.isNotBlank()) {
                     ExpenseDetailRow("Invoice / Bill #", expense.invoiceNumber)
@@ -1491,6 +1675,11 @@ fun ExpenseDetailDialog(
                 }
             }
         }
+
+        EditMetadataBadge(
+            lastEditedAt = expense.lastEditedAt,
+            lastEditedBy = expense.lastEditedBy
+        )
 
         if (!expense.isAcknowledged && canApprove) {
             Button(
@@ -1531,1254 +1720,6 @@ private fun ExpenseDetailRow(label: String, value: String) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun AddExpenseDialog(
-    categories: List<ExpenseCategory>,
-    isAdmin: Boolean,
-    factoryMaterials: List<FactoryMaterial> = emptyList(),
-    bottleSizes: List<BottleSize> = emptyList(),
-    plantWorkers: List<PlantWorker> = emptyList(),
-    onGetWorkerSalarySummary: ((workerId: String, month: String) -> WorkerSalarySummary)? = null,
-    onDismiss: () -> Unit,
-    onSave: (String, String, String, Double, PaymentMethod, String, String, ExpenseType, String) -> Unit,
-    onSaveWithSource: ((String, String, String, Double, PaymentMethod, String, String, ExpenseType, String, PaymentSource) -> Unit)? = null,
-    onSaveWithSourceAndStaff: ((
-        catId: String,
-        catName: String,
-        desc: String,
-        amt: Double,
-        method: PaymentMethod,
-        payee: String,
-        notes: String,
-        type: ExpenseType,
-        date: String,
-        source: PaymentSource,
-        invoiceNo: String,
-        staffMemberId: String,
-        staffMemberName: String
-    ) -> Unit)? = null,
-    onSaveWithMaterialRefill: ((
-        materialId: String,
-        qty: Double,
-        unitCost: Double,
-        catId: String,
-        catName: String,
-        expType: ExpenseType,
-        desc: String,
-        supplier: String,
-        invoiceNo: String,
-        notes: String,
-        date: String,
-        source: PaymentSource,
-        method: PaymentMethod
-    ) -> Unit)? = null,
-    onSaveWithBottlePurchase: ((
-        bottleSizeId: String,
-        qty: Int,
-        unitCost: Double,
-        catId: String,
-        catName: String,
-        expType: ExpenseType,
-        desc: String,
-        supplier: String,
-        invoiceNo: String,
-        notes: String,
-        date: String,
-        source: PaymentSource,
-        method: PaymentMethod
-    ) -> Unit)? = null,
-    onAddCategory: (String, String, ExpenseType) -> Unit = { _, _, _ -> }
-) {
-    val allCategories = remember(categories) {
-        (STANDARD_EXPENSE_CATEGORIES + categories)
-            .distinctBy { it.name.trim().lowercase() }
-    }
-    val activeMaterials = remember(factoryMaterials) { factoryMaterials.filter { it.active } }
-    val activeBottleSizes = remember(bottleSizes) { bottleSizes.filter { it.active } }
-    val activeWorkers = remember(plantWorkers) { plantWorkers.filter { it.active } }
+// AddExpenseDialog, EditExpenseDialog, and ManageExpenseCategoriesDialog
+// are modularized in ExpenseFormDialogs.kt (same package com.example.ui.screens).
 
-    var selectedType by remember { mutableStateOf(ExpenseType.OPEX) }
-    var selectedCategory by remember {
-        mutableStateOf(
-            allCategories.firstOrNull { it.type == ExpenseType.OPEX } ?: allCategories.first()
-        )
-    }
-
-    var expenseDate by remember { mutableStateOf(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())) }
-    var description by remember { mutableStateOf("") }
-    var amountText by remember { mutableStateOf("") }
-    var vendor by remember { mutableStateOf("") }
-    var invoiceNumber by remember { mutableStateOf("") }
-    var paymentSource by remember { mutableStateOf(PaymentSource.PAY_FROM_SALE) }
-    var paymentMethod by remember { mutableStateOf(PaymentMethod.CASH) }
-    var notes by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    // Inventory Purchase Mode State (Other Material OR Bottle Stock)
-    var isInventoryPurchase by remember { mutableStateOf(false) }
-    var isBottleStockMode by remember { mutableStateOf(false) }
-    var selectedMaterial by remember(activeMaterials) { mutableStateOf(activeMaterials.firstOrNull()) }
-    var selectedBottleSize by remember(activeBottleSizes) { mutableStateOf(activeBottleSizes.firstOrNull()) }
-    var invQtyText by remember { mutableStateOf("") }
-    var invUnitRateText by remember { mutableStateOf("") }
-
-    // Staff Salary Selection State
-    val isSalaryCategory = selectedCategory.id == "cat_salary" ||
-        selectedCategory.name.contains("salary", ignoreCase = true)
-    var selectedWorker by remember(activeWorkers) { mutableStateOf<PlantWorker?>(null) }
-    val expenseMonth = remember(expenseDate) {
-        if (expenseDate.length >= 7) expenseDate.substring(0, 7)
-        else SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
-    }
-    val workerSalarySummary = remember(selectedWorker, expenseMonth) {
-        selectedWorker?.let { w -> onGetWorkerSalarySummary?.invoke(w.id, expenseMonth) }
-    }
-
-    // Auto-calculate total amount when Inventory Purchase checkbox is enabled
-    val invQtyVal = invQtyText.toDoubleOrNull() ?: 0.0
-    val invRateVal = invUnitRateText.toDoubleOrNull() ?: 0.0
-    val invComputedTotal = invQtyVal * invRateVal
-
-    val hasChanges = description.isNotBlank() || amountText.isNotBlank() || vendor.isNotBlank() ||
-        notes.isNotBlank() || invQtyText.isNotBlank() || selectedWorker != null
-    val context = LocalContext.current
-
-    fun applySelectedMaterialDefaults(mat: FactoryMaterial) {
-        selectedMaterial = mat
-        invUnitRateText = if (mat.purchaseRate > 0.0) {
-            if (mat.purchaseRate % 1.0 == 0.0) mat.purchaseRate.toInt().toString()
-            else String.format(Locale.ENGLISH, "%.2f", mat.purchaseRate)
-        } else ""
-        if (mat.supplierName.isNotBlank()) vendor = mat.supplierName
-        if (description.isBlank() || description.startsWith("Stock Purchase:") || description.startsWith("Bottle Purchase:")) {
-            description = "Stock Purchase: ${mat.name}"
-        }
-        val matchingCat = allCategories.firstOrNull { it.name.equals(mat.itemCategory, ignoreCase = true) }
-        if (matchingCat != null) {
-            selectedCategory = matchingCat
-            selectedType = mat.costType
-        }
-    }
-
-    fun applySelectedBottleDefaults(size: BottleSize) {
-        selectedBottleSize = size
-        invUnitRateText = if (size.latestPurchaseRate > 0.0) {
-            if (size.latestPurchaseRate % 1.0 == 0.0) size.latestPurchaseRate.toInt().toString()
-            else String.format(Locale.ENGLISH, "%.2f", size.latestPurchaseRate)
-        } else ""
-        if (description.isBlank() || description.startsWith("Stock Purchase:") || description.startsWith("Bottle Purchase:")) {
-            description = "Bottle Purchase: ${size.name}"
-        }
-    }
-
-    fun openDatePicker() {
-        val cal = Calendar.getInstance()
-        try {
-            val parts = expenseDate.split("-")
-            if (parts.size == 3) {
-                cal.set(parts[0].toInt(), parts[1].toInt() - 1, parts[2].toInt())
-            }
-        } catch (_: Exception) {}
-        android.app.DatePickerDialog(
-            context,
-            { _, y, m, d ->
-                expenseDate = String.format(Locale.getDefault(), "%04d-%02d-%02d", y, m + 1, d)
-            },
-            cal.get(Calendar.YEAR),
-            cal.get(Calendar.MONTH),
-            cal.get(Calendar.DAY_OF_MONTH)
-        ).show()
-    }
-
-    MobileFormDialog(
-        title = "Add Expense Voucher",
-        subtitle = "Date: $expenseDate",
-        hasUnsavedChanges = hasChanges,
-        onDismiss = onDismiss,
-        accentColor = ErrorRed,
-        footerContent = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = WaterSkyLight,
-                    modifier = Modifier
-                        .height(32.dp)
-                        .clickable { openDatePicker() }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.CalendarToday, contentDescription = "Pick Date", tint = WaterNavyPrimary, modifier = Modifier.size(13.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(expenseDate, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary, maxLines = 1, softWrap = false)
-                    }
-                }
-
-                Button(
-                    onClick = {
-                        if (isInventoryPurchase && !isSalaryCategory) {
-                            if (isBottleStockMode) {
-                                val size = selectedBottleSize
-                                val qtyInt = invQtyText.trim().toIntOrNull() ?: 0
-                                val unitRate = invUnitRateText.trim().toDoubleOrNull() ?: 0.0
-                                when {
-                                    size == null -> {
-                                        errorMessage = "Select an existing Bottle Size first"
-                                        return@Button
-                                    }
-                                    qtyInt <= 0 -> {
-                                        errorMessage = "Enter bottle quantity > 0"
-                                        return@Button
-                                    }
-                                    unitRate < 0.0 -> {
-                                        errorMessage = "Enter valid unit rate"
-                                        return@Button
-                                    }
-                                    onSaveWithBottlePurchase != null -> {
-                                        onSaveWithBottlePurchase(
-                                            size.id,
-                                            qtyInt,
-                                            unitRate,
-                                            selectedCategory.id,
-                                            selectedCategory.name,
-                                            selectedType,
-                                            description.trim().ifBlank { "Bottle Purchase: $qtyInt x ${size.name}" },
-                                            vendor.trim(),
-                                            invoiceNumber.trim(),
-                                            notes.trim(),
-                                            expenseDate.trim(),
-                                            paymentSource,
-                                            paymentMethod
-                                        )
-                                        onDismiss()
-                                        return@Button
-                                    }
-                                }
-                            } else {
-                                val mat = selectedMaterial
-                                val qtyD = invQtyText.trim().toDoubleOrNull() ?: 0.0
-                                val unitRate = invUnitRateText.trim().toDoubleOrNull() ?: 0.0
-                                when {
-                                    mat == null -> {
-                                        errorMessage = "Select an existing Inventory Item (add new items in Stock & Cost → Materials first)"
-                                        return@Button
-                                    }
-                                    qtyD <= 0.0 -> {
-                                        errorMessage = "Enter quantity > 0"
-                                        return@Button
-                                    }
-                                    unitRate < 0.0 -> {
-                                        errorMessage = "Enter valid unit rate"
-                                        return@Button
-                                    }
-                                    onSaveWithMaterialRefill != null -> {
-                                        onSaveWithMaterialRefill(
-                                            mat.id,
-                                            qtyD,
-                                            unitRate,
-                                            selectedCategory.id,
-                                            selectedCategory.name,
-                                            selectedType,
-                                            description.trim().ifBlank { "Stock Purchase: ${mat.name}" },
-                                            vendor.trim(),
-                                            invoiceNumber.trim(),
-                                            notes.trim(),
-                                            expenseDate.trim(),
-                                            paymentSource,
-                                            paymentMethod
-                                        )
-                                        onDismiss()
-                                        return@Button
-                                    }
-                                }
-                            }
-                        }
-
-                        val amt = amountText.toDoubleOrNull() ?: 0.0
-                        val finalDesc = description.trim().ifBlank {
-                            if (isSalaryCategory && selectedWorker != null) {
-                                "Salary / Advance - ${selectedWorker!!.name} ($expenseMonth)"
-                            } else ""
-                        }
-                        if (finalDesc.isBlank()) {
-                            errorMessage = "Please enter Description"
-                            return@Button
-                        }
-                        if (amt <= 0.0) {
-                            errorMessage = "Please enter valid Amount"
-                            return@Button
-                        }
-                        val staffId = if (isSalaryCategory) selectedWorker?.id.orEmpty() else ""
-                        val staffName = if (isSalaryCategory) selectedWorker?.name.orEmpty() else ""
-                        val finalPayee = vendor.trim().ifBlank { staffName }
-
-                        if (onSaveWithSourceAndStaff != null) {
-                            onSaveWithSourceAndStaff(
-                                selectedCategory.id,
-                                selectedCategory.name,
-                                finalDesc,
-                                amt,
-                                paymentMethod,
-                                finalPayee,
-                                notes.trim(),
-                                selectedType,
-                                expenseDate.trim(),
-                                paymentSource,
-                                invoiceNumber.trim(),
-                                staffId,
-                                staffName
-                            )
-                        } else if (onSaveWithSource != null) {
-                            onSaveWithSource(
-                                selectedCategory.id,
-                                selectedCategory.name,
-                                finalDesc,
-                                amt,
-                                paymentMethod,
-                                finalPayee,
-                                notes.trim(),
-                                selectedType,
-                                expenseDate.trim(),
-                                paymentSource
-                            )
-                        } else {
-                            onSave(
-                                selectedCategory.id,
-                                selectedCategory.name,
-                                finalDesc,
-                                amt,
-                                paymentMethod,
-                                finalPayee,
-                                notes.trim(),
-                                selectedType,
-                                expenseDate.trim()
-                            )
-                        }
-                        onDismiss()
-                    },
-                    colors = waterPrimaryButtonColors(),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-                    modifier = Modifier
-                        .height(36.dp)
-                        .testTag("save_expense_voucher_btn")
-                ) {
-                    Icon(Icons.Default.ReceiptLong, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text("Save Voucher", fontWeight = FontWeight.Bold, fontSize = 10.5.sp, maxLines = 1, softWrap = false)
-                }
-            }
-        }
-    ) {
-        if (errorMessage != null) {
-            Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = ErrorRedLight,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = errorMessage!!,
-                    color = ErrorRed,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-                )
-            }
-        }
-
-        // 1. Expense Type - Dropdown (OPEX, CAPEX)
-        CompactDropdownField(
-            label = "Expense Type*",
-            selectedText = if (selectedType == ExpenseType.OPEX) "OPEX" else "CAPEX",
-            options = listOf(ExpenseType.OPEX, ExpenseType.CAPEX),
-            optionLabel = { if (it == ExpenseType.OPEX) "OPEX (Operating)" else "CAPEX (Asset / Capital)" },
-            onOptionSelected = { newType ->
-                selectedType = newType
-                if (newType == ExpenseType.CAPEX) {
-                    selectedCategory = allCategories.firstOrNull { it.type == ExpenseType.CAPEX } ?: selectedCategory
-                } else if (selectedCategory.type == ExpenseType.CAPEX) {
-                    selectedCategory = allCategories.firstOrNull { it.type == ExpenseType.OPEX } ?: selectedCategory
-                }
-            },
-            modifier = Modifier.testTag("expense_type_dropdown")
-        )
-
-        // 2. Category - Dropdown (All standard + custom categories)
-        CompactDropdownField(
-            label = "Category*",
-            selectedText = selectedCategory.name,
-            options = allCategories,
-            optionLabel = { it.name },
-            onOptionSelected = { cat ->
-                selectedCategory = cat
-                errorMessage = null
-                if (cat.id == "cat_salary" || cat.name.contains("salary", ignoreCase = true)) {
-                    isInventoryPurchase = false
-                } else if (cat.name.contains("bottle", ignoreCase = true)) {
-                    isBottleStockMode = true
-                    if (isInventoryPurchase) {
-                        selectedBottleSize?.let { applySelectedBottleDefaults(it) }
-                    }
-                }
-            },
-            modifier = Modifier.testTag("expense_category_dropdown")
-        )
-
-        // 2B. STAFF SALARY SMART SELECTOR (Shown BEFORE Description when Staff Salary selected)
-        if (isSalaryCategory) {
-            Surface(
-                shape = RoundedCornerShape(9.dp),
-                color = WaterSkyLight.copy(alpha = 0.75f),
-                border = androidx.compose.foundation.BorderStroke(1.dp, WaterAqua.copy(alpha = 0.45f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("expense_staff_salary_section")
-            ) {
-                Column(
-                    modifier = Modifier.padding(9.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "Select Staff Member (عملہ منتخب کریں)",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = WaterNavyPrimary
-                    )
-                    if (activeWorkers.isEmpty()) {
-                        Text(
-                            text = "No workers registered yet. Add workers in Stock & Cost → Staff tab to track monthly salary & advance deduction automatically.",
-                            fontSize = 9.5.sp,
-                            color = TextSecondaryDark
-                        )
-                    } else {
-                        CompactDropdownField(
-                            label = "Staff Name (عملے کا نام)*",
-                            selectedText = selectedWorker?.let { "${it.name} (Rs. ${it.monthlySalary.toInt()})" } ?: "Select Staff...",
-                            options = activeWorkers,
-                            optionLabel = { w ->
-                                val sum = onGetWorkerSalarySummary?.invoke(w.id, expenseMonth)
-                                if (sum != null && sum.paidOrAdvanceThisMonth > 0.0) {
-                                    "${w.name} • Rem: Rs. ${sum.remainingSalary.toInt()} / ${w.monthlySalary.toInt()}"
-                                } else {
-                                    "${w.name} • Salary: Rs. ${w.monthlySalary.toInt()}"
-                                }
-                            },
-                            onOptionSelected = { worker ->
-                                selectedWorker = worker
-                                vendor = worker.name
-                                val sum = onGetWorkerSalarySummary?.invoke(worker.id, expenseMonth)
-                                val suggested = sum?.remainingSalary ?: worker.monthlySalary
-                                amountText = if (suggested > 0.0) suggested.toInt().toString() else ""
-                                description = if (sum != null && sum.paidOrAdvanceThisMonth > 0.0) {
-                                    "Salary Balance - ${worker.name} ($expenseMonth)"
-                                } else {
-                                    "Salary / Advance - ${worker.name} ($expenseMonth)"
-                                }
-                                errorMessage = null
-                            },
-                            modifier = Modifier.testTag("expense_staff_dropdown")
-                        )
-
-                        workerSalarySummary?.let { summary ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color.White,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Text("Salary", fontSize = 8.sp, color = TextSecondaryDark, fontWeight = FontWeight.Bold)
-                                        Text("Rs. ${summary.monthlySalary.toInt()}", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = WaterNavyPrimary, maxLines = 1)
-                                    }
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (summary.paidOrAdvanceThisMonth > 0.0) WarningOrangeLight else Color.White,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Text("Advance Paid", fontSize = 8.sp, color = WarningOrange, fontWeight = FontWeight.Bold)
-                                        Text("Rs. ${summary.paidOrAdvanceThisMonth.toInt()}", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = WarningOrange, maxLines = 1)
-                                    }
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (summary.remainingSalary > 0.0) SuccessGreenLight else Color.White,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Text("Remaining", fontSize = 8.sp, color = SuccessGreen, fontWeight = FontWeight.Bold)
-                                        Text("Rs. ${summary.remainingSalary.toInt()}", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SuccessGreen, maxLines = 1)
-                                    }
-                                }
-                            }
-                            Text(
-                                text = "Month: $expenseMonth • Any amount paid deducts automatically as advance/salary.",
-                                fontSize = 8.5.sp,
-                                color = WaterBlueDeep
-                            )
-                        }
-                    }
-                }
-            }
-        } else {
-            // 2C. INVENTORY ITEM / BOTTLE STOCK PURCHASE CHECKBOX (Two-Way Sync)
-            Surface(
-                shape = RoundedCornerShape(9.dp),
-                color = if (isInventoryPurchase) WaterSkyLight.copy(alpha = 0.85f) else Color(0xFFF8FAFC),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (isInventoryPurchase) WaterBlueMedium else BorderLight
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        val next = !isInventoryPurchase
-                        isInventoryPurchase = next
-                        errorMessage = null
-                        if (next) {
-                            if (selectedCategory.name.contains("bottle", ignoreCase = true)) {
-                                isBottleStockMode = true
-                                selectedBottleSize?.let { applySelectedBottleDefaults(it) }
-                            } else {
-                                isBottleStockMode = false
-                                selectedMaterial?.let { applySelectedMaterialDefaults(it) }
-                            }
-                        }
-                    }
-                    .testTag("expense_inventory_checkbox_card")
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(
-                        checked = isInventoryPurchase,
-                        onCheckedChange = { checked ->
-                            isInventoryPurchase = checked
-                            errorMessage = null
-                            if (checked) {
-                                if (selectedCategory.name.contains("bottle", ignoreCase = true)) {
-                                    isBottleStockMode = true
-                                    selectedBottleSize?.let { applySelectedBottleDefaults(it) }
-                                } else {
-                                    isBottleStockMode = false
-                                    selectedMaterial?.let { applySelectedMaterialDefaults(it) }
-                                }
-                            }
-                        },
-                        colors = CheckboxDefaults.colors(checkedColor = WaterBlueDeep),
-                        modifier = Modifier
-                            .size(22.dp)
-                            .testTag("expense_inventory_checkbox")
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Inventory Item / Bottle Stock Purchase",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = WaterNavyDark
-                        )
-                        Text(
-                            text = "اسٹاک آئٹم خریداری — ٹک کریں تو خرچہ اور اسٹاک دونوں اپڈیٹ ہوں گے",
-                            fontSize = 8.5.sp,
-                            color = TextSecondaryDark
-                        )
-                    }
-                }
-            }
-
-            if (isInventoryPurchase) {
-                Surface(
-                    shape = RoundedCornerShape(9.dp),
-                    color = Color(0xFFF8FAFC),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, WaterAqua.copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(9.dp),
-                        verticalArrangement = Arrangement.spacedBy(7.dp)
-                    ) {
-                        // Stock Type Toggle: Other Material vs Bottle Stock
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf(
-                                false to "Other Material (${activeMaterials.size})",
-                                true to "Bottle Stock (${activeBottleSizes.size})"
-                            ).forEach { (isBottle, label) ->
-                                val selected = isBottleStockMode == isBottle
-                                Surface(
-                                    shape = RoundedCornerShape(7.dp),
-                                    color = if (selected) WaterSkyButton else Color.White,
-                                    border = androidx.compose.foundation.BorderStroke(
-                                        1.dp,
-                                        if (selected) WaterBlueMedium else BorderLight
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(30.dp)
-                                        .clickable {
-                                            isBottleStockMode = isBottle
-                                            errorMessage = null
-                                            if (isBottle) {
-                                                selectedBottleSize?.let { applySelectedBottleDefaults(it) }
-                                            } else {
-                                                selectedMaterial?.let { applySelectedMaterialDefaults(it) }
-                                            }
-                                        }
-                                        .testTag(if (isBottle) "exp_inv_mode_bottle" else "exp_inv_mode_material")
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text(
-                                            text = label,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (selected) WaterSkyButtonContent else WaterNavyDark,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!isBottleStockMode) {
-                            if (activeMaterials.isEmpty()) {
-                                Text(
-                                    text = "No Other Material items found. Add new items in Stock & Cost → Materials first.",
-                                    fontSize = 9.5.sp,
-                                    color = ErrorRed,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            } else {
-                                CompactDropdownField(
-                                    label = "Select Inventory Item*",
-                                    selectedText = selectedMaterial?.let { "${it.name} (${it.itemCategory} • ${it.uom})" } ?: "",
-                                    options = activeMaterials,
-                                    optionLabel = { "${it.name} • ${it.itemCategory} (${it.uom})" },
-                                    onOptionSelected = { mat ->
-                                        applySelectedMaterialDefaults(mat)
-                                        errorMessage = null
-                                    },
-                                    modifier = Modifier.testTag("exp_inv_material_dropdown")
-                                )
-
-                                selectedMaterial?.let { mat ->
-                                    val curStockStr = if (mat.currentStock % 1.0 == 0.0) {
-                                        mat.currentStock.toInt().toString()
-                                    } else {
-                                        String.format(Locale.ENGLISH, "%.2f", mat.currentStock)
-                                    }
-                                    Surface(
-                                        shape = RoundedCornerShape(7.dp),
-                                        color = WaterSkyLight,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 8.dp, vertical = 5.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(
-                                                text = "Category: ${mat.itemCategory}",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = WaterNavyDark,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Text(
-                                                text = "UOM: ${mat.uom} • Stock: $curStockStr",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = WaterBlueDeep,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            Text(
-                                text = "New items must first be added in Stock & Cost → Materials.",
-                                fontSize = 8.5.sp,
-                                color = TextSecondaryDark
-                            )
-                        } else {
-                            if (activeBottleSizes.isEmpty()) {
-                                Text(
-                                    text = "No active Bottle Sizes found. Add bottle sizes in Stock & Cost → Sizes first.",
-                                    fontSize = 9.5.sp,
-                                    color = ErrorRed,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            } else {
-                                CompactDropdownField(
-                                    label = "Select Bottle Size*",
-                                    selectedText = selectedBottleSize?.name ?: "",
-                                    options = activeBottleSizes,
-                                    optionLabel = { "${it.name} • Rs. ${it.latestPurchaseRate.toInt()}" },
-                                    onOptionSelected = { size ->
-                                        applySelectedBottleDefaults(size)
-                                        errorMessage = null
-                                    },
-                                    modifier = Modifier.testTag("exp_inv_bottle_dropdown")
-                                )
-                            }
-                        }
-
-                        // Refill Quantity & Unit Rate Row
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            CompactFormTextField(
-                                value = invQtyText,
-                                onValueChange = { raw ->
-                                    invQtyText = if (isBottleStockMode) {
-                                        raw.filter { it.isDigit() }
-                                    } else {
-                                        raw.filter { it.isDigit() || it == '.' }
-                                    }
-                                    errorMessage = null
-                                },
-                                label = if (isBottleStockMode) "Quantity (Bottles)*" else "Quantity (${selectedMaterial?.uom ?: "Unit"})*",
-                                placeholder = "0",
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = if (isBottleStockMode) KeyboardType.Number else KeyboardType.Decimal
-                                ),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("exp_inv_qty_input")
-                            )
-
-                            CompactFormTextField(
-                                value = invUnitRateText,
-                                onValueChange = { raw ->
-                                    invUnitRateText = raw.filter { it.isDigit() || it == '.' }
-                                    errorMessage = null
-                                },
-                                label = "Unit Rate (Rs.)*",
-                                placeholder = "0",
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("exp_inv_rate_input")
-                            )
-                        }
-
-                        CompactFormTextField(
-                            value = invoiceNumber,
-                            onValueChange = { invoiceNumber = it },
-                            label = "Invoice / Bill No. (Optional)",
-                            placeholder = "e.g. INV-104",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("exp_inv_invoice_input")
-                        )
-
-                        if (invComputedTotal > 0.0) {
-                            Surface(
-                                shape = RoundedCornerShape(7.dp),
-                                color = SuccessGreenLight,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Total Purchase & Expense:",
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SuccessGreen
-                                    )
-                                    Text(
-                                        text = "Rs. ${invComputedTotal.toInt()}",
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = SuccessGreen
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Description
-        CompactFormTextField(
-            value = description,
-            onValueChange = {
-                description = it
-                errorMessage = null
-            },
-            label = "Description*",
-            placeholder = "Enter expense description...",
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("expense_description_input")
-        )
-
-        // 4. Amount (Hidden in Inventory mode since Total = Qty * Unit Rate)
-        if (!isInventoryPurchase || isSalaryCategory) {
-            CompactFormTextField(
-                value = amountText,
-                onValueChange = {
-                    amountText = it.filter { ch -> ch.isDigit() || ch == '.' }
-                    errorMessage = null
-                },
-                label = "Amount (Rs.)*",
-                placeholder = "0",
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("expense_amount_input")
-            )
-        }
-
-        // 5. Vendor / Supplier
-        CompactFormTextField(
-            value = vendor,
-            onValueChange = { vendor = it },
-            label = if (isInventoryPurchase) "Supplier" else "Vendor",
-            placeholder = "Supplier / Vendor name",
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("expense_vendor_input")
-        )
-
-        // 6. Payment Source (From Sale, Investment)
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(
-                text = "Payment Source",
-                fontSize = 9.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = WaterNavyDark
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    PaymentSource.PAY_FROM_SALE to "From Sale",
-                    PaymentSource.PAY_FROM_INVESTMENT to "Investment"
-                ).forEach { (src, label) ->
-                    val selected = paymentSource == src
-                    Surface(
-                        shape = RoundedCornerShape(7.dp),
-                        color = if (selected) WaterSkyButton else WaterSkyLight.copy(alpha = 0.7f),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(32.dp)
-                            .clickable { paymentSource = src }
-                            .testTag("expense_source_${src.name.lowercase()}")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = label,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (selected) WaterSkyButtonContent else WaterNavyDark,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 7. Payment Mode (Cash, Online)
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(
-                text = "Payment Mode",
-                fontSize = 9.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = WaterNavyDark
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    PaymentMethod.CASH to "Cash",
-                    PaymentMethod.BANK_TRANSFER to "Online"
-                ).forEach { (mode, label) ->
-                    val selected = paymentMethod == mode
-                    Surface(
-                        shape = RoundedCornerShape(7.dp),
-                        color = if (selected) WaterSkyButton else WaterSkyLight.copy(alpha = 0.7f),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(32.dp)
-                            .clickable { paymentMethod = mode }
-                            .testTag("expense_mode_${mode.name.lowercase()}")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = label,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (selected) WaterSkyButtonContent else WaterNavyDark,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 8. Note
-        CompactFormTextField(
-            value = notes,
-            onValueChange = { notes = it },
-            label = "Note",
-            placeholder = "Optional note...",
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("expense_note_input")
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun EditExpenseDialog(
-    expense: Expense,
-    categories: List<ExpenseCategory>,
-    isAdmin: Boolean = true,
-    onDismiss: () -> Unit,
-    onSave: (Expense) -> Unit
-) {
-    val allCategories = remember(categories) {
-        (STANDARD_EXPENSE_CATEGORIES + categories)
-            .distinctBy { it.name.trim().lowercase() }
-    }
-
-    var selectedType by remember { mutableStateOf(expense.expenseType) }
-    var selectedCategory by remember {
-        mutableStateOf(
-            allCategories.find { it.id == expense.categoryId || it.name.equals(expense.categoryName, ignoreCase = true) }
-                ?: allCategories.first()
-        )
-    }
-    var description by remember { mutableStateOf(expense.description) }
-    var amountText by remember { mutableStateOf(expense.amount.toInt().toString()) }
-    var payee by remember { mutableStateOf(expense.payee) }
-    var paymentSource by remember { mutableStateOf(expense.paymentSource) }
-    var paymentMethod by remember { mutableStateOf(if (expense.paymentMethod.isCash) PaymentMethod.CASH else PaymentMethod.BANK_TRANSFER) }
-    var notes by remember { mutableStateOf(expense.notes) }
-    var pendingSaveConfirm by remember { mutableStateOf<Expense?>(null) }
-
-    if (pendingSaveConfirm != null) {
-        val candidate = pendingSaveConfirm!!
-        AlertDialog(
-            onDismissRequest = { pendingSaveConfirm = null },
-            containerColor = Color.White,
-            icon = { Icon(Icons.Default.EditNote, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(30.dp)) },
-            title = { Text("Confirm Edit Expense?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
-            text = {
-                Text(
-                    text = "Save changes to Voucher #${candidate.voucherNumber} (${candidate.categoryName} • Rs. ${candidate.amount.toInt()})?\n\nکیا آپ واقعی اس خرچے میں تبدیلی محفوظ کرنا چاہتے ہیں؟",
-                    fontSize = 11.sp,
-                    color = TextPrimaryDark
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        pendingSaveConfirm = null
-                        onSave(candidate)
-                    },
-                    colors = waterPrimaryButtonColors(),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.testTag("confirm_edit_expense_dialog_btn")
-                ) {
-                    Text("Yes, Save Changes", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingSaveConfirm = null }) {
-                    Text("Cancel", color = TextSecondaryDark)
-                }
-            }
-        )
-    }
-
-    MobileFormDialog(
-        title = "Edit Voucher #${expense.voucherNumber}",
-        subtitle = "Date: ${expense.date}",
-        onDismiss = onDismiss,
-        accentColor = WaterNavyPrimary,
-        footerContent = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextSecondaryDark, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
-            }
-            Button(
-                onClick = {
-                    val amt = amountText.toDoubleOrNull() ?: expense.amount
-                    val updated = expense.copy(
-                        categoryId = selectedCategory.id,
-                        categoryName = selectedCategory.name,
-                        description = description.ifBlank { expense.description },
-                        amount = amt,
-                        paymentMethod = paymentMethod,
-                        paymentSource = paymentSource,
-                        payee = payee.trim(),
-                        notes = notes.trim(),
-                        expenseType = selectedType
-                    )
-                    pendingSaveConfirm = updated
-                },
-                colors = waterPrimaryButtonColors(),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .height(36.dp)
-                    .testTag("save_edit_expense_btn")
-            ) {
-                Text("Save Changes", fontWeight = FontWeight.Bold, fontSize = 10.5.sp, maxLines = 1, softWrap = false)
-            }
-        }
-    ) {
-        CompactDropdownField(
-            label = "Expense Type*",
-            selectedText = selectedType.name,
-            options = listOf(ExpenseType.OPEX, ExpenseType.CAPEX),
-            optionLabel = { if (it == ExpenseType.OPEX) "OPEX (Operating)" else "CAPEX (Asset / Capital)" },
-            onOptionSelected = { selectedType = it }
-        )
-
-        CompactDropdownField(
-            label = "Category*",
-            selectedText = selectedCategory.name,
-            options = allCategories,
-            optionLabel = { it.name },
-            onOptionSelected = { selectedCategory = it }
-        )
-
-        CompactFormTextField(
-            value = description,
-            onValueChange = { description = it },
-            label = "Description*",
-            modifier = Modifier.fillMaxWidth().testTag("edit_expense_desc")
-        )
-
-        CompactFormTextField(
-            value = amountText,
-            onValueChange = { amountText = it.filter { ch -> ch.isDigit() || ch == '.' } },
-            label = "Amount (Rs.)*",
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth().testTag("edit_expense_amount")
-        )
-
-        CompactFormTextField(
-            value = payee,
-            onValueChange = { payee = it },
-            label = "Vendor",
-            modifier = Modifier.fillMaxWidth().testTag("edit_expense_payee")
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            listOf(
-                PaymentSource.PAY_FROM_SALE to "From Sale",
-                PaymentSource.PAY_FROM_INVESTMENT to "Investment"
-            ).forEach { (src, label) ->
-                val selected = paymentSource == src
-                Surface(
-                    shape = RoundedCornerShape(7.dp),
-                    color = if (selected) WaterSkyButton else WaterSkyLight.copy(alpha = 0.7f),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(32.dp)
-                        .clickable { paymentSource = src }
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = if (selected) WaterSkyButtonContent else WaterNavyDark, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            listOf(
-                PaymentMethod.CASH to "Cash",
-                PaymentMethod.BANK_TRANSFER to "Online"
-            ).forEach { (mode, label) ->
-                val selected = paymentMethod == mode
-                Surface(
-                    shape = RoundedCornerShape(7.dp),
-                    color = if (selected) WaterSkyButton else WaterSkyLight.copy(alpha = 0.7f),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(32.dp)
-                        .clickable { paymentMethod = mode }
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = if (selected) WaterSkyButtonContent else WaterNavyDark, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-        }
-
-        CompactFormTextField(
-            value = notes,
-            onValueChange = { notes = it },
-            label = "Note",
-            modifier = Modifier.fillMaxWidth()
-        )
-    }
-}
-
-@Composable
-fun ManageExpenseCategoriesDialog(
-    categories: List<ExpenseCategory>,
-    onAddCategory: (name: String, urdu: String, type: ExpenseType) -> Unit,
-    onDeleteCategory: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var newCatName by remember { mutableStateOf("") }
-    var newCatUrdu by remember { mutableStateOf("") }
-    var newCatType by remember { mutableStateOf(ExpenseType.OPEX) }
-
-    MobileFormDialog(
-        title = "Expense Categories",
-        subtitle = "Manage custom expense categories",
-        onDismiss = onDismiss,
-        accentColor = WaterNavyPrimary,
-        footerContent = {
-            Button(
-                onClick = onDismiss,
-                colors = waterPrimaryButtonColors(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Done", fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    ) {
-        Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = Color(0xFFF8FAFC),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Add New Category:", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = WaterNavyDark)
-                CompactFormTextField(
-                    value = newCatName,
-                    onValueChange = { newCatName = it },
-                    label = "Category Name*",
-                    modifier = Modifier.fillMaxWidth()
-                )
-                CompactFormTextField(
-                    value = newCatUrdu,
-                    onValueChange = { newCatUrdu = it },
-                    label = "Urdu Name (Optional)",
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                    listOf(ExpenseType.OPEX, ExpenseType.CAPEX).forEach { t ->
-                        val isSel = newCatType == t
-                        Surface(
-                            shape = RoundedCornerShape(7.dp),
-                            color = if (isSel) WaterSkyButton else WaterSkyLight,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(30.dp)
-                                .clickable { newCatType = t }
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(t.name, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = if (isSel) WaterSkyButtonContent else WaterNavyDark)
-                            }
-                        }
-                    }
-                }
-                Button(
-                    onClick = {
-                        if (newCatName.isNotBlank()) {
-                            onAddCategory(newCatName.trim(), newCatUrdu.trim(), newCatType)
-                            newCatName = ""
-                            newCatUrdu = ""
-                        }
-                    },
-                    colors = waterPrimaryButtonColors(),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().height(34.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Save Category", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        Text("Existing Categories (${categories.size}):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
-
-        categories.forEach { cat ->
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = Color.White,
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(cat.name, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyDark)
-                        if (cat.urduName.isNotBlank()) {
-                            Text(cat.urduName, fontSize = 9.sp, color = TextSecondaryDark)
-                        }
-                    }
-
-                    IconButton(
-                        onClick = { onDeleteCategory(cat.id) },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = ErrorRed, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-    }
-}

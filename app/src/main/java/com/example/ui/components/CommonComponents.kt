@@ -1,6 +1,8 @@
 package com.example.ui.components
 
+import android.app.DatePickerDialog
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,11 +39,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.model.UserRole
 import com.example.ui.theme.*
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1306,5 +1313,398 @@ fun BlinkingOrangeDot(
         )
     }
 }
+
+/**
+ * Parses a "yyyy-MM-dd" string into epoch millis at local midnight. Returns null if invalid.
+ */
+fun parseIsoDateToMillis(isoDate: String): Long? {
+    return try {
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
+        sdf.parse(isoDate.trim())?.time
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+/**
+ * Formats an epoch timestamp into readable audit date-time text.
+ */
+fun formatEditTimestamp(epochMillis: Long): String {
+    return try {
+        SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.US).format(Date(epochMillis))
+    } catch (_: Throwable) {
+        ""
+    }
+}
+
+/**
+ * Reusable Edit Metadata strip shown ONLY inside internal Detail views
+ * (Delivery Detail, Expense Detail, Customer Detail, Payment Detail) — NEVER on invoices or PDFs.
+ */
+@Composable
+fun EditMetadataBadge(
+    lastEditedAt: Long,
+    lastEditedBy: String,
+    modifier: Modifier = Modifier
+) {
+    if (lastEditedAt <= 0L && lastEditedBy.isBlank()) return
+    val formattedTime = if (lastEditedAt > 0L) formatEditTimestamp(lastEditedAt) else ""
+    val editor = lastEditedBy.ifBlank { "Staff" }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color(0xFFFFF7ED),
+        border = BorderStroke(1.dp, Color(0xFFFED7AA)),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("edit_metadata_badge")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.EditNote,
+                contentDescription = "Edit History",
+                tint = WarningAmber,
+                modifier = Modifier.size(16.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Edited by $editor",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF9A3412)
+                )
+                if (formattedTime.isNotBlank()) {
+                    Text(
+                        text = "Last Edited: $formattedTime",
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFC2410C)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Reusable clickable Date Picker field for editing Delivery / Expense dates inside dialogs.
+ */
+@Composable
+fun EditableDateField(
+    label: String,
+    dateValue: String,
+    onDateSelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    fun openCalendar() {
+        val cal = Calendar.getInstance()
+        val parsed = parseIsoDateToMillis(dateValue)
+        if (parsed != null) cal.timeInMillis = parsed
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val formatted = String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, dayOfMonth)
+                onDateSelected(formatted)
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        ).show()
+    }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFFF8FAFC),
+        border = BorderStroke(1.dp, BorderLight),
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 50.dp)
+            .clickable { openCalendar() }
+            .testTag("editable_date_field")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    fontSize = 9.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextSecondaryDark
+                )
+                Text(
+                    text = dateValue.ifBlank { "Select Date" },
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = WaterNavyPrimary
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.CalendarMonth,
+                contentDescription = "Choose Date",
+                tint = WaterAqua,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Reusable Custom Date Range Dialog with 2 Calendar Icon selectors ("From" and "To").
+ * - Supports selecting the SAME date for single-day filtering (From == To)
+ * - Supports selecting DIFFERENT dates for multi-day ranges
+ * - Strictly prevents "From" date from ever being after "To" date!
+ */
+@Composable
+fun FromToDateRangeDialog(
+    initialFromDate: String,
+    initialToDate: String,
+    title: String = "Custom Date Range (تاریخ منتخب کریں)",
+    onDismiss: () -> Unit,
+    onConfirm: (fromDate: String, toDate: String) -> Unit
+) {
+    val context = LocalContext.current
+    val today = remember {
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    }
+    var fromDate by remember(initialFromDate) {
+        mutableStateOf(initialFromDate.ifBlank { today })
+    }
+    var toDate by remember(initialToDate) {
+        mutableStateOf(initialToDate.ifBlank { fromDate })
+    }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Ensure initial consistency (From <= To)
+    LaunchedEffect(Unit) {
+        if (fromDate > toDate) {
+            toDate = fromDate
+        }
+    }
+
+    fun openFromCalendar() {
+        val cal = Calendar.getInstance()
+        parseIsoDateToMillis(fromDate)?.let { cal.timeInMillis = it }
+        val picker = DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val picked = String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, dayOfMonth)
+                if (picked > toDate) {
+                    errorMessage = "From date cannot be after To date (شروع کی تاریخ آخری تاریخ کے بعد نہیں ہو سکتی)"
+                } else {
+                    fromDate = picked
+                    errorMessage = null
+                }
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
+        // Enforce From <= To right inside the Android Calendar picker too!
+        parseIsoDateToMillis(toDate)?.let { maxMs ->
+            picker.datePicker.maxDate = maxMs + (24L * 60L * 60L * 1000L - 1000L)
+        }
+        picker.show()
+    }
+
+    fun openToCalendar() {
+        val cal = Calendar.getInstance()
+        parseIsoDateToMillis(toDate)?.let { cal.timeInMillis = it }
+        val picker = DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val picked = String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, dayOfMonth)
+                if (picked < fromDate) {
+                    errorMessage = "To date cannot be before From date (آخری تاریخ شروع کی تاریخ سے پہلے نہیں ہو سکتی)"
+                } else {
+                    toDate = picked
+                    errorMessage = null
+                }
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
+        // Enforce To >= From right inside the Android Calendar picker!
+        parseIsoDateToMillis(fromDate)?.let { minMs ->
+            picker.datePicker.minDate = minMs
+        }
+        picker.show()
+    }
+
+    MobileFormDialog(
+        title = title,
+        subtitle = "Tap From & To calendars (Same date = single day)",
+        onDismiss = onDismiss,
+        footerContent = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = TextSecondaryDark)
+            }
+            Button(
+                onClick = {
+                    if (fromDate > toDate) {
+                        errorMessage = "From date cannot be after To date."
+                    } else {
+                        onConfirm(fromDate, toDate)
+                    }
+                },
+                colors = waterPrimaryButtonColors(),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.testTag("apply_from_to_date_btn")
+            ) {
+                Text("Apply Dates", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    ) {
+        Text(
+            text = "For a single day report, select the same date in both From & To. For a range, pick different dates.",
+            fontSize = 10.sp,
+            color = TextSecondaryDark,
+            lineHeight = 14.sp
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // FROM Calendar Selector
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = WaterSkyLight,
+                border = BorderStroke(1.2.dp, WaterAqua),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 68.dp)
+                    .clickable { openFromCalendar() }
+                    .testTag("custom_date_from_btn")
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = "From Date Calendar",
+                            tint = WaterAqua,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "FROM (از)",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = WaterNavyPrimary
+                        )
+                    }
+                    Text(
+                        text = fromDate,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = TextPrimaryDark
+                    )
+                }
+            }
+
+            // TO Calendar Selector
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = WaterSkyLight,
+                border = BorderStroke(1.2.dp, WaterAqua),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 68.dp)
+                    .clickable { openToCalendar() }
+                    .testTag("custom_date_to_btn")
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DateRange,
+                            contentDescription = "To Date Calendar",
+                            tint = WaterAqua,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "TO (تا)",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = WaterNavyPrimary
+                        )
+                    }
+                    Text(
+                        text = toDate,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = TextPrimaryDark
+                    )
+                }
+            }
+        }
+
+        // Quick helper shortcut to set single day or Today
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    toDate = fromDate
+                    errorMessage = null
+                },
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f).height(34.dp)
+            ) {
+                Text("Same Single Day", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+            }
+            OutlinedButton(
+                onClick = {
+                    fromDate = today
+                    toDate = today
+                    errorMessage = null
+                },
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f).height(34.dp)
+            ) {
+                Text("Reset to Today", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+            }
+        }
+
+        if (errorMessage != null) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = ErrorRedLight,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = errorMessage!!,
+                    color = ErrorRed,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(8.dp)
+                )
+            }
+        }
+    }
+}
+
 
 

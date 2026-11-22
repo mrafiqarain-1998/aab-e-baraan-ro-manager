@@ -649,6 +649,31 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         onResult?.invoke(success, msg)
     }
 
+    fun recordMultiItemInventoryExpense(
+        items: List<ExpenseInventoryLineItem>,
+        expenseType: ExpenseType,
+        supplierName: String,
+        invoiceNo: String,
+        notes: String,
+        expenseDate: String,
+        paymentSource: PaymentSource,
+        paymentMethod: PaymentMethod,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, msg) = repository.recordMultiItemInventoryExpense(
+            items = items,
+            expenseType = expenseType,
+            supplierName = supplierName,
+            invoiceNo = invoiceNo,
+            notes = notes,
+            expenseDate = expenseDate,
+            paymentSource = paymentSource,
+            paymentMethod = paymentMethod
+        )
+        _userFeedbackMessage.value = msg
+        onResult?.invoke(success, msg)
+    }
+
     fun recordExpenseWithBottlePurchase(
         bottleSizeId: String,
         quantity: Int,
@@ -775,15 +800,21 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun addExpenseCategory(name: String, urdu: String, type: ExpenseType = ExpenseType.OPEX) {
-        repository.addExpenseCategory(name, urdu, type)
-        _userFeedbackMessage.value = "Category '$name' added"
+    fun addExpenseCategory(
+        name: String,
+        urdu: String,
+        type: ExpenseType = ExpenseType.OPEX,
+        isInventoryCategory: Boolean = false
+    ) {
+        repository.addExpenseCategory(name, urdu, type, isInventoryCategory)
+        val kind = if (isInventoryCategory) "Inventory" else "Non-Inventory"
+        _userFeedbackMessage.value = "$kind category '$name' added"
     }
 
     fun deleteExpenseCategory(categoryId: String): Boolean {
         val success = repository.deleteExpenseCategory(categoryId)
         if (success) {
-            _userFeedbackMessage.value = "Expense category deleted"
+            _userFeedbackMessage.value = "Category deleted (existing stock items moved to Uncategorized)"
         }
         return success
     }
@@ -794,9 +825,43 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
 
     fun submitCashClosing(summary: CashClosingSummary, actualCash: Double, notes: String) {
         val closing = repository.submitCashClosing(summary, actualCash, notes)
-        val diffText = if (closing.isBalanced) "Perfect match!" else "Difference: Rs. ${closing.difference}"
+        val diffText = if (closing.isBalanced) {
+            "Perfect match!"
+        } else {
+            "Difference Rs. ${closing.difference.toInt()} sent to Admin for approval."
+        }
         _userFeedbackMessage.value = "Daily cash closing submitted. $diffText"
     }
+
+    fun approveCashClosingDifference(closingId: String): Boolean {
+        val ok = repository.approveCashClosingDifference(closingId)
+        _userFeedbackMessage.value = if (ok) {
+            "Cash closing difference approved — next day opens with actual drawer cash."
+        } else {
+            "Only Admin can approve cash closing differences."
+        }
+        return ok
+    }
+
+    fun rejectCashClosingDifference(closingId: String): Boolean {
+        val ok = repository.rejectCashClosingDifference(closingId)
+        _userFeedbackMessage.value = if (ok) {
+            "Cash closing difference rejected — next day continues from expected cash."
+        } else {
+            "Only Admin can reject cash closing differences."
+        }
+        return ok
+    }
+
+    fun updatePayment(payment: Payment): Boolean {
+        val ok = repository.updatePayment(payment)
+        if (ok) {
+            _userFeedbackMessage.value = "Payment ${payment.receiptNumber} updated."
+        }
+        return ok
+    }
+
+    fun getPrimaryAdminPhone(): String = repository.getPrimaryAdminPhone()
 
     fun adjustInventory(sizeId: String, full: Int, empty: Int, damaged: Int, reason: String) {
         repository.adjustBottleStock(sizeId, fullChange = full, emptyChange = empty, damagedChange = damaged, reason = reason)
@@ -975,186 +1040,213 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     fun generateCustomerStatement(customer: Customer): String {
         val unpaidInvs = repository.getUnpaidInvoicesForCustomer(customer.id)
         val allocations = repository.getCustomerBottleAllocations(customer.id)
+        val adminPhone = repository.getPrimaryAdminPhone()
         val sb = StringBuilder()
-        sb.appendLine("💧 *Aab e Baraan RO Water Plant* 💧")
-        sb.appendLine("Pure Mineral Water Service")
+        sb.appendLine("AAB E BARAAN RO PLANT")
+        sb.appendLine("Customer Statement")
         sb.appendLine("--------------------------------")
-        sb.appendLine("👤 *Customer:* ${customer.name} (${customer.customerCode})")
-        sb.appendLine("📍 *Address:* ${customer.address}")
-        sb.appendLine("💰 *Total Outstanding:* Rs. ${customer.currentBalance}")
-        sb.appendLine("🍾 *Empty Bottles Owed:* ${customer.emptyBottlesOwed} bottles")
+        sb.appendLine("Customer: ${customer.name} (${customer.customerCode})")
+        if (customer.address.isNotBlank()) sb.appendLine("Address: ${customer.address}")
+        sb.appendLine("Total Outstanding: Rs. ${customer.currentBalance.toInt()}")
+        sb.appendLine("Empty Bottles Owed: ${customer.emptyBottlesOwed} bottles")
         val broken = allocations.sumOf { it.damagedCount }
         if (broken > 0) {
-            sb.appendLine("⚠️ *Damaged / Broken Bottles:* $broken bottles")
+            sb.appendLine("Damaged / Broken Bottles: $broken bottles")
         }
         sb.appendLine("--------------------------------")
         if (unpaidInvs.isNotEmpty()) {
-            sb.appendLine("📋 *Pending Invoices:*")
+            sb.appendLine("Pending Invoices:")
             unpaidInvs.forEach { inv ->
-                sb.appendLine("• ${inv.invoiceNumber} (${inv.date}): Rs. ${inv.balanceDue}")
+                sb.appendLine("• ${inv.invoiceNumber} (${inv.date}): Rs. ${inv.balanceDue.toInt()}")
             }
             sb.appendLine("--------------------------------")
         }
-        sb.appendLine("📞 For queries: 0300-1234567")
+        sb.appendLine("Contact: $adminPhone")
         sb.appendLine("JazakAllah Khair!")
         return sb.toString()
     }
 
-    // 1. Daily WhatsApp Report with Customer-wise Deliveries, Expenses, and Income
-    fun generateDailyReportSummary(): String {
-        val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-        val dateDisplay = SimpleDateFormat("dd MMMM yyyy", Locale.getDefault()).format(Date())
+    fun generateCustomerLedgerText(
+        customer: Customer,
+        startDate: String,
+        endDate: String,
+        periodDeliveries: List<Delivery>,
+        periodPayments: List<Payment>
+    ): String {
+        val adminPhone = repository.getPrimaryAdminPhone()
+        val s = minOf(startDate, endDate)
+        val e = maxOf(startDate, endDate)
+        val rangeLabel = if (s == e) s else "$s to $e"
+        val totalDelivered = periodDeliveries.sumOf { it.totalAmount }
+        val totalPaid = periodPayments.sumOf { it.amount }
+        val sb = StringBuilder()
+        sb.appendLine("AAB E BARAAN RO PLANT")
+        sb.appendLine("Customer Ledger — $rangeLabel")
+        sb.appendLine("================================")
+        sb.appendLine("Customer: ${customer.name} (${customer.customerCode})")
+        if (customer.phone.isNotBlank()) sb.appendLine("Phone: ${customer.phone}")
+        sb.appendLine("--------------------------------")
+        sb.appendLine("DELIVERIES (${periodDeliveries.size}):")
+        if (periodDeliveries.isEmpty()) {
+            sb.appendLine("  No deliveries in selected range.")
+        } else {
+            periodDeliveries.sortedWith(compareBy<Delivery> { it.date }.thenBy { it.createdAt })
+                .forEachIndexed { idx, del ->
+                    val itemsStr = del.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
+                    sb.appendLine("${idx + 1}. ${del.date} | ${del.deliveryNumber} | $itemsStr | Rs. ${del.totalAmount.toInt()}")
+                }
+        }
+        sb.appendLine("Total Delivered: Rs. ${totalDelivered.toInt()}")
+        sb.appendLine("--------------------------------")
+        sb.appendLine("PAYMENTS (${periodPayments.size}):")
+        if (periodPayments.isEmpty()) {
+            sb.appendLine("  No payments in selected range.")
+        } else {
+            periodPayments.sortedWith(compareBy<Payment> { it.date }.thenBy { it.createdAt })
+                .forEachIndexed { idx, pay ->
+                    sb.appendLine("${idx + 1}. ${pay.date} | ${pay.receiptNumber} | ${pay.paymentMethod.label} | Rs. ${pay.amount.toInt()}")
+                }
+        }
+        sb.appendLine("Total Paid: Rs. ${totalPaid.toInt()}")
+        sb.appendLine("--------------------------------")
+        sb.appendLine("Period Net (Delivered - Paid): Rs. ${(totalDelivered - totalPaid).toInt()}")
+        sb.appendLine("Current Total Balance: Rs. ${customer.currentBalance.toInt()}")
+        sb.appendLine("================================")
+        sb.appendLine("Contact: $adminPhone")
+        return sb.toString()
+    }
 
-        val todayDeliveries = deliveries.value.filter { it.date == today }
-        val todayExpenses = expenses.value.filter { it.date == today }
-        val todayPayments = payments.value.filter { it.date == today }
-
-        val totalSales = todayDeliveries.sumOf { it.totalAmount }
-        val cashCollected = todayPayments.filter { it.paymentMethod.isCash }.sumOf { it.amount } +
-                todayDeliveries.filter { it.paymentMethod == "Cash" }.sumOf { it.paymentCollected }
-        val onlineCollected = todayPayments.filter { !it.paymentMethod.isCash }.sumOf { it.amount }
-        val totalIncome = cashCollected + onlineCollected
-        val totalExpenseAmount = todayExpenses.sumOf { it.amount }
-        val netProfit = totalSales - totalExpenseAmount
+    /**
+     * Standardized plain-text report for Daily / Weekly / Monthly sharing:
+     * Brand Name -> Report Type + Date -> Customer-wise Deliveries -> Customer-wise Payments -> Expenses.
+     */
+    fun generatePeriodTextReport(
+        periodLabel: String,
+        dateLabel: String,
+        periodDeliveries: List<Delivery>,
+        periodPayments: List<Payment>,
+        periodExpenses: List<Expense>
+    ): String {
+        val adminPhone = repository.getPrimaryAdminPhone()
+        val totalSales = periodDeliveries.sumOf { it.totalAmount }
+        val totalBottles = periodDeliveries.sumOf { it.totalFullDelivered }
+        val totalPayments = periodPayments.sumOf { it.amount }
+        val totalExpenseAmount = periodExpenses.sumOf { it.amount }
 
         val sb = StringBuilder()
-        sb.appendLine("💧 *Aab e Baraan — Daily Report (روزانہ رپورٹ)* 💧")
-        sb.appendLine("📅 Date: $dateDisplay")
+        sb.appendLine("AAB E BARAAN RO PLANT")
+        sb.appendLine("$periodLabel — $dateLabel")
         sb.appendLine("================================")
-        sb.appendLine("🚚 *CUSTOMER-WISE DELIVERIES (گاہک ترسیلات):*")
-        if (todayDeliveries.isEmpty()) {
-            sb.appendLine("  (No deliveries recorded today)")
+
+        // 1. Customer-wise Deliveries
+        sb.appendLine("DELIVERIES (Customer-wise):")
+        if (periodDeliveries.isEmpty()) {
+            sb.appendLine("  No deliveries recorded.")
         } else {
-            todayDeliveries.forEachIndexed { idx, del ->
-                val itemsStr = del.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
-                val paidStr = if (del.paymentCollected > 0) "Paid (Rs. ${del.paymentCollected.toInt()})" else "Unpaid"
-                sb.appendLine("${idx + 1}. *${del.customerName}* (${del.customerArea})")
-                sb.appendLine("   📦 $itemsStr")
-                sb.appendLine("   🍾 Empties Collected: ${del.totalEmptyCollected}")
-                sb.appendLine("   💵 Bill: Rs. ${del.totalAmount.toInt()} | Status: $paidStr")
+            val groupedDels = periodDeliveries.groupBy { it.customerName.ifBlank { "Walk-in Customer" } }
+            var idx = 1
+            groupedDels.forEach { (custName, dels) ->
+                val itemCounts = linkedMapOf<String, Int>()
+                dels.flatMap { it.items }.forEach { item ->
+                    itemCounts[item.bottleName] = (itemCounts[item.bottleName] ?: 0) + item.quantity
+                }
+                val itemsSummary = itemCounts.entries.joinToString(", ") { "${it.value}x ${it.key}" }
+                    .ifBlank { "${dels.sumOf { it.totalFullDelivered }} bottles" }
+                val custTotal = dels.sumOf { it.totalAmount }.toInt()
+                sb.appendLine("$idx. $custName — $itemsSummary | Rs. $custTotal")
+                idx++
             }
         }
+        sb.appendLine("Total Deliveries: ${periodDeliveries.size} ($totalBottles bottles) | Sale: Rs. ${totalSales.toInt()}")
         sb.appendLine("--------------------------------")
-        sb.appendLine("💰 *DAILY INCOME & COLLECTIONS (آمدن / وصولی):*")
-        sb.appendLine("• Total Billed Sales: Rs. ${totalSales.toInt()}")
-        sb.appendLine("• Cash Collected (Naqd): Rs. ${cashCollected.toInt()}")
-        sb.appendLine("• Online / Bank: Rs. ${onlineCollected.toInt()}")
-        sb.appendLine("• *Total Cash & Online Income:* Rs. ${totalIncome.toInt()}")
-        sb.appendLine("--------------------------------")
-        sb.appendLine("📉 *DAILY EXPENSES (روزانہ اخراجات):*")
-        if (todayExpenses.isEmpty()) {
-            sb.appendLine("  (No expenses recorded today)")
+
+        // 2. Customer-wise Payments
+        sb.appendLine("PAYMENTS (Customer-wise):")
+        if (periodPayments.isEmpty()) {
+            sb.appendLine("  No payments received.")
         } else {
-            val fromSaleTotal = todayExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_SALE }.sumOf { it.amount }
-            val investmentTotal = todayExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_INVESTMENT }.sumOf { it.amount }
-            todayExpenses.forEach { exp ->
+            val groupedPays = periodPayments.groupBy { it.customerName.ifBlank { "Customer" } }
+            var idx = 1
+            groupedPays.forEach { (custName, pays) ->
+                val custPaid = pays.sumOf { it.amount }.toInt()
+                val methods = pays.map { it.paymentMethod.label }.distinct().joinToString("/")
+                sb.appendLine("$idx. $custName — Rs. $custPaid ($methods)")
+                idx++
+            }
+        }
+        sb.appendLine("Total Payments Received: Rs. ${totalPayments.toInt()}")
+        sb.appendLine("--------------------------------")
+
+        // 3. Expenses
+        sb.appendLine("EXPENSES:")
+        if (periodExpenses.isEmpty()) {
+            sb.appendLine("  No expenses recorded.")
+        } else {
+            periodExpenses.forEachIndexed { idx, exp ->
+                val descPart = if (exp.description.isNotBlank()) " (${exp.description})" else ""
                 val srcTag = if (exp.paymentSource == PaymentSource.PAY_FROM_INVESTMENT) "Investment" else "From Sale"
-                sb.appendLine("• ${exp.categoryName} [$srcTag]: Rs. ${exp.amount.toInt()} (${exp.description})")
+                sb.appendLine("${idx + 1}. ${exp.categoryName}$descPart — Rs. ${exp.amount.toInt()} [$srcTag]")
             }
-            sb.appendLine("• From Sale Expenses: Rs. ${fromSaleTotal.toInt()}")
-            sb.appendLine("• Investment Account Expenses: Rs. ${investmentTotal.toInt()}")
-            sb.appendLine("• *Total Daily Expenses:* Rs. ${totalExpenseAmount.toInt()}")
         }
-        sb.appendLine("--------------------------------")
-        sb.appendLine("💹 *EST. NET OPERATING PROFIT (خالص بچت):* Rs. ${netProfit.toInt()}")
+        sb.appendLine("Total Expenses: Rs. ${totalExpenseAmount.toInt()}")
         sb.appendLine("================================")
-        sb.appendLine("Generated by Aab e Baraan System")
+        sb.appendLine("Contact: $adminPhone")
         return sb.toString()
     }
 
-    // 2. Weekly WhatsApp Report (Customer Deliveries, Weekly Expenses & Income)
+    // 1. Daily Text Report (Customer-wise Deliveries, Customer-wise Payments, Expenses)
+    fun generateDailyReportSummary(): String {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val dateDisplay = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date())
+        val todayDeliveries = deliveries.value.filter { it.date == today }
+        val todayPayments = payments.value.filter { it.date == today }
+        val todayExpenses = expenses.value.filter { it.date == today }
+        return generatePeriodTextReport(
+            periodLabel = "Daily Report",
+            dateLabel = dateDisplay,
+            periodDeliveries = todayDeliveries,
+            periodPayments = todayPayments,
+            periodExpenses = todayExpenses
+        )
+    }
+
+    // 2. Weekly Text Report (Last 7 Days — Customer-wise Deliveries, Customer-wise Payments, Expenses)
     fun generateWeeklyReportSummary(): String {
-        val todayCal = Calendar.getInstance()
-        val endDateDisplay = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(todayCal.time)
-        todayCal.add(Calendar.DAY_OF_YEAR, -7)
-        val startDateDisplay = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(todayCal.time)
+        val isoFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val displayFormat = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+        val endCal = Calendar.getInstance()
+        val endIso = isoFormat.format(endCal.time)
+        val endLabel = displayFormat.format(endCal.time)
+        val startCal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -6) }
+        val startIso = isoFormat.format(startCal.time)
+        val startLabel = displayFormat.format(startCal.time)
 
-        val recentDeliveries = deliveries.value.take(25)
-        val totalSales = recentDeliveries.sumOf { it.totalAmount }
-        val totalBottlesDelivered = recentDeliveries.sumOf { it.totalFullDelivered }
-        val totalEmpties = recentDeliveries.sumOf { it.totalEmptyCollected }
-
-        val recentExpenses = expenses.value.take(15)
-        val totalExpenses = recentExpenses.sumOf { it.amount }
-        val netProfit = totalSales - totalExpenses
-
-        val customerDeliverySummary = recentDeliveries.groupBy { it.customerName }
-
-        val sb = StringBuilder()
-        sb.appendLine("📊 *Aab e Baraan — Weekly Summary Report (ہفتہ وار رپورٹ)* 📊")
-        sb.appendLine("📅 Period: $startDateDisplay to $endDateDisplay")
-        sb.appendLine("================================")
-        sb.appendLine("🚚 *WEEKLY DELIVERIES BY CUSTOMER:*")
-        customerDeliverySummary.forEach { (custName, dels) ->
-            val custBottles = dels.sumOf { it.totalFullDelivered }
-            val custAmount = dels.sumOf { it.totalAmount }
-            sb.appendLine("• *${custName}*: $custBottles bottles delivered (Rs. ${custAmount.toInt()})")
-        }
-        sb.appendLine("--------------------------------")
-        sb.appendLine("📈 *WEEKLY TOTALS:*")
-        sb.appendLine("• Total Orders: ${recentDeliveries.size}")
-        sb.appendLine("• Total Bottles Delivered: $totalBottlesDelivered bottles")
-        sb.appendLine("• Empty Bottles Returned: $totalEmpties bottles")
-        sb.appendLine("• *Total Gross Sales:* Rs. ${totalSales.toInt()}")
-        sb.appendLine("--------------------------------")
-        sb.appendLine("📉 *WEEKLY EXPENSES (اخراجات):*")
-        val weekFromSale = recentExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_SALE }.sumOf { it.amount }
-        val weekInvestment = recentExpenses.filter { it.paymentSource == PaymentSource.PAY_FROM_INVESTMENT }.sumOf { it.amount }
-        recentExpenses.groupBy { it.categoryName }.forEach { (cat, exps) ->
-            sb.appendLine("• $cat: Rs. ${exps.sumOf { it.amount }.toInt()}")
-        }
-        sb.appendLine("• From Sale Expenses: Rs. ${weekFromSale.toInt()}")
-        sb.appendLine("• Investment Account Expenses: Rs. ${weekInvestment.toInt()}")
-        sb.appendLine("• *Total Weekly Expenses:* Rs. ${totalExpenses.toInt()}")
-        sb.appendLine("--------------------------------")
-        sb.appendLine("💹 *WEEKLY OPERATING PROFIT (خالص بچت):* Rs. ${netProfit.toInt()}")
-        sb.appendLine("================================")
-        sb.appendLine("Generated by Aab e Baraan Smart System")
-        return sb.toString()
+        val weekDeliveries = deliveries.value.filter { it.date in startIso..endIso }
+        val weekPayments = payments.value.filter { it.date in startIso..endIso }
+        val weekExpenses = expenses.value.filter { it.date in startIso..endIso }
+        return generatePeriodTextReport(
+            periodLabel = "Weekly Report",
+            dateLabel = "$startLabel - $endLabel",
+            periodDeliveries = weekDeliveries,
+            periodPayments = weekPayments,
+            periodExpenses = weekExpenses
+        )
     }
 
-    // 3. Monthly WhatsApp Report
+    // 3. Monthly Text Report (Current Month — Customer-wise Deliveries, Customer-wise Payments, Expenses)
     fun generateMonthlyReportSummary(): String {
+        val monthPrefix = SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
         val monthDisplay = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date())
-
-        val allDels = deliveries.value
-        val totalSales = allDels.sumOf { it.totalAmount }
-        val totalBottles = allDels.sumOf { it.totalFullDelivered }
-        val totalEmpties = allDels.sumOf { it.totalEmptyCollected }
-
-        val allExps = expenses.value
-        val totalExpenses = allExps.sumOf { it.amount }
-        val netProfit = totalSales - totalExpenses
-
-        val custSummary = allDels.groupBy { it.customerName }
-        val totalReceivables = customers.value.filter { it.currentBalance > 0 }.sumOf { it.currentBalance }
-
-        val sb = StringBuilder()
-        sb.appendLine("📑 *Aab e Baraan — Monthly Business Report (ماہانہ رپورٹ)* 📑")
-        sb.appendLine("🗓️ Month: $monthDisplay")
-        sb.appendLine("================================")
-        sb.appendLine("👥 *CUSTOMER VOLUME BREAKDOWN:*")
-        custSummary.forEach { (custName, dels) ->
-            val bCount = dels.sumOf { it.totalFullDelivered }
-            val amt = dels.sumOf { it.totalAmount }
-            sb.appendLine("• *${custName}*: $bCount bottles (Rs. ${amt.toInt()})")
-        }
-        sb.appendLine("--------------------------------")
-        sb.appendLine("💰 *MONTHLY FINANCIAL PERFORMANCE:*")
-        sb.appendLine("• Total Deliveries: ${allDels.size} dispatches")
-        sb.appendLine("• Total Bottles Supplied: $totalBottles bottles")
-        sb.appendLine("• Total Empty Bottles Returned: $totalEmpties bottles")
-        val monthFromSale = allExps.filter { it.paymentSource == PaymentSource.PAY_FROM_SALE }.sumOf { it.amount }
-        val monthInvestment = allExps.filter { it.paymentSource == PaymentSource.PAY_FROM_INVESTMENT }.sumOf { it.amount }
-        sb.appendLine("• *Total Billed Sales:* Rs. ${totalSales.toInt()}")
-        sb.appendLine("• From Sale Expenses: Rs. ${monthFromSale.toInt()}")
-        sb.appendLine("• Investment Account Expenses: Rs. ${monthInvestment.toInt()}")
-        sb.appendLine("• *Total Operating Expenses:* Rs. ${totalExpenses.toInt()}")
-        sb.appendLine("• *Estimated Net Profit:* Rs. ${netProfit.toInt()}")
-        sb.appendLine("• *Total Market Receivables (Udhaar):* Rs. ${totalReceivables.toInt()}")
-        sb.appendLine("================================")
-        sb.appendLine("Generated by Aab e Baraan Smart System")
-        return sb.toString()
+        val monthDeliveries = deliveries.value.filter { it.date.startsWith(monthPrefix) }
+        val monthPayments = payments.value.filter { it.date.startsWith(monthPrefix) }
+        val monthExpenses = expenses.value.filter { it.date.startsWith(monthPrefix) }
+        return generatePeriodTextReport(
+            periodLabel = "Monthly Report",
+            dateLabel = monthDisplay,
+            periodDeliveries = monthDeliveries,
+            periodPayments = monthPayments,
+            periodExpenses = monthExpenses
+        )
     }
 
     // ==========================================
@@ -1303,9 +1395,10 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         customUsageType: String = "",
         capacityLitres: Double? = null,
         depositAmount: Double = 0.0,
+        categoryName: String = "Bottle Purchase",
         onSuccess: (() -> Unit)? = null
-    ) {
-        repository.addNewBottleSize(
+    ): String {
+        val newId = repository.addNewBottleSize(
             name = name,
             purchaseRate = purchaseRate,
             packQty = packQty,
@@ -1316,10 +1409,14 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
             salePrice = salePrice,
             customUsageType = customUsageType,
             capacityLitres = capacityLitres,
-            depositAmount = depositAmount
+            depositAmount = depositAmount,
+            categoryName = categoryName
         )
-        _userFeedbackMessage.value = "New bottle size added successfully."
-        onSuccess?.invoke()
+        if (newId.isNotBlank()) {
+            _userFeedbackMessage.value = "New bottle size added successfully."
+            onSuccess?.invoke()
+        }
+        return newId
     }
 
     fun updateBottleSizeDetails(
@@ -1331,6 +1428,7 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         purchaseCost: Double,
         depositAmount: Double,
         uom: String,
+        categoryName: String? = null,
         onResult: ((Boolean, String) -> Unit)? = null
     ) {
         val (success, message) = repository.updateBottleSizeDetails(
@@ -1341,7 +1439,8 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
             defaultRefillPrice = defaultRefillPrice,
             purchaseCost = purchaseCost,
             depositAmount = depositAmount,
-            uom = uom
+            uom = uom,
+            categoryName = categoryName
         )
         _userFeedbackMessage.value = message
         onResult?.invoke(success, message)
@@ -1528,10 +1627,13 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     fun addFactoryMaterial(
         material: FactoryMaterial,
         onSuccess: (() -> Unit)? = null
-    ) {
-        repository.addFactoryMaterial(material)
-        _userFeedbackMessage.value = "Material added successfully."
-        onSuccess?.invoke()
+    ): String {
+        val id = repository.addFactoryMaterial(material)
+        if (id.isNotBlank()) {
+            _userFeedbackMessage.value = "Material added successfully."
+            onSuccess?.invoke()
+        }
+        return id
     }
 
     fun updateFactoryMaterial(

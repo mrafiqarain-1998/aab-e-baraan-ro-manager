@@ -32,6 +32,7 @@ import com.example.model.Delivery
 import com.example.model.PermissionAction
 import com.example.model.SyncQueueStatus
 import com.example.model.UserRole
+import com.example.ui.components.FromToDateRangeDialog
 import com.example.ui.components.MetricStatCard
 import com.example.ui.components.NewItemBadge
 import com.example.ui.components.SectionHeader
@@ -60,7 +61,8 @@ fun DashboardScreen(
     onNavigateToSizes: () -> Unit,
     onNavigateToUserManagement: () -> Unit,
     onNavigateToReports: () -> Unit,
-    onNavigateToBackupRestore: () -> Unit = {}
+    onNavigateToBackupRestore: () -> Unit = {},
+    onNavigateToApprovals: () -> Unit = {}
 ) {
     val user by viewModel.currentUser.collectAsState()
     val stats by viewModel.dashboardStats.collectAsState()
@@ -68,6 +70,7 @@ fun DashboardScreen(
     val inventory by viewModel.inventory.collectAsState()
     val expenses by viewModel.expenses.collectAsState()
     val payments by viewModel.payments.collectAsState()
+    val cashClosings by viewModel.cashClosings.collectAsState()
     val passwordResetRequests by viewModel.passwordResetRequests.collectAsState()
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val seenRecordKeys by viewModel.seenRecordKeys.collectAsState()
@@ -364,107 +367,91 @@ fun DashboardScreen(
             }
         }
 
-        // Admin Pending Acknowledgments Alert Banner (Payments, Expenses, Password Resets)
-        if (
+        // Admin Pending Acknowledgments Alert Banner (Payments, Expenses, Cash Closing Diffs, Password Resets)
+        val canApproveAnything = user.role == UserRole.ADMIN ||
             viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.APPROVE) ||
             viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE) ||
             viewModel.hasPermission(AppModule.STAFF_MANAGEMENT, PermissionAction.MANAGE)
-        ) {
-            val pendingPayments = payments.count { !it.isAcknowledged }
-            val pendingExpenses = expenses.count { !it.isAcknowledged }
-            val pendingPasswordResets = passwordResetRequests.count { !it.isResolved }
-            val totalPending = pendingPayments + pendingExpenses + pendingPasswordResets
+        val pendingPaymentsCount = payments.count { !it.isAcknowledged }
+        val pendingExpensesCount = expenses.count { !it.isAcknowledged }
+        val pendingClosingDiffsCount = cashClosings.count { it.isDifferencePendingApproval }
+        val pendingPasswordResetsCount = passwordResetRequests.count { !it.isResolved }
+        val totalPendingApprovals = pendingPaymentsCount + pendingExpensesCount + pendingClosingDiffsCount + pendingPasswordResetsCount
 
-            if (totalPending > 0) {
-                item {
-                    Card(
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = WarningOrangeLight),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
+        if (canApproveAnything && totalPendingApprovals > 0) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = WarningOrangeLight),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, WarningOrange.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(
-                                        Icons.Default.PendingActions,
-                                        contentDescription = null,
-                                        tint = WarningOrange,
-                                        modifier = Modifier.size(24.dp)
+                                Icon(
+                                    Icons.Default.PendingActions,
+                                    contentDescription = null,
+                                    tint = WarningOrange,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Verification Required (تصدیق طلب کارروائی)",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = WarningOrange
                                     )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = "Verification Required (تصدیق طلب کارروائی)",
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = WarningOrange
-                                        )
-                                        Text(
-                                            text = buildString {
-                                                val parts = mutableListOf<String>()
-                                                if (pendingPayments > 0) parts.add("$pendingPayments Payment(s)")
-                                                if (pendingExpenses > 0) parts.add("$pendingExpenses Expense(s)")
-                                                if (pendingPasswordResets > 0) parts.add("$pendingPasswordResets Password Reset(s)")
-                                                append(parts.joinToString(" • "))
-                                                append(" awaiting Admin approval")
-                                            },
-                                            fontSize = 10.sp,
-                                            color = TextSecondaryDark
-                                        )
-                                    }
+                                    Text(
+                                        text = buildString {
+                                            val parts = mutableListOf<String>()
+                                            if (pendingPaymentsCount > 0) parts.add("$pendingPaymentsCount Payment(s)")
+                                            if (pendingExpensesCount > 0) parts.add("$pendingExpensesCount Expense(s)")
+                                            if (pendingClosingDiffsCount > 0) parts.add("$pendingClosingDiffsCount Cash Diff(s)")
+                                            if (pendingPasswordResetsCount > 0) parts.add("$pendingPasswordResetsCount Password Reset(s)")
+                                            append(parts.joinToString(" • "))
+                                            append(" awaiting Admin approval")
+                                        },
+                                        fontSize = 10.sp,
+                                        color = TextSecondaryDark
+                                    )
                                 }
                             }
+                        }
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = onNavigateToApprovals,
+                                colors = waterPrimaryButtonColors(),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .testTag("banner_open_approvals_btn"),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                             ) {
-                                if (pendingPayments > 0) {
-                                    Button(
-                                        onClick = onNavigateToReceivePayment,
-                                        colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
-                                        modifier = Modifier.weight(1f).height(36.dp),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                                    ) {
-                                        Text("Payments ($pendingPayments)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                    }
-                                }
-
-                                if (pendingExpenses > 0) {
-                                    Button(
-                                        onClick = onNavigateToExpenses,
-                                        colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White),
-                                        modifier = Modifier.weight(1f).height(36.dp),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                                    ) {
-                                        Text("Expenses ($pendingExpenses)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                    }
-                                }
-
-                                if (pendingPasswordResets > 0) {
-                                    Button(
-                                        onClick = { showPasswordResetRequestsDialog = true },
-                                        colors = waterPrimaryButtonColors(),
-                                        modifier = Modifier.weight(1f).height(36.dp),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                                    ) {
-                                        Text("Password ($pendingPasswordResets)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                    }
-                                }
+                                Icon(Icons.Default.FactCheck, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "Review All Approvals ($totalPendingApprovals)",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
                             }
                         }
                     }
@@ -799,12 +786,13 @@ fun DashboardScreen(
             }
         }
 
-        // 3. Quick Action Grid (Filtered by RBAC permissions)
+        // 3. Quick Action Grid (Filtered by RBAC permissions — 5 aligned tabs on ONE single line for Admin)
         val canQuickDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.ADD)
         val canQuickPayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
         val canQuickExpense = viewModel.hasPermission(AppModule.EXPENSES, PermissionAction.ADD)
         val canQuickClosing = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.MANAGE) || canQuickPayment
-        if (canQuickDelivery || canQuickPayment || canQuickExpense || canQuickClosing) {
+        val canQuickApprovals = canApproveAnything
+        if (canQuickDelivery || canQuickPayment || canQuickExpense || canQuickClosing || canQuickApprovals) {
             item {
                 SectionHeader(
                     title = "Quick Actions (فوری ایکشن)",
@@ -812,47 +800,70 @@ fun DashboardScreen(
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dashboard_quick_actions_row"),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (canQuickDelivery) {
                         QuickActionButton(
                             icon = Icons.Default.LocalShipping,
-                            title = "New Delivery",
-                            urdu = "نئی ڈیلیوری",
+                            title = "Delivery",
+                            urdu = "ڈیلیوری",
                             color = WaterNavyPrimary,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("quick_action_delivery"),
                             onClick = onNavigateToNewDelivery
                         )
                     }
                     if (canQuickPayment) {
                         QuickActionButton(
                             icon = Icons.Default.PriceCheck,
-                            title = "Receive Cash",
-                            urdu = "پیمنٹ وصولی",
+                            title = "Receive",
+                            urdu = "وصولی",
                             color = SuccessGreen,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("quick_action_payment"),
                             onClick = onNavigateToReceivePayment
                         )
                     }
                     if (canQuickExpense) {
                         QuickActionButton(
                             icon = Icons.Default.ReceiptLong,
-                            title = "Add Expense",
-                            urdu = "خرچ درج کریں",
+                            title = "Expense",
+                            urdu = "اخراجات",
                             color = ErrorRed,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("quick_action_expense"),
                             onClick = { showAddExpenseDialog = true }
                         )
                     }
                     if (canQuickClosing) {
                         QuickActionButton(
                             icon = Icons.Default.PointOfSale,
-                            title = "Cash Closing",
-                            urdu = "شام بندش",
+                            title = "Closing",
+                            urdu = "بندش",
                             color = WaterAqua,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("quick_action_closing"),
                             onClick = onNavigateToCashClosing
+                        )
+                    }
+                    if (canQuickApprovals) {
+                        QuickActionButton(
+                            icon = Icons.Default.FactCheck,
+                            title = "Approvals",
+                            urdu = "منظوریاں",
+                            color = WarningOrange,
+                            badgeCount = totalPendingApprovals,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("quick_action_approvals"),
+                            onClick = onNavigateToApprovals
                         )
                     }
                 }
@@ -905,9 +916,9 @@ fun DashboardScreen(
     }
 
     if (showCustomDateDialog) {
-        DashboardDateRangeDialog(
-            initialStartDate = customStartDate,
-            initialEndDate = customEndDate,
+        FromToDateRangeDialog(
+            initialFromDate = customStartDate,
+            initialToDate = customEndDate,
             onDismiss = { showCustomDateDialog = false },
             onConfirm = { s, e ->
                 customStartDate = s
@@ -1167,8 +1178,42 @@ fun DashboardScreen(
                 )
                 showAddExpenseDialog = false
             },
+            onSaveMultiItemInventory = { items, expType, supplier, invoiceNo, notes, date, source, method ->
+                viewModel.recordMultiItemInventoryExpense(
+                    items = items,
+                    expenseType = expType,
+                    supplierName = supplier,
+                    invoiceNo = invoiceNo,
+                    notes = notes,
+                    expenseDate = date,
+                    paymentSource = source,
+                    paymentMethod = method
+                )
+                showAddExpenseDialog = false
+            },
             onAddCategory = { name, urdu, type ->
-                viewModel.addExpenseCategory(name, urdu, type)
+                viewModel.addExpenseCategory(name, urdu, type, false)
+            },
+            onAddCategoryWithType = { name, urdu, type, isInv ->
+                viewModel.addExpenseCategory(name, urdu, type, isInv)
+            },
+            onAddNewMaterial = { mat ->
+                viewModel.addFactoryMaterial(mat)
+            },
+            onAddNewBottleSize = { name, cap, usage, refill, cost, uom, catName ->
+                viewModel.addNewBottleSize(
+                    name = name,
+                    purchaseRate = cost,
+                    packQty = 1,
+                    uom = uom,
+                    openingStock = 0,
+                    usageType = usage,
+                    defaultRefillPrice = refill,
+                    salePrice = refill,
+                    capacityLitres = cap,
+                    depositAmount = 0.0,
+                    categoryName = catName
+                )
             }
         )
     }
@@ -1180,49 +1225,81 @@ fun QuickActionButton(
     title: String,
     urdu: String,
     color: Color,
+    badgeCount: Int = 0,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(11.dp),
         color = Color.White,
         shadowElevation = 2.dp,
-        modifier = modifier.clickable { onClick() }
+        modifier = modifier
+            .defaultMinSize(minHeight = 76.dp)
+            .clickable { onClick() }
     ) {
-        Column(
-            modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Box(
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(color.copy(alpha = 0.12f)),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(vertical = 10.dp, horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = color,
-                    modifier = Modifier.size(20.dp)
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(color.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = title,
+                        tint = color,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(5.dp))
+
+                Text(
+                    text = title,
+                    fontSize = 8.8.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = WaterNavyPrimary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = urdu,
+                    fontSize = 8.sp,
+                    color = TextSecondaryDark,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = title,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                color = WaterNavyPrimary,
-                maxLines = 1
-            )
-            Text(
-                text = urdu,
-                fontSize = 9.5.sp,
-                color = TextSecondaryDark,
-                maxLines = 1
-            )
+            if (badgeCount > 0) {
+                Surface(
+                    shape = CircleShape,
+                    color = ErrorRed,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 4.dp, end = 4.dp)
+                        .defaultMinSize(minWidth = 17.dp, minHeight = 17.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 4.dp)) {
+                        Text(
+                            text = if (badgeCount > 99) "99+" else badgeCount.toString(),
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1349,170 +1426,4 @@ fun DeliveryItemCard(
     }
 }
 
-@Composable
-fun DashboardDateRangeDialog(
-    initialStartDate: String,
-    initialEndDate: String,
-    onDismiss: () -> Unit,
-    onConfirm: (startDate: String, endDate: String) -> Unit
-) {
-    var isSingleDateMode by remember { mutableStateOf(initialStartDate == initialEndDate) }
-    var startDateText by remember { mutableStateOf(initialStartDate) }
-    var endDateText by remember { mutableStateOf(initialEndDate) }
-    val context = androidx.compose.ui.platform.LocalContext.current
 
-    val cal = remember { java.util.Calendar.getInstance() }
-    val sdf = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()) }
-
-    fun showPicker(isStart: Boolean) {
-        val curDateStr = if (isStart) startDateText else endDateText
-        try {
-            val d = sdf.parse(curDateStr)
-            if (d != null) cal.time = d
-        } catch (_: Exception) {}
-
-        android.app.DatePickerDialog(
-            context,
-            { _, year, month, dayOfMonth ->
-                val chosen = java.util.Calendar.getInstance()
-                chosen.set(year, month, dayOfMonth)
-                val formatted = sdf.format(chosen.time)
-                if (isStart) {
-                    startDateText = formatted
-                    if (isSingleDateMode) endDateText = formatted
-                } else {
-                    endDateText = formatted
-                }
-            },
-            cal.get(java.util.Calendar.YEAR),
-            cal.get(java.util.Calendar.MONTH),
-            cal.get(java.util.Calendar.DAY_OF_MONTH)
-        ).show()
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color.White,
-        titleContentColor = WaterNavyPrimary,
-        textContentColor = TextPrimaryDark,
-        title = {
-            Text(
-                text = "تاریخ منتخب کریں (Select Date / Range)",
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.5.sp,
-                color = WaterNavyPrimary
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Mode selector chips: Single Day vs Date Range
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = isSingleDateMode,
-                        onClick = {
-                            isSingleDateMode = true
-                            endDateText = startDateText
-                        },
-                        colors = waterFilterChipColors(),
-                        label = { Text("ایک دن (Single Date)", fontSize = 10.sp) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = !isSingleDateMode,
-                        onClick = { isSingleDateMode = false },
-                        colors = waterFilterChipColors(),
-                        label = { Text("تاریخ کی حد (Date Range)", fontSize = 10.sp) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                // Start Date / Single Date field with calendar button
-                OutlinedTextField(
-                    value = startDateText,
-                    onValueChange = {
-                        startDateText = it
-                        if (isSingleDateMode) endDateText = it
-                    },
-                    label = { Text(if (isSingleDateMode) "منتخب تاریخ (Date: YYYY-MM-DD)" else "شروع کی تاریخ (Start Date)") },
-                    trailingIcon = {
-                        IconButton(onClick = { showPicker(true) }) {
-                            Icon(Icons.Default.CalendarMonth, contentDescription = "Pick Date", tint = WaterNavyPrimary)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                if (!isSingleDateMode) {
-                    OutlinedTextField(
-                        value = endDateText,
-                        onValueChange = { endDateText = it },
-                        label = { Text("اختتامی تاریخ (End Date: YYYY-MM-DD)") },
-                        trailingIcon = {
-                            IconButton(onClick = { showPicker(false) }) {
-                                Icon(Icons.Default.CalendarMonth, contentDescription = "Pick End Date", tint = WaterNavyPrimary)
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                }
-
-                // Quick presets
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    val todayStr = remember { sdf.format(java.util.Date()) }
-                    val yesterdayStr = remember {
-                        val c = java.util.Calendar.getInstance()
-                        c.add(java.util.Calendar.DAY_OF_YEAR, -1)
-                        sdf.format(c.time)
-                    }
-                    SuggestionChip(
-                        onClick = {
-                            startDateText = todayStr
-                            endDateText = todayStr
-                        },
-                        label = { Text("آج", fontSize = 9.5.sp) }
-                    )
-                    SuggestionChip(
-                        onClick = {
-                            startDateText = yesterdayStr
-                            endDateText = yesterdayStr
-                        },
-                        label = { Text("گزشتہ کل", fontSize = 9.5.sp) }
-                    )
-                    SuggestionChip(
-                        onClick = {
-                            val c = java.util.Calendar.getInstance()
-                            c.add(java.util.Calendar.DAY_OF_YEAR, -7)
-                            startDateText = sdf.format(c.time)
-                            endDateText = todayStr
-                            isSingleDateMode = false
-                        },
-                        label = { Text("پچھلے 7 دن", fontSize = 9.5.sp) }
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val s = if (startDateText.isNotBlank()) startDateText.trim() else initialStartDate
-                    val e = if (isSingleDateMode) s else if (endDateText.isNotBlank()) endDateText.trim() else s
-                    onConfirm(s, e)
-                },
-                colors = waterPrimaryButtonColors()
-            ) {
-                Text("لاگو کریں (Apply Filter)")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("منسوخ", color = TextSecondaryDark) }
-        }
-    )
-}

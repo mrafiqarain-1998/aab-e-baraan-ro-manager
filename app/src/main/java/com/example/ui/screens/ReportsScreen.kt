@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -188,19 +189,17 @@ fun ReportsScreen(
             }
         }
 
-        // Complete Statement PDF Banner for Selected Period
+        // Complete Statement PDF & Text Banner for Selected Period
         item {
-            val reportText = when (selectedPeriod) {
-                ReportPeriod.DAILY -> viewModel.generateDailyReportSummary()
-                ReportPeriod.WEEKLY -> viewModel.generateWeeklyReportSummary()
-                ReportPeriod.MONTHLY -> viewModel.generateMonthlyReportSummary()
+            val reportText = remember(selectedPeriod, dateRangeLabel, periodDeliveries, periodPayments, periodExpenses) {
+                viewModel.generatePeriodTextReport(
+                    periodLabel = selectedPeriod.label,
+                    dateLabel = dateRangeLabel,
+                    periodDeliveries = periodDeliveries,
+                    periodPayments = periodPayments,
+                    periodExpenses = periodExpenses
+                )
             }
-            val pendingPaymentsCount = periodPayments.count { !it.isAcknowledged }
-            val pendingExpensesCount = periodExpenses.count { !it.isAcknowledged || !it.isApprovedByOwner }
-            val pendingDeliveriesCount = periodDeliveries.count {
-                it.status == DeliveryStatus.PENDING || it.status == DeliveryStatus.ASSIGNED
-            }
-            val totalPendingApproval = pendingPaymentsCount + pendingExpensesCount + pendingDeliveriesCount
 
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -217,33 +216,65 @@ fun ReportsScreen(
                             color = WaterNavyPrimary
                         )
                         Text(
-                            text = "${periodDeliveries.size} Deliveries • ${periodPayments.size} Receipts • ${periodExpenses.size} Expenses" +
-                                if (totalPendingApproval > 0) " • $totalPendingApproval Unapproved" else "",
+                            text = "${periodDeliveries.size} Deliveries • ${periodPayments.size} Receipts • ${periodExpenses.size} Expenses",
                             fontSize = 10.sp,
-                            color = if (totalPendingApproval > 0) WarningAmber else TextSecondaryDark,
-                            fontWeight = if (totalPendingApproval > 0) FontWeight.SemiBold else FontWeight.Normal
+                            color = TextSecondaryDark
                         )
                     }
 
                     if (!isViewOnly) {
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        Button(
-                            onClick = { openDetailedStatementPdf() },
-                            colors = waterPrimaryButtonColors(),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("open_statement_pdf_btn"),
-                            shape = RoundedCornerShape(10.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "Preview & Share Full PDF Statement (مکمل PDF رپورٹ)",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Button(
+                                onClick = { openDetailedStatementPdf() },
+                                colors = waterPrimaryButtonColors(),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("open_statement_pdf_btn"),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) {
+                                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "Share PDF",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_SUBJECT, "Aab-e-Baraan ${selectedPeriod.label} ($dateRangeLabel)")
+                                        putExtra(Intent.EXTRA_TEXT, reportText)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, "Share ${selectedPeriod.label} Text"))
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("share_statement_text_btn"),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "Share Text",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
 

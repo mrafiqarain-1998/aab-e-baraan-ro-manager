@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.components.CompactFormTextField
+import com.example.ui.components.EditMetadataBadge
+import com.example.ui.components.EditableDateField
+import com.example.ui.components.FromToDateRangeDialog
 import com.example.ui.components.MobileFormDialog
 import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
@@ -53,6 +56,7 @@ enum class DeliveryDateFilter(val label: String) {
     YESTERDAY("Yesterday"),
     LAST_7_DAYS("Last 7 Days"),
     LAST_30_DAYS("Last 30 Days"),
+    CUSTOM("Custom Date"),
     ALL("All Deliveries")
 }
 
@@ -96,14 +100,26 @@ fun DeliveriesListScreen(
     }
 
     var selectedFilter by remember { mutableStateOf(DeliveryDateFilter.TODAY) }
+    var customStartDate by remember { mutableStateOf(todayStr) }
+    var customEndDate by remember { mutableStateOf(todayStr) }
+    var showCustomDateDialog by remember { mutableStateOf(false) }
 
-    val (filterStart, filterEnd) = remember(selectedFilter, todayStr, yesterdayStr, last7StartStr, last30StartStr) {
+    val (filterStart, filterEnd) = remember(selectedFilter, todayStr, yesterdayStr, last7StartStr, last30StartStr, customStartDate, customEndDate) {
         when (selectedFilter) {
             DeliveryDateFilter.TODAY -> todayStr to todayStr
             DeliveryDateFilter.YESTERDAY -> yesterdayStr to yesterdayStr
             DeliveryDateFilter.LAST_7_DAYS -> last7StartStr to todayStr
             DeliveryDateFilter.LAST_30_DAYS -> last30StartStr to todayStr
+            DeliveryDateFilter.CUSTOM -> customStartDate to customEndDate
             DeliveryDateFilter.ALL -> "" to "9999-12-31"
+        }
+    }
+
+    val activeFilterTitle = remember(selectedFilter, customStartDate, customEndDate) {
+        if (selectedFilter == DeliveryDateFilter.CUSTOM) {
+            if (customStartDate == customEndDate) customStartDate else "$customStartDate → $customEndDate"
+        } else {
+            selectedFilter.label
         }
     }
 
@@ -164,7 +180,13 @@ fun DeliveriesListScreen(
                         color = if (isSelected) WaterNavyPrimary else Color.Transparent,
                         modifier = Modifier
                             .height(32.dp)
-                            .clickable { selectedFilter = filter }
+                            .clickable {
+                                if (filter == DeliveryDateFilter.CUSTOM) {
+                                    showCustomDateDialog = true
+                                } else {
+                                    selectedFilter = filter
+                                }
+                            }
                             .testTag("filter_${filter.name.lowercase()}")
                     ) {
                         Box(
@@ -174,7 +196,11 @@ fun DeliveriesListScreen(
                                 .padding(horizontal = 10.dp)
                         ) {
                             Text(
-                                text = filter.label,
+                                text = if (filter == DeliveryDateFilter.CUSTOM && isSelected) {
+                                    if (customStartDate == customEndDate) customStartDate else "$customStartDate..$customEndDate"
+                                } else {
+                                    filter.label
+                                },
                                 color = if (isSelected) Color.White else WaterNavyDark,
                                 fontSize = 9.5.sp,
                                 fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
@@ -212,7 +238,7 @@ fun DeliveriesListScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "${selectedFilter.label} Summary",
+                                text = "$activeFilterTitle Summary",
                                 color = Color.White,
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.Bold,
@@ -399,7 +425,7 @@ fun DeliveriesListScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${selectedFilter.label} Deliveries (${filteredDeliveries.size})",
+                    text = "$activeFilterTitle Deliveries (${filteredDeliveries.size})",
                     fontSize = 11.5.sp,
                     fontWeight = FontWeight.Bold,
                     color = WaterNavyPrimary,
@@ -843,27 +869,29 @@ fun DeliveriesListScreen(
                                 maxLines = 1,
                                 softWrap = false
                             )
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (p.isAcknowledged) SuccessGreenLight else WarningOrangeLight
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                            if (canApprovePayment) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = if (p.isAcknowledged) SuccessGreenLight else WarningOrangeLight
                                 ) {
-                                    Icon(
-                                        imageVector = if (p.isAcknowledged) Icons.Default.CheckCircle else Icons.Default.HourglassTop,
-                                        contentDescription = if (p.isAcknowledged) "Clear" else "Unsettle",
-                                        tint = if (p.isAcknowledged) SuccessGreen else WarningOrange,
-                                        modifier = Modifier.size(10.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(
-                                        text = if (p.isAcknowledged) "Clear" else "Unsettle",
-                                        fontSize = 8.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (p.isAcknowledged) SuccessGreen else WarningOrange
-                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = if (p.isAcknowledged) Icons.Default.CheckCircle else Icons.Default.HourglassTop,
+                                            contentDescription = if (p.isAcknowledged) "Clear" else "Unsettle",
+                                            tint = if (p.isAcknowledged) SuccessGreen else WarningOrange,
+                                            modifier = Modifier.size(10.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Text(
+                                            text = if (p.isAcknowledged) "Clear" else "Unsettle",
+                                            fontSize = 8.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (p.isAcknowledged) SuccessGreen else WarningOrange
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -892,6 +920,11 @@ fun DeliveriesListScreen(
             if (del.notes.isNotBlank()) {
                 Text("Note: ${del.notes}", fontSize = 10.sp, color = TextSecondaryDark)
             }
+
+            EditMetadataBadge(
+                lastEditedAt = del.lastEditedAt,
+                lastEditedBy = del.lastEditedBy
+            )
         }
     }
 
@@ -967,6 +1000,21 @@ fun DeliveriesListScreen(
         PdfPreviewDialog(
             request = req,
             onDismiss = { previewPdfRequest = null }
+        )
+    }
+
+    if (showCustomDateDialog) {
+        FromToDateRangeDialog(
+            initialFromDate = customStartDate,
+            initialToDate = customEndDate,
+            title = "Delivery Custom Date (تاریخ منتخب کریں)",
+            onDismiss = { showCustomDateDialog = false },
+            onConfirm = { from, to ->
+                customStartDate = from
+                customEndDate = to
+                selectedFilter = DeliveryDateFilter.CUSTOM
+                showCustomDateDialog = false
+            }
         )
     }
 }
@@ -1092,31 +1140,12 @@ fun EditDeliveryDialog(
             }
         }
     ) {
-        // Date Row with Calendar Icon
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            CompactFormTextField(
-                value = editDate,
-                onValueChange = { editDate = it },
-                label = "Delivery Date",
-                height = 38.dp,
-                modifier = Modifier.weight(1f)
-            )
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = WaterSkyLight,
-                modifier = Modifier
-                    .size(38.dp)
-                    .clickable { showDatePicker = true }
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.CalendarMonth, contentDescription = "Pick Date", tint = WaterNavyPrimary, modifier = Modifier.size(18.dp))
-                }
-            }
-        }
+        // Date Row with Calendar Picker
+        EditableDateField(
+            label = "Delivery Date (ڈیلیوری کی تاریخ)*",
+            dateValue = editDate,
+            onDateSelected = { editDate = it }
+        )
 
         // Bottle Items + Add Extra Size
         Row(
@@ -1587,14 +1616,15 @@ private fun DeliveryCardItem(
                 }
             }
 
-            // Row 3: Status Symbols Only (Unsettle / Clear / Credit — Edit, Delete & Pay Now are inside Detail View)
-            if (hasUnsettledPayment || allPaymentsCleared || isCredit) {
+            // Row 3: Unsettle / Clear Badges ONLY visible to Admin / Payment Approver
+            val showSettlementRow = isAdmin && (hasUnsettledPayment || allPaymentsCleared)
+            if (showSettlementRow || isCredit) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (hasUnsettledPayment) {
+                    if (isAdmin && hasUnsettledPayment) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = WarningOrangeLight,
@@ -1621,7 +1651,7 @@ private fun DeliveryCardItem(
                                 )
                             }
                         }
-                    } else if (allPaymentsCleared) {
+                    } else if (isAdmin && allPaymentsCleared) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = SuccessGreenLight,

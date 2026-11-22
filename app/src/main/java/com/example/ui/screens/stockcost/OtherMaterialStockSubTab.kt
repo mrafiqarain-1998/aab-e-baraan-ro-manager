@@ -67,9 +67,13 @@ fun OtherMaterialStockSubTab(
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
 
     val activeMaterials = remember(materials) { materials.filter { it.active } }
+    val uncategorizedCount = remember(activeMaterials) { activeMaterials.count { it.itemCategory.isBlank() } }
     val displayedMaterials = remember(activeMaterials, selectedCategoryFilter) {
-        if (selectedCategoryFilter == null) activeMaterials
-        else activeMaterials.filter { it.itemCategory == selectedCategoryFilter }
+        when (selectedCategoryFilter) {
+            null -> activeMaterials
+            "__UNCATEGORIZED__" -> activeMaterials.filter { it.itemCategory.isBlank() }
+            else -> activeMaterials.filter { it.itemCategory.equals(selectedCategoryFilter, ignoreCase = true) }
+        }
     }
 
     LazyColumn(
@@ -168,6 +172,18 @@ fun OtherMaterialStockSubTab(
                         colors = waterFilterChipColors(),
                         label = { Text("All (${activeMaterials.size})", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                     )
+                }
+                if (uncategorizedCount > 0) {
+                    item {
+                        FilterChip(
+                            selected = selectedCategoryFilter == "__UNCATEGORIZED__",
+                            onClick = {
+                                selectedCategoryFilter = if (selectedCategoryFilter == "__UNCATEGORIZED__") null else "__UNCATEGORIZED__"
+                            },
+                            colors = waterFilterChipColors(),
+                            label = { Text("Uncategorized ($uncategorizedCount)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                        )
+                    }
                 }
                 items(allInventoryCategories) { cat ->
                     val count = activeMaterials.count { it.itemCategory.equals(cat, ignoreCase = true) }
@@ -561,15 +577,16 @@ fun CompactMaterialCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
+                        val isUncategorized = material.itemCategory.isBlank()
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = WaterSkyLight
+                            color = if (isUncategorized) WarningOrangeLight else WaterSkyLight
                         ) {
                             Text(
-                                text = material.itemCategory,
+                                text = if (isUncategorized) "Uncategorized" else material.itemCategory,
                                 fontSize = 8.5.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = WaterBlueDeep,
+                                color = if (isUncategorized) WarningOrange else WaterBlueDeep,
                                 maxLines = 1,
                                 softWrap = false,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -699,10 +716,10 @@ fun AddMaterialItemDialog(
     onSave: (FactoryMaterial) -> Unit
 ) {
     val categoryOptions = remember(categories) {
-        categories.ifEmpty { StockMasterOptions.MATERIAL_CATEGORIES }
+        categories.distinctBy { it.lowercase() }
     }
     var itemName by remember { mutableStateOf("") }
-    var itemCategory by remember { mutableStateOf(categoryOptions.first()) }
+    var itemCategory by remember(categoryOptions) { mutableStateOf(categoryOptions.firstOrNull().orEmpty()) }
     var costType by remember { mutableStateOf(ExpenseType.OPEX) }
     var uom by remember { mutableStateOf(StockMasterOptions.MATERIAL_UOMS.first()) }
     var currentStock by remember { mutableStateOf("") }
@@ -1270,10 +1287,9 @@ fun EditMaterialDialog(
     val categoryOptions = remember(categories, material.itemCategory) {
         (categories + listOfNotNull(material.itemCategory.takeIf { it.isNotBlank() }))
             .distinctBy { it.lowercase() }
-            .ifEmpty { StockMasterOptions.MATERIAL_CATEGORIES }
     }
     var name by remember { mutableStateOf(material.name) }
-    var itemCategory by remember { mutableStateOf(material.itemCategory.ifBlank { categoryOptions.first() }) }
+    var itemCategory by remember { mutableStateOf(material.itemCategory) }
     var costType by remember { mutableStateOf(material.costType) }
     var uom by remember { mutableStateOf(material.uom.ifBlank { StockMasterOptions.MATERIAL_UOMS.first() }) }
     var purchaseRate by remember { mutableStateOf(material.purchaseRate.toInt().toString()) }
@@ -1333,8 +1349,8 @@ fun EditMaterialDialog(
             modifier = Modifier.fillMaxWidth()
         )
         CompactDropdownField(
-            label = "Item Category*",
-            selectedText = itemCategory,
+            label = "Item Category (from Expenses)",
+            selectedText = itemCategory.ifBlank { "Uncategorized (Select new category)" },
             options = categoryOptions,
             optionLabel = { it },
             onOptionSelected = { itemCategory = it }
@@ -1432,7 +1448,7 @@ fun MaterialHistoryDialog(
 
     MobileFormDialog(
         title = material.name,
-        subtitle = "${material.itemCategory} • خریداری اور اجراء کی مکمل تفصیل",
+        subtitle = "${material.itemCategory.ifBlank { "Uncategorized" }} • خریداری اور اجراء کی مکمل تفصیل",
         onDismiss = onDismiss,
         footerContent = {
             Button(

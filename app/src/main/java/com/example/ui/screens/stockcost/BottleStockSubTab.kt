@@ -55,6 +55,7 @@ fun BottleStockSubTab(
     val customers by viewModel.customers.collectAsState()
     val customerAllocations by viewModel.customerAllocations.collectAsState()
     val movements by viewModel.bottleMovements.collectAsState()
+    val allInventoryCategories by viewModel.allInventoryCategories.collectAsState()
 
     var showAddStockDialog by remember { mutableStateOf(false) }
     var showIssueBottleDialog by remember { mutableStateOf(false) }
@@ -64,6 +65,7 @@ fun BottleStockSubTab(
     var showAddSizeDialog by remember { mutableStateOf(false) }
     var sizeToEdit by remember { mutableStateOf<BottleSize?>(null) }
     var sizeToDelete by remember { mutableStateOf<BottleSize?>(null) }
+    var isMovementsExpanded by remember { mutableStateOf(false) }
 
     val activeSizes = remember(bottleSizes) { bottleSizes.filter { it.active } }
     val singleUseSizes = remember(activeSizes) {
@@ -223,62 +225,97 @@ fun BottleStockSubTab(
             }
         }
 
-        // 4. Recent Stock Movements Audit Log
+        // 4. Recent Stock Movements Audit Log (Collapsible with Toggle Symbol)
         item {
             Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color.White,
+                shadowElevation = 1.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isMovementsExpanded = !isMovementsExpanded }
+                    .testTag("toggle_recent_stock_movements")
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.History, contentDescription = null, tint = TextPrimaryDark, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Column {
-                        Text(
-                            "Recent Stock Movements (${movements.size})",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 12.sp,
-                            color = WaterNavyPrimary
-                        )
-                        Text("بوتل کی نقل و حرکت کا ریکارڈ", fontSize = 9.5.sp, color = TextSecondaryDark)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.History, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
+                            Text(
+                                "Recent Stock Movements (${movements.size})",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp,
+                                color = WaterNavyPrimary
+                            )
+                            Text(
+                                if (isMovementsExpanded) "تمام ریکارڈ چھپانے کے لیے کلک کریں" else "تفصیل دیکھنے کے لیے کلک کریں",
+                                fontSize = 9.5.sp,
+                                color = TextSecondaryDark
+                            )
+                        }
                     }
-                }
 
-                if (isAdmin && movements.isNotEmpty()) {
-                    TextButton(
-                        onClick = {
-                            viewModel.clearAllBottleMovements()
-                            Toast.makeText(context, "All movements cleared", Toast.LENGTH_SHORT).show()
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear All", tint = ErrorRed, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Text("Clear", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isAdmin && isMovementsExpanded && movements.isNotEmpty()) {
+                            TextButton(
+                                onClick = {
+                                    viewModel.clearAllBottleMovements()
+                                    Toast.makeText(context, "All movements cleared", Toast.LENGTH_SHORT).show()
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Default.DeleteSweep, contentDescription = "Clear All", tint = ErrorRed, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("Clear", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Surface(
+                            shape = CircleShape,
+                            color = WaterSkyLight,
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (isMovementsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (isMovementsExpanded) "Hide Stock Movements" else "Show Stock Movements",
+                                    tint = WaterNavyPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        val recentMovements = movements.take(15)
-        if (recentMovements.isEmpty()) {
-            item {
-                EmptyStateCard(
-                    message = "No stock movements recorded yet.",
-                    urduMessage = "ابھی تک کوئی لاگ ریکارڈ نہیں ہوا"
-                )
-            }
-        } else {
-            items(recentMovements, key = { it.id }) { mov ->
-                MovementAuditRow(
-                    movement = mov,
-                    isAdmin = isAdmin,
-                    onDeleteClick = {
-                        viewModel.deleteBottleMovement(mov.id)
-                        Toast.makeText(context, "Movement record deleted", Toast.LENGTH_SHORT).show()
-                    }
-                )
+        if (isMovementsExpanded) {
+            val recentMovements = movements.take(15)
+            if (recentMovements.isEmpty()) {
+                item {
+                    EmptyStateCard(
+                        message = "No stock movements recorded yet.",
+                        urduMessage = "ابھی تک کوئی لاگ ریکارڈ نہیں ہوا"
+                    )
+                }
+            } else {
+                items(recentMovements, key = { it.id }) { mov ->
+                    MovementAuditRow(
+                        movement = mov,
+                        isAdmin = isAdmin,
+                        onDeleteClick = {
+                            viewModel.deleteBottleMovement(mov.id)
+                            Toast.makeText(context, "Movement record deleted", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
             }
         }
     }
@@ -387,11 +424,12 @@ fun BottleStockSubTab(
         val editing = sizeToEdit
         BottleSizeFormDialog(
             existingSize = editing,
+            categories = allInventoryCategories,
             onDismiss = {
                 showAddSizeDialog = false
                 sizeToEdit = null
             },
-            onSave = { name, capacity, usageType, refillPrice, purchaseCost, deposit, uom ->
+            onSave = { name, capacity, usageType, refillPrice, purchaseCost, deposit, uom, categoryName ->
                 if (editing == null) {
                     viewModel.addNewBottleSize(
                         name = name,
@@ -403,7 +441,8 @@ fun BottleStockSubTab(
                         defaultRefillPrice = refillPrice,
                         salePrice = refillPrice,
                         capacityLitres = capacity,
-                        depositAmount = deposit
+                        depositAmount = deposit,
+                        categoryName = categoryName
                     ) {
                         showAddSizeDialog = false
                         Toast.makeText(context, "Bottle size added", Toast.LENGTH_SHORT).show()
@@ -417,7 +456,8 @@ fun BottleStockSubTab(
                         defaultRefillPrice = refillPrice,
                         purchaseCost = purchaseCost,
                         depositAmount = deposit,
-                        uom = uom
+                        uom = uom,
+                        categoryName = categoryName
                     ) { success, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         if (success) sizeToEdit = null
@@ -610,6 +650,21 @@ fun UnifiedBottleSizeCard(
                                     maxLines = 1,
                                     softWrap = false,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            val catUncat = size.categoryName.isBlank()
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (catUncat) WarningOrangeLight else Color(0xFFF1F5F9)
+                            ) {
+                                Text(
+                                    text = if (catUncat) "Uncategorized" else size.categoryName,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (catUncat) WarningOrange else WaterNavyDark,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -1848,6 +1903,7 @@ fun BottleLossDamageFormDialog(
 @Composable
 fun BottleSizeFormDialog(
     existingSize: BottleSize?,
+    categories: List<String> = emptyList(),
     onDismiss: () -> Unit,
     onSave: (
         name: String,
@@ -1856,7 +1912,8 @@ fun BottleSizeFormDialog(
         refillPrice: Double,
         purchaseCost: Double,
         securityDeposit: Double,
-        uom: String
+        uom: String,
+        categoryName: String
     ) -> Unit
 ) {
     val isEditing = existingSize != null
@@ -1872,13 +1929,24 @@ fun BottleSizeFormDialog(
     var purchaseCost by remember { mutableStateOf(existingSize?.latestPurchaseRate?.takeIf { it > 0 }?.toInt()?.toString() ?: "") }
     var securityDeposit by remember { mutableStateOf(existingSize?.depositAmount?.takeIf { it > 0 }?.toInt()?.toString() ?: "") }
     var uom by remember { mutableStateOf(existingSize?.uom?.ifBlank { "Bottle" } ?: "Bottle") }
+    val categoryOptions = remember(categories) {
+        categories.map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+    }
+    var categoryName by remember {
+        mutableStateOf(
+            existingSize?.categoryName?.trim()
+                ?: categoryOptions.firstOrNull { it.contains("bottle", ignoreCase = true) }
+                ?: categoryOptions.firstOrNull().orEmpty()
+        )
+    }
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
     val usageOptions = listOf(BottleUsageType.MULTIPLE_TIME, BottleUsageType.ONE_TIME)
     val hasUnsaved = if (isEditing) {
         bottleName != existingSize?.name ||
             capacity != existingSize?.capacityLitres?.toString() ||
-            uom != existingSize?.uom
+            uom != existingSize?.uom ||
+            categoryName != existingSize?.categoryName
     } else {
         bottleName.isNotBlank() || capacity.isNotBlank() || fillingPrice.isNotBlank() || purchaseCost.isNotBlank()
     }
@@ -1904,7 +1972,7 @@ fun BottleSizeFormDialog(
                     when {
                         cleanName.isEmpty() -> errorMsg = "Bottle Name is required."
                         capVal <= 0.0 -> errorMsg = "Enter valid Capacity in Litres."
-                        else -> onSave(cleanName, capVal, usageType, fillVal, purVal, depVal, cleanUom)
+                        else -> onSave(cleanName, capVal, usageType, fillVal, purVal, depVal, cleanUom, categoryName.trim())
                     }
                 },
                 colors = waterPrimaryButtonColors(),
@@ -1977,6 +2045,14 @@ fun BottleSizeFormDialog(
             label = { Text("7. UOM*", fontSize = 10.5.sp) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
+        )
+
+        CompactDropdownField(
+            label = "8. Category (from Expenses)",
+            selectedText = categoryName.ifBlank { "Uncategorized (Select new category)" },
+            options = categoryOptions,
+            optionLabel = { it },
+            onOptionSelected = { categoryName = it }
         )
 
         if (errorMsg != null) {

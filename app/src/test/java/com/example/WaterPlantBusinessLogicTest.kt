@@ -3026,7 +3026,505 @@ class WaterPlantBusinessLogicTest {
             com.example.util.TransactionNotificationHelper.isRestrictOwnDataEnabled(context)
         )
     }
+
+    @Test
+    fun testMultiInvoiceCheckboxPaymentUpdatesSelectedDeliveriesOnly() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(
+            Customer(
+                id = "cust_multi_inv_cb",
+                name = "Checkbox Ledger Customer",
+                phone = "03009998877",
+                area = "Gulberg"
+            )
+        )
+
+        fun createCreditDelivery(date: String, amount: Double): Pair<Delivery, Invoice> {
+            val delNum = repository.recordDelivery(
+                customerId = custId,
+                items = listOf(
+                    DeliveryItem(
+                        bottleSizeId = "size_19l",
+                        bottleName = "19L",
+                        quantity = 1,
+                        emptyCollected = 1,
+                        unitPrice = amount,
+                        lineTotal = amount
+                    )
+                ),
+                assignedStaffName = "Rider",
+                notes = "Credit order",
+                immediatePaymentAmount = 0.0,
+                paymentMethod = PaymentMethod.CASH,
+                deliveryDate = date
+            )
+            val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+            val inv = repository.invoices.value.first { it.id == del.invoiceId }
+            return del to inv
+        }
+
+        val (del1, inv1) = createCreditDelivery("2026-11-18", 200.0)
+        val (del2, inv2) = createCreditDelivery("2026-11-19", 350.0)
+        val (del3, inv3) = createCreditDelivery("2026-11-20", 450.0)
+
+        // Check ONLY Invoice #1 (200) and Invoice #3 (450) -> Total Rs. 650
+        repository.recordPayment(
+            customerId = custId,
+            amount = 650.0,
+            method = PaymentMethod.CASH,
+            manualAllocations = mapOf(
+                inv1.id to 200.0,
+                inv3.id to 450.0
+            ),
+            notes = "Checkbox selected payment"
+        )
+
+        // Verify Invoices: #1 and #3 are PAID; #2 remains UNPAID
+        val inv1After = repository.invoices.value.first { it.id == inv1.id }
+        val inv2After = repository.invoices.value.first { it.id == inv2.id }
+        val inv3After = repository.invoices.value.first { it.id == inv3.id }
+        assertEquals(0.0, inv1After.balanceDue, 0.01)
+        assertEquals(350.0, inv2After.balanceDue, 0.01)
+        assertEquals(0.0, inv3After.balanceDue, 0.01)
+
+        // Verify Deliveries list automatically updated too!
+        val del1After = repository.deliveries.value.first { it.id == del1.id }
+        val del2After = repository.deliveries.value.first { it.id == del2.id }
+        val del3After = repository.deliveries.value.first { it.id == del3.id }
+        assertEquals(200.0, del1After.paymentCollected, 0.01)
+        assertEquals(PaymentMethod.CASH.label, del1After.paymentMethod)
+        assertEquals(0.0, del2After.paymentCollected, 0.01)
+        assertEquals("Unpaid", del2After.paymentMethod)
+        assertEquals(450.0, del3After.paymentCollected, 0.01)
+        assertEquals(PaymentMethod.CASH.label, del3After.paymentMethod)
+    }
+
+    @Test
+    fun testEditAuditMetadataStampedOnCustomerDeliveryExpenseAndPayment() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val adminName = repository.currentUser.value.name
+
+        // 1. Customer Edit stamps metadata
+        val custId = repository.addCustomer(
+            Customer(id = "cust_edit_meta", name = "Edit Meta Cust", phone = "03001112233", area = "Block A")
+        )
+        val originalCust = repository.getCustomerById(custId)!!
+        assertEquals(0L, originalCust.lastEditedAt)
+        repository.updateCustomer(originalCust.copy(area = "Block B"))
+        val editedCust = repository.getCustomerById(custId)!!
+        assertTrue(editedCust.lastEditedAt > 0L)
+        assertEquals(adminName, editedCust.lastEditedBy)
+
+        // 2. Delivery Edit (including date) stamps metadata
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_19l",
+                    bottleName = "19L",
+                    quantity = 2,
+                    emptyCollected = 2,
+                    unitPrice = 150.0,
+                    lineTotal = 300.0
+                )
+            ),
+            assignedStaffName = "Rider",
+            notes = "",
+            deliveryDate = "2026-11-18"
+        )
+        val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+        assertTrue(repository.updateDelivery(del.copy(date = "2026-11-19", notes = "Date fixed")))
+        val editedDel = repository.deliveries.value.first { it.id == del.id }
+        assertEquals("2026-11-19", editedDel.date)
+        assertTrue(editedDel.lastEditedAt > 0L)
+        assertEquals(adminName, editedDel.lastEditedBy)
+
+        // 3. Expense Edit (including date) stamps metadata
+        val voucher = repository.addExpense(
+            categoryId = "cat_fuel",
+            categoryName = "Fuel / Rent",
+            description = "Fuel",
+            amount = 500.0,
+            method = PaymentMethod.CASH,
+            payee = "PSO",
+            notes = "",
+            expenseDate = "2026-11-18"
+        )
+        val exp = repository.expenses.value.first { it.voucherNumber == voucher }
+        assertTrue(repository.updateExpense(exp.copy(date = "2026-11-19", amount = 600.0)))
+        val editedExp = repository.expenses.value.first { it.id == exp.id }
+        assertEquals("2026-11-19", editedExp.date)
+        assertTrue(editedExp.lastEditedAt > 0L)
+        assertEquals(adminName, editedExp.lastEditedBy)
+
+        // 4. Payment Edit stamps metadata
+        val pay = repository.recordPayment(custId, 100.0, PaymentMethod.CASH, null, "Initial pay")
+        assertTrue(repository.updatePayment(pay.copy(notes = "Corrected note")))
+        val editedPay = repository.payments.value.first { it.id == pay.id }
+        assertEquals("Corrected note", editedPay.notes)
+        assertTrue(editedPay.lastEditedAt > 0L)
+        assertEquals(adminName, editedPay.lastEditedBy)
+    }
+
+    @Test
+    fun testCashClosingDifferenceApprovalAndCarryForwardOpeningCash() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val day1 = "2026-11-20"
+        val day2 = "2026-11-21"
+
+        val summaryDay1 = CashClosingSummary(
+            date = day1,
+            openingCash = 1000.0,
+            customerCashCollected = 5000.0,
+            cashExpenses = 1000.0,
+            expectedClosingCash = 5000.0
+        )
+
+        // Submit day 1 closing with Rs. 4500 actual drawer cash (Rs. -500 shortage)
+        val closing = repository.submitCashClosing(summaryDay1, actualCountedCash = 4500.0, notes = "Short by 500")
+        assertEquals("PENDING", closing.effectiveApprovalStatus)
+        assertTrue(closing.isDifferencePendingApproval)
+        // Before Admin approves -> next day continues from EXPECTED cash (5000)
+        assertEquals(5000.0, closing.carryForwardOpeningCash, 0.01)
+        assertEquals(5000.0, repository.getDailyCashSummary(day2).openingCash, 0.01)
+
+        // If Admin rejects difference -> next day still continues from EXPECTED cash (5000)
+        assertTrue(repository.rejectCashClosingDifference(closing.id))
+        val rejected = repository.cashClosings.value.first { it.id == closing.id }
+        assertEquals("REJECTED", rejected.effectiveApprovalStatus)
+        assertEquals(5000.0, rejected.carryForwardOpeningCash, 0.01)
+        assertEquals(5000.0, repository.getDailyCashSummary(day2).openingCash, 0.01)
+
+        // Submit another closing with difference and APPROVE it -> next day opens with ACTUAL drawer cash (4500)
+        val closing2 = repository.submitCashClosing(summaryDay1, actualCountedCash = 4500.0, notes = "Approved shortage")
+        assertTrue(repository.approveCashClosingDifference(closing2.id))
+        val approved = repository.cashClosings.value.first { it.id == closing2.id }
+        assertEquals("APPROVED", approved.effectiveApprovalStatus)
+        assertFalse(approved.isDifferencePendingApproval)
+        assertEquals(4500.0, approved.carryForwardOpeningCash, 0.01)
+        assertEquals(4500.0, repository.getDailyCashSummary(day2).openingCash, 0.01)
+    }
+
+    @Test
+    fun testAdminPhoneSyncForPdfAndPeriodTextReportFormat() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val adminAcc = repository.userAccounts.value.first { it.role == UserRole.ADMIN }
+        repository.updateUserAccount(adminAcc.copy(phone = "0321-7654321"))
+
+        assertEquals("0321-7654321", repository.getPrimaryAdminPhone())
+        assertEquals("0321-7654321", com.example.util.PdfGenerator.defaultAdminPhone)
+
+        val vm = com.example.viewmodel.WaterPlantViewModel(ApplicationProvider.getApplicationContext())
+        val del = Delivery(
+            id = "d_rep_1",
+            deliveryNumber = "DEL-101",
+            customerId = "c1",
+            customerName = "Ali Mart",
+            date = "2026-11-21",
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_19l",
+                    bottleName = "19L",
+                    quantity = 5,
+                    emptyCollected = 5,
+                    unitPrice = 150.0,
+                    lineTotal = 750.0
+                )
+            ),
+            totalFullDelivered = 5,
+            totalAmount = 750.0
+        )
+        val pay = Payment(
+            id = "p_rep_1",
+            receiptNumber = "RCP-101",
+            customerId = "c1",
+            customerName = "Ali Mart",
+            date = "2026-11-21",
+            amount = 500.0,
+            paymentMethod = PaymentMethod.CASH
+        )
+        val exp = Expense(
+            id = "e_rep_1",
+            voucherNumber = "EXP-101",
+            date = "2026-11-21",
+            categoryName = "Fuel / Rent",
+            description = "Bike petrol",
+            amount = 300.0
+        )
+
+        val reportText = vm.generatePeriodTextReport(
+            periodLabel = "Daily Report",
+            dateLabel = "21 Nov 2026",
+            periodDeliveries = listOf(del),
+            periodPayments = listOf(pay),
+            periodExpenses = listOf(exp)
+        )
+        assertTrue(reportText.startsWith("AAB E BARAAN RO PLANT"))
+        assertTrue(reportText.contains("Daily Report — 21 Nov 2026"))
+        assertTrue(reportText.contains("DELIVERIES (Customer-wise):"))
+        assertTrue(reportText.contains("Ali Mart"))
+        assertTrue(reportText.contains("PAYMENTS (Customer-wise):"))
+        assertTrue(reportText.contains("EXPENSES:"))
+        assertTrue(reportText.contains("0321-7654321"))
+        assertFalse(reportText.contains("Pending Admin"))
+
+        val cust = Customer(id = "c1", name = "Ali Mart", customerCode = "C-001", phone = "03001112222", currentBalance = 250.0)
+        val ledgerText = vm.generateCustomerLedgerText(cust, "2026-11-01", "2026-11-21", listOf(del), listOf(pay))
+        assertTrue(ledgerText.contains("Customer Ledger — 2026-11-01 to 2026-11-21"))
+        assertTrue(ledgerText.contains("Total Delivered: Rs. 750"))
+        assertTrue(ledgerText.contains("Total Paid: Rs. 500"))
+        assertTrue(ledgerText.contains("0321-7654321"))
+    }
+
+    @Test
+    fun testMultiItemInventoryExpenseCreatesSingleVoucherAndUpdatesAllStock() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val size15L = repository.bottleSizes.value.firstOrNull { it.id == "size_1_5l" }
+            ?: repository.bottleSizes.value.first { it.name.contains("1.5", ignoreCase = true) }
+        val size500ml = repository.bottleSizes.value.firstOrNull { it.id == "size_500ml" }
+            ?: repository.bottleSizes.value.first { it.name.contains("500", ignoreCase = true) }
+
+        val capMaterialId = repository.addFactoryMaterial(
+            FactoryMaterial(
+                name = "Blue Bottle Caps",
+                itemCategory = "Packing Material",
+                uom = "Piece",
+                openingStock = 100.0,
+                currentStock = 100.0,
+                purchaseRate = 2.0
+            )
+        )
+
+        val before15Empty = repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty
+        val before500Empty = repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty
+        val beforeCapStock = repository.factoryMaterials.value.first { it.id == capMaterialId }.currentStock
+        val beforeExpCount = repository.expenses.value.size
+
+        // Purchase 500 x 1.5L (@ Rs.18) + 200 x 500ml (@ Rs.10) + 1000 Caps (@ Rs.2) in ONE expense
+        val result = repository.recordMultiItemInventoryExpense(
+            items = listOf(
+                ExpenseInventoryLineItem(
+                    itemType = "BOTTLE",
+                    itemId = size15L.id,
+                    itemName = size15L.name,
+                    quantity = 500.0,
+                    unitRate = 18.0,
+                    lineTotal = 9000.0
+                ),
+                ExpenseInventoryLineItem(
+                    itemType = "BOTTLE",
+                    itemId = size500ml.id,
+                    itemName = size500ml.name,
+                    quantity = 200.0,
+                    unitRate = 10.0,
+                    lineTotal = 2000.0
+                ),
+                ExpenseInventoryLineItem(
+                    itemType = "MATERIAL",
+                    itemId = capMaterialId,
+                    itemName = "Blue Bottle Caps",
+                    quantity = 1000.0,
+                    unitRate = 2.0,
+                    lineTotal = 2000.0
+                )
+            ),
+            expenseType = ExpenseType.OPEX,
+            supplierName = "National PET Suppliers",
+            invoiceNo = "BILL-7788",
+            notes = "Combined bottle + cap purchase",
+            expenseDate = "2026-11-22",
+            paymentSource = PaymentSource.PAY_FROM_SALE,
+            paymentMethod = PaymentMethod.CASH
+        )
+        assertTrue(result.first)
+
+        // Exactly ONE expense voucher created with summed total = 9000 + 2000 + 2000 = 13000
+        assertEquals(beforeExpCount + 1, repository.expenses.value.size)
+        val created = repository.expenses.value.first()
+        assertTrue(created.isInventoryExpense)
+        assertEquals(13000.0, created.amount, 0.01)
+        assertEquals(3, created.effectiveInventoryItems.size)
+        assertEquals("National PET Suppliers", created.payee)
+        assertEquals("BILL-7788", created.invoiceNumber)
+        // Auto-picked categories on line items
+        assertEquals("Packing Material", created.effectiveInventoryItems.first { it.itemId == capMaterialId }.categoryName)
+        assertTrue(created.effectiveInventoryItems.first { it.itemId == size15L.id }.categoryName.isNotBlank())
+
+        // Stock updated accurately for every item
+        assertEquals(before15Empty + 500, repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty)
+        assertEquals(before500Empty + 200, repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty)
+        assertEquals(beforeCapStock + 1000.0, repository.factoryMaterials.value.first { it.id == capMaterialId }.currentStock, 0.01)
+
+        // Share summary includes item-wise breakdown
+        val shareSummary = com.example.util.PdfGenerator.buildExpenseShareSummary(created)
+        assertTrue(shareSummary.contains("Items:"))
+        assertTrue(shareSummary.contains("Blue Bottle Caps"))
+        assertTrue(shareSummary.contains("Rs. 13000"))
+    }
+
+    @Test
+    fun testEditAndDeleteMultiItemInventoryExpenseReconcilesStockAtomically() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val size15L = repository.bottleSizes.value.firstOrNull { it.id == "size_1_5l" }
+            ?: repository.bottleSizes.value.first { it.name.contains("1.5", ignoreCase = true) }
+        val size500ml = repository.bottleSizes.value.firstOrNull { it.id == "size_500ml" }
+            ?: repository.bottleSizes.value.first { it.name.contains("500", ignoreCase = true) }
+
+        val baseline15 = repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty
+        val baseline500 = repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty
+
+        assertTrue(
+            repository.recordMultiItemInventoryExpense(
+                items = listOf(
+                    ExpenseInventoryLineItem(
+                        itemType = "BOTTLE",
+                        itemId = size15L.id,
+                        itemName = size15L.name,
+                        quantity = 100.0,
+                        unitRate = 20.0,
+                        lineTotal = 2000.0
+                    ),
+                    ExpenseInventoryLineItem(
+                        itemType = "BOTTLE",
+                        itemId = size500ml.id,
+                        itemName = size500ml.name,
+                        quantity = 50.0,
+                        unitRate = 10.0,
+                        lineTotal = 500.0
+                    )
+                ),
+                expenseType = ExpenseType.OPEX,
+                supplierName = "Old Vendor",
+                invoiceNo = "INV-100",
+                notes = "Initial note",
+                expenseDate = "2026-11-20",
+                paymentSource = PaymentSource.PAY_FROM_SALE,
+                paymentMethod = PaymentMethod.CASH
+            ).first
+        )
+
+        val originalExp = repository.expenses.value.first()
+        assertEquals(2500.0, originalExp.amount, 0.01)
+        assertEquals(baseline15 + 100, repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty)
+        assertEquals(baseline500 + 50, repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty)
+
+        // Edit ALL fields: change 1.5L qty 100 -> 150 @ Rs.22, remove 500ml, change date, vendor, invoice, mode & note
+        val updatedItems = listOf(
+            ExpenseInventoryLineItem(
+                itemType = "BOTTLE",
+                itemId = size15L.id,
+                itemName = size15L.name,
+                quantity = 150.0,
+                unitRate = 22.0,
+                lineTotal = 3300.0
+            )
+        )
+        assertTrue(
+            repository.updateExpense(
+                originalExp.copy(
+                    date = "2026-11-21",
+                    payee = "Updated Vendor",
+                    invoiceNumber = "INV-200",
+                    paymentMethod = PaymentMethod.BANK_TRANSFER,
+                    paymentSource = PaymentSource.PAY_FROM_INVESTMENT,
+                    notes = "Edited note",
+                    isInventoryExpense = true,
+                    inventoryItems = updatedItems
+                )
+            )
+        )
+
+        val edited = repository.expenses.value.first { it.id == originalExp.id }
+        assertEquals(3300.0, edited.amount, 0.01)
+        assertEquals("2026-11-21", edited.date)
+        assertEquals("Updated Vendor", edited.payee)
+        assertEquals("INV-200", edited.invoiceNumber)
+        assertEquals(PaymentMethod.BANK_TRANSFER, edited.paymentMethod)
+        assertEquals(PaymentSource.PAY_FROM_INVESTMENT, edited.paymentSource)
+        assertEquals(1, edited.effectiveInventoryItems.size)
+        assertTrue(edited.lastEditedAt > 0L)
+        assertTrue(edited.lastEditedBy.isNotBlank())
+
+        // Stock reconciled: 1.5L is now +150, 500ml is fully reversed back to baseline!
+        assertEquals(baseline15 + 150, repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty)
+        assertEquals(baseline500, repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty)
+
+        // Delete expense -> all remaining stock (+150 of 1.5L) reversed cleanly back to baseline
+        assertTrue(repository.deleteExpense(edited.id))
+        assertEquals(baseline15, repository.inventory.value.first { it.bottleSizeId == size15L.id }.atPlantEmpty)
+        assertEquals(baseline500, repository.inventory.value.first { it.bottleSizeId == size500ml.id }.atPlantEmpty)
+    }
+
+    @Test
+    fun testDeleteExpenseCategoryMovesStockItemsToUncategorizedAndRemovesFromDropdown() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val customCatName = "Shrink Labels Custom"
+
+        // 1. Add custom Inventory category in Expenses
+        repository.addExpenseCategory(
+            name = customCatName,
+            urdu = "لیبل",
+            type = ExpenseType.OPEX,
+            isInventoryCategory = true
+        )
+        val createdCat = repository.expenseCategories.value.first { it.name == customCatName }
+        assertTrue(createdCat.isInventoryCategory)
+        assertTrue(repository.getAllInventoryCategories().contains(customCatName))
+
+        // 2. Assign that category to both a FactoryMaterial and a BottleSize
+        val matId = repository.addFactoryMaterial(
+            FactoryMaterial(
+                name = "PVC Neck Label",
+                itemCategory = customCatName,
+                uom = "Roll",
+                openingStock = 5.0,
+                currentStock = 5.0,
+                purchaseRate = 600.0
+            )
+        )
+        val bottleId = repository.addNewBottleSize(
+            name = "250ml Special",
+            purchaseRate = 6.0,
+            packQty = 1,
+            uom = "Bottle",
+            openingStock = 0,
+            usageType = BottleUsageType.ONE_TIME,
+            defaultRefillPrice = 15.0,
+            salePrice = 15.0,
+            capacityLitres = 0.25,
+            depositAmount = 0.0,
+            categoryName = customCatName
+        )
+
+        assertEquals(customCatName, repository.factoryMaterials.value.first { it.id == matId }.itemCategory)
+        assertEquals(customCatName, repository.bottleSizes.value.first { it.id == bottleId }.categoryName)
+
+        // 3. Delete the category in Expenses -> disappears from dropdown, stock items preserved with blank category (Uncategorized)
+        assertTrue(repository.deleteExpenseCategory(createdCat.id))
+        assertFalse(repository.getAllInventoryCategories().contains(customCatName))
+
+        val uncategorizedMat = repository.factoryMaterials.value.first { it.id == matId }
+        val uncategorizedBottle = repository.bottleSizes.value.first { it.id == bottleId }
+        assertEquals("", uncategorizedMat.itemCategory)
+        assertEquals("", uncategorizedBottle.categoryName)
+        assertEquals(5.0, uncategorizedMat.currentStock, 0.01)
+
+        // 4. Both items can later be assigned to a new existing category
+        repository.updateFactoryMaterial(uncategorizedMat.copy(itemCategory = "Packing Material"))
+        assertTrue(
+            repository.updateBottleSizeDetails(
+                bottleSizeId = bottleId,
+                name = "250ml Special",
+                capacityLitres = 0.25,
+                usageType = BottleUsageType.ONE_TIME,
+                defaultRefillPrice = 15.0,
+                purchaseCost = 6.0,
+                depositAmount = 0.0,
+                uom = "Bottle",
+                categoryName = "Bottle Purchase"
+            ).first
+        )
+        assertEquals("Packing Material", repository.factoryMaterials.value.first { it.id == matId }.itemCategory)
+        assertEquals("Bottle Purchase", repository.bottleSizes.value.first { it.id == bottleId }.categoryName)
+    }
 }
-
-
-

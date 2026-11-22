@@ -26,6 +26,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.CompactFormTextField
+import com.example.ui.components.EditMetadataBadge
+import com.example.ui.components.EditableDateField
+import com.example.ui.components.MobileFormDialog
 import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
@@ -58,6 +62,10 @@ fun ReceivePaymentScreen(
     var paymentMethod by remember { mutableStateOf(PaymentMethod.CASH) }
     var notes by remember { mutableStateOf("") }
     var paymentToDelete by remember { mutableStateOf<Payment?>(null) }
+    var selectedPaymentForDetail by remember { mutableStateOf<Payment?>(null) }
+    var paymentToEdit by remember { mutableStateOf<Payment?>(null) }
+    val canEditPayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.EDIT)
+    val canDeletePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.DELETE)
 
     // Dialog state for viewing/sharing a receipt slip
     var receiptToShare by remember { mutableStateOf<Payment?>(null) }
@@ -65,6 +73,8 @@ fun ReceivePaymentScreen(
 
     // Map invoiceId -> allocated amount
     val allocations = remember { mutableStateMapOf<String, Double>() }
+    // Checked pending invoices for multi-invoice selection
+    var selectedInvoiceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Fetch unpaid invoices for selected customer
     val unpaidInvoices = remember(selectedCustomer, viewModel.invoices.collectAsState().value, viewModel.deliveries.collectAsState().value) {
@@ -97,20 +107,39 @@ fun ReceivePaymentScreen(
                     )
                 }
             }
-            invs
+            invs.sortedBy { it.date }
         } else emptyList()
     }
 
-    // Auto-allocate FIFO logic helper
-    fun runFifoAllocation(totalAmount: Double) {
+    // Allocate amount across checked invoices (or FIFO across all unpaid invoices if none checked)
+    fun distributeAmountAcrossInvoices(totalAmount: Double, checkedIds: Set<String>) {
         allocations.clear()
+        val targets = if (checkedIds.isNotEmpty()) {
+            unpaidInvoices.filter { it.id in checkedIds }
+        } else {
+            unpaidInvoices
+        }
         var remaining = totalAmount
-        for (inv in unpaidInvoices) {
+        for (inv in targets) {
             if (remaining <= 0) break
             val toPay = kotlin.math.min(remaining, inv.balanceDue)
-            allocations[inv.id] = toPay
-            remaining -= toPay
+            if (toPay > 0.0) {
+                allocations[inv.id] = toPay
+                remaining -= toPay
+            }
         }
+    }
+
+    // Apply checkbox selection: auto-sums checked pending invoices and updates amount + allocations
+    fun applyCheckedInvoices(newChecked: Set<String>) {
+        selectedInvoiceIds = newChecked
+        allocations.clear()
+        val checkedInvs = unpaidInvoices.filter { it.id in newChecked }
+        val checkedSum = checkedInvs.sumOf { it.balanceDue }
+        checkedInvs.forEach { inv ->
+            if (inv.balanceDue > 0.0) allocations[inv.id] = inv.balanceDue
+        }
+        paymentAmountText = if (checkedSum > 0.0) checkedSum.toInt().toString() else ""
     }
 
     // Helper to calculate total due (taking into account customer balance, unpaid invoices, and unpaid deliveries)
@@ -118,18 +147,32 @@ fun ReceivePaymentScreen(
         return viewModel.getCustomerTotalDue(cust)
     }
 
-    // Pre-fill amount with customer balance on customer change
-    LaunchedEffect(selectedCustomer) {
+    // Initialize amount / checkboxes on customer change
+    LaunchedEffect(selectedCustomer, unpaidInvoices.size) {
         if (selectedCustomer != null) {
-            val balance = getCustomerDue(selectedCustomer!!)
-            if (balance > 0) {
-                paymentAmountText = balance.toInt().toString()
-                runFifoAllocation(balance)
-            } else {
-                paymentAmountText = ""
-                allocations.clear()
+            when {
+                unpaidInvoices.size == 1 -> {
+                    val onlyInv = unpaidInvoices.first()
+                    selectedInvoiceIds = setOf(onlyInv.id)
+                    allocations.clear()
+                    allocations[onlyInv.id] = onlyInv.balanceDue
+                    paymentAmountText = onlyInv.balanceDue.toInt().toString()
+                }
+                unpaidInvoices.size > 1 -> {
+                    // Multi-invoice pending: let user check boxes to dynamically total selected invoices
+                    selectedInvoiceIds = emptySet()
+                    allocations.clear()
+                    paymentAmountText = ""
+                }
+                else -> {
+                    selectedInvoiceIds = emptySet()
+                    allocations.clear()
+                    val balance = getCustomerDue(selectedCustomer!!)
+                    paymentAmountText = if (balance > 0) balance.toInt().toString() else ""
+                }
             }
         } else {
+            selectedInvoiceIds = emptySet()
             allocations.clear()
             paymentAmountText = ""
         }
@@ -137,6 +180,7 @@ fun ReceivePaymentScreen(
 
     val totalEnteredAmount = paymentAmountText.toDoubleOrNull() ?: 0.0
     val totalAllocated = allocations.values.sum()
+    val selectedInvoicesTotal = unpaidInvoices.filter { it.id in selectedInvoiceIds }.sumOf { it.balanceDue }
     val unallocatedExcess = (totalEnteredAmount - totalAllocated).coerceAtLeast(0.0)
 
     LazyColumn(
@@ -487,10 +531,10 @@ fun ReceivePaymentScreen(
                             onValueChange = {
                                 paymentAmountText = it
                                 val amt = it.toDoubleOrNull() ?: 0.0
-                                runFifoAllocation(amt)
+                                distributeAmountAcrossInvoices(amt, selectedInvoiceIds)
                             },
                             label = { Text("Payment Received (وصول شدہ رقم)") },
-                            placeholder = { Text("Enter received amount in Rs.") },
+                            placeholder = { Text("Tick invoices below or enter amount in Rs.") },
                             leadingIcon = {
                                 Text("Rs.", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = WaterNavyPrimary, modifier = Modifier.padding(start = 12.dp, end = 4.dp))
                             },
@@ -510,22 +554,30 @@ fun ReceivePaymentScreen(
 
                         // Quick Fill Buttons
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (cust.currentBalance > 0) {
+                            val totalDueForCust = getCustomerDue(cust)
+                            if (totalDueForCust > 0) {
                                 OutlinedButton(
                                     onClick = {
-                                        paymentAmountText = cust.currentBalance.toInt().toString()
-                                        runFifoAllocation(cust.currentBalance)
+                                        if (unpaidInvoices.isNotEmpty()) {
+                                            applyCheckedInvoices(unpaidInvoices.map { it.id }.toSet())
+                                            if (totalDueForCust > unpaidInvoices.sumOf { it.balanceDue }) {
+                                                paymentAmountText = totalDueForCust.toInt().toString()
+                                            }
+                                        } else {
+                                            paymentAmountText = totalDueForCust.toInt().toString()
+                                        }
                                     },
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                     modifier = Modifier.weight(1f).height(34.dp)
                                 ) {
-                                    Text("Full Balance (Rs. ${cust.currentBalance.toInt()})", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    Text("Full Balance (Rs. ${totalDueForCust.toInt()})", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
 
                             OutlinedButton(
                                 onClick = {
+                                    selectedInvoiceIds = emptySet()
                                     paymentAmountText = ""
                                     allocations.clear()
                                 },
@@ -593,82 +645,175 @@ fun ReceivePaymentScreen(
                 }
             }
 
-            // 3. Unpaid Invoices Allocation (if any)
+            // 3. Pending Invoices with Multi-Select Checkboxes & Dynamic Total
             if (unpaidInvoices.isNotEmpty()) {
                 item {
-                    Text(
-                        text = "Unpaid Invoices Breakdown (${unpaidInvoices.size})",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.5.sp,
-                        color = WaterNavyDark
-                    )
-                }
-
-                items(unpaidInvoices) { inv ->
-                    val allocated = allocations[inv.id] ?: 0.0
-                    val remainingInvDue = (inv.balanceDue - allocated).coerceAtLeast(0.0)
-
                     Card(
-                        shape = RoundedCornerShape(10.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = WaterSkyLight),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, WaterAqua.copy(alpha = 0.5f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
-                                    Text(inv.invoiceNumber, fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = WaterNavyPrimary)
-                                    Text("Date: ${inv.date} • Total: Rs. ${inv.totalAmount.toInt()}", fontSize = 10.sp, color = TextSecondaryDark)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Pending Invoices (${unpaidInvoices.size})",
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 12.sp,
+                                        color = WaterNavyPrimary
+                                    )
+                                    Text(
+                                        text = "جن انوائسز کی رقم وصول ہوئی ہے ان پر ٹک (✓) لگائیں",
+                                        fontSize = 9.5.sp,
+                                        color = TextSecondaryDark
+                                    )
                                 }
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text("Due: Rs. ${inv.balanceDue.toInt()}", fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = ErrorRed)
-                                    if (allocated > 0) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    val allChecked = selectedInvoiceIds.size == unpaidInvoices.size
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (allChecked) {
+                                                applyCheckedInvoices(emptySet())
+                                            } else {
+                                                applyCheckedInvoices(unpaidInvoices.map { it.id }.toSet())
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier
+                                            .height(30.dp)
+                                            .testTag("toggle_all_invoices_btn")
+                                    ) {
                                         Text(
-                                            text = "Left: Rs. ${remainingInvDue.toInt()}",
-                                            fontSize = 10.sp,
-                                            color = if (remainingInvDue == 0.0) SuccessGreen else WarningAmber
+                                            text = if (allChecked) "Uncheck All" else "Select All",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = WaterNavyPrimary
                                         )
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreenLight else Color.White,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("selected_invoices_total_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Selected (${selectedInvoiceIds.size}/${unpaidInvoices.size}):",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreen else TextSecondaryDark
+                                    )
+                                    Text(
+                                        text = "Rs. ${selectedInvoicesTotal.toInt()}",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (selectedInvoiceIds.isNotEmpty()) SuccessGreen else WaterNavyDark
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
+                items(unpaidInvoices, key = { it.id }) { inv ->
+                    val isChecked = inv.id in selectedInvoiceIds
+                    val allocated = allocations[inv.id] ?: 0.0
+                    val remainingInvDue = (inv.balanceDue - allocated).coerceAtLeast(0.0)
+
+                    fun toggleInvoiceCheck() {
+                        val updated = if (isChecked) {
+                            selectedInvoiceIds - inv.id
+                        } else {
+                            selectedInvoiceIds + inv.id
+                        }
+                        applyCheckedInvoices(updated)
+                    }
+
+                    Card(
+                        shape = RoundedCornerShape(10.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isChecked) Color(0xFFF0FDF4) else Color.White
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            width = if (isChecked) 1.5.dp else 1.dp,
+                            color = if (isChecked) SuccessGreen else BorderLight
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { toggleInvoiceCheck() }
+                            .testTag("pending_invoice_card_${inv.id}")
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "Allocated: Rs. ${allocated.toInt()}",
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = WaterNavyPrimary
+                                Checkbox(
+                                    checked = isChecked,
+                                    onCheckedChange = { toggleInvoiceCheck() },
+                                    colors = CheckboxDefaults.colors(
+                                        checkedColor = SuccessGreen,
+                                        uncheckedColor = WaterNavyPrimary
+                                    ),
+                                    modifier = Modifier.testTag("invoice_checkbox_${inv.id}")
                                 )
-
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    TextButton(
-                                        onClick = { allocations[inv.id] = 0.0 },
-                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("Clear", fontSize = 10.sp, color = ErrorRed)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = inv.invoiceNumber,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp,
+                                        color = WaterNavyPrimary
+                                    )
+                                    Text(
+                                        text = "Date: ${inv.date} • Bill: Rs. ${inv.totalAmount.toInt()}",
+                                        fontSize = 9.5.sp,
+                                        color = TextSecondaryDark
+                                    )
+                                    if (inv.itemsSummary.isNotBlank()) {
+                                        Text(
+                                            text = inv.itemsSummary,
+                                            fontSize = 9.sp,
+                                            color = TextMuted,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
-
-                                    Button(
-                                        onClick = {
-                                            val available = totalEnteredAmount - (totalAllocated - allocated)
-                                            val toSet = kotlin.math.min(available.coerceAtLeast(0.0), inv.balanceDue)
-                                            allocations[inv.id] = toSet
-                                        },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        shape = RoundedCornerShape(6.dp),
-                                        colors = waterPrimaryButtonColors()
-                                    ) {
-                                        Text("Pay Full (Rs. ${inv.balanceDue.toInt()})", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        text = "Due: Rs. ${inv.balanceDue.toInt()}",
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 11.5.sp,
+                                        color = ErrorRed
+                                    )
+                                    if (allocated > 0) {
+                                        Text(
+                                            text = if (remainingInvDue == 0.0) "Full Pay ✓" else "Pay: Rs. ${allocated.toInt()}",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (remainingInvDue == 0.0) SuccessGreen else WarningOrange
+                                        )
                                     }
                                 }
                             }
@@ -877,6 +1022,7 @@ fun ReceivePaymentScreen(
                         .fillMaxWidth()
                         .clickable {
                             viewModel.markRecordSeen("payment", pay.id)
+                            selectedPaymentForDetail = pay
                         }
                         .testTag("payment_card_${pay.id}")
                 ) {
@@ -1344,5 +1490,214 @@ fun ReceivePaymentScreen(
                 }
             }
         )
+    }
+
+    // Payment Detail Dialog (shows internal Edit Metadata — never on PDFs/invoices)
+    if (selectedPaymentForDetail != null) {
+        val livePayment = allPayments.find { it.id == selectedPaymentForDetail!!.id } ?: selectedPaymentForDetail!!
+        MobileFormDialog(
+            title = "Payment ${livePayment.receiptNumber}",
+            subtitle = "${livePayment.date} • ${livePayment.customerName}",
+            onDismiss = { selectedPaymentForDetail = null },
+            footerContent = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (canEditPayment) {
+                        OutlinedButton(
+                            onClick = {
+                                selectedPaymentForDetail = null
+                                paymentToEdit = livePayment
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).height(36.dp)
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Edit", fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (canDeletePayment) {
+                        OutlinedButton(
+                            onClick = {
+                                selectedPaymentForDetail = null
+                                paymentToDelete = livePayment
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed),
+                            modifier = Modifier.weight(1f).height(36.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Delete", fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Button(
+                        onClick = { selectedPaymentForDetail = null },
+                        colors = waterPrimaryButtonColors(),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).height(36.dp)
+                    ) {
+                        Text("Close", fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        ) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = SuccessGreenLight,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Amount Received", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SuccessGreen)
+                    Text("Rs. ${livePayment.amount.toInt()}", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, color = SuccessGreen)
+                }
+            }
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFFF8FAFC),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Customer: ${livePayment.customerName}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = WaterNavyDark)
+                    Text("Date: ${livePayment.date} • Mode: ${livePayment.paymentMethod.label}", fontSize = 10.sp, color = TextSecondaryDark)
+                    Text("Received By: ${livePayment.receivedBy}", fontSize = 10.sp, color = TextSecondaryDark)
+                    if (livePayment.notes.isNotBlank()) {
+                        Text("Notes: ${livePayment.notes}", fontSize = 10.sp, color = TextPrimaryDark)
+                    }
+                    if (livePayment.allocations.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Allocated Invoices:", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = WaterNavyPrimary)
+                        livePayment.allocations.forEach { a ->
+                            Text("• ${a.invoiceNumber}: Rs. ${a.allocatedAmount.toInt()}", fontSize = 9.5.sp, color = TextPrimaryDark)
+                        }
+                    }
+                }
+            }
+            EditMetadataBadge(
+                lastEditedAt = livePayment.lastEditedAt,
+                lastEditedBy = livePayment.lastEditedBy
+            )
+        }
+    }
+
+    // Edit Payment Dialog (with Confirmation + Audit Metadata)
+    if (paymentToEdit != null) {
+        val target = paymentToEdit!!
+        var editDate by remember(target.id) { mutableStateOf(target.date) }
+        var editAmount by remember(target.id) { mutableStateOf(target.amount.toInt().toString()) }
+        var editMethod by remember(target.id) { mutableStateOf(target.paymentMethod) }
+        var editNotes by remember(target.id) { mutableStateOf(target.notes) }
+        var confirmEditPayment by remember { mutableStateOf<Payment?>(null) }
+
+        if (confirmEditPayment != null) {
+            val candidate = confirmEditPayment!!
+            AlertDialog(
+                onDismissRequest = { confirmEditPayment = null },
+                containerColor = Color.White,
+                title = { Text("Confirm Edit Payment?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = WaterNavyPrimary) },
+                text = {
+                    Text(
+                        "Save changes to ${candidate.receiptNumber} (Rs. ${candidate.amount.toInt()} on ${candidate.date})?",
+                        fontSize = 11.sp,
+                        color = TextPrimaryDark
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.updatePayment(candidate)
+                            confirmEditPayment = null
+                            paymentToEdit = null
+                        },
+                        colors = waterPrimaryButtonColors()
+                    ) {
+                        Text("Yes, Save", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmEditPayment = null }) {
+                        Text("Cancel", color = TextSecondaryDark)
+                    }
+                }
+            )
+        }
+
+        MobileFormDialog(
+            title = "Edit Payment ${target.receiptNumber}",
+            subtitle = target.customerName,
+            onDismiss = { paymentToEdit = null },
+            footerContent = {
+                TextButton(onClick = { paymentToEdit = null }) {
+                    Text("Cancel", color = TextSecondaryDark, fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = {
+                        val amt = editAmount.toDoubleOrNull() ?: target.amount
+                        if (amt > 0.0) {
+                            confirmEditPayment = target.copy(
+                                date = editDate.ifBlank { target.date },
+                                amount = amt,
+                                paymentMethod = editMethod,
+                                notes = editNotes.trim()
+                            )
+                        }
+                    },
+                    colors = waterPrimaryButtonColors()
+                ) {
+                    Text("Save Changes", fontWeight = FontWeight.Bold)
+                }
+            }
+        ) {
+            EditableDateField(
+                label = "Payment Date (تاریخ)*",
+                dateValue = editDate,
+                onDateSelected = { editDate = it }
+            )
+            CompactFormTextField(
+                value = editAmount,
+                onValueChange = { editAmount = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                label = "Amount (Rs.)*",
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER, PaymentMethod.JAZZCASH, PaymentMethod.EASYPAISA).forEach { m ->
+                    val sel = editMethod == m
+                    Surface(
+                        shape = RoundedCornerShape(7.dp),
+                        color = if (sel) WaterSkyButton else WaterSkyLight,
+                        modifier = Modifier.weight(1f).height(32.dp).clickable { editMethod = m }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = when (m) {
+                                    PaymentMethod.CASH -> "Cash"
+                                    PaymentMethod.BANK_TRANSFER -> "Online"
+                                    PaymentMethod.JAZZCASH -> "JazzCash"
+                                    PaymentMethod.EASYPAISA -> "Easypaisa"
+                                    else -> m.label
+                                },
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (sel) WaterSkyButtonContent else WaterNavyDark
+                            )
+                        }
+                    }
+                }
+            }
+            CompactFormTextField(
+                value = editNotes,
+                onValueChange = { editNotes = it },
+                label = "Notes",
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }

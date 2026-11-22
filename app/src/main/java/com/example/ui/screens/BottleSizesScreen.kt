@@ -31,6 +31,7 @@ fun BottleSizesScreen(
 ) {
     val context = LocalContext.current
     val bottleSizes by viewModel.bottleSizes.collectAsState()
+    val allInventoryCategories by viewModel.allInventoryCategories.collectAsState()
     val activeSizes = remember(bottleSizes) { bottleSizes.filter { it.active } }
 
     var showAddDialog by remember { mutableStateOf(false) }
@@ -186,11 +187,12 @@ fun BottleSizesScreen(
         val editing = editingBottleSize
         BottleSizeFormDialog(
             existingSize = editing,
+            categories = allInventoryCategories,
             onDismiss = {
                 showAddDialog = false
                 editingBottleSize = null
             },
-            onSave = { name, capacity, usageType, refillPrice, purchaseCost, deposit, uom ->
+            onSave = { name, capacity, usageType, refillPrice, purchaseCost, deposit, uom, categoryName ->
                 if (editing == null) {
                     viewModel.addNewBottleSize(
                         name = name,
@@ -202,7 +204,8 @@ fun BottleSizesScreen(
                         defaultRefillPrice = refillPrice,
                         salePrice = refillPrice,
                         capacityLitres = capacity,
-                        depositAmount = deposit
+                        depositAmount = deposit,
+                        categoryName = categoryName
                     ) {
                         showAddDialog = false
                         Toast.makeText(context, "Bottle size added", Toast.LENGTH_SHORT).show()
@@ -216,7 +219,8 @@ fun BottleSizesScreen(
                         defaultRefillPrice = refillPrice,
                         purchaseCost = purchaseCost,
                         depositAmount = deposit,
-                        uom = uom
+                        uom = uom,
+                        categoryName = categoryName
                     ) { success, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         if (success) editingBottleSize = null

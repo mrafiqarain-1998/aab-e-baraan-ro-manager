@@ -26,6 +26,7 @@ data class BottleSize(
     val latestPurchaseRate: Double = 800.0,
     val usageType: BottleUsageType = if (isReturnableBottle) BottleUsageType.MULTIPLE_TIME else BottleUsageType.ONE_TIME,
     val customUsageType: String = "",
+    val categoryName: String = "Bottle Purchase",
     val businessId: String = "aab_e_baraan_plant_01"
 )
 
