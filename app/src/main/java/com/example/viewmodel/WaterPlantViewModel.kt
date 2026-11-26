@@ -62,6 +62,7 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
 
     val bottleCostings = repository.bottleCostings
     val monthlyRecurringExpenses = repository.monthlyRecurringExpenses
+    val monthlyOperationalCosts = repository.monthlyOperationalCosts
     val plantWorkers = repository.plantWorkers
     val cashClosings: StateFlow<List<CashClosing>> = combine(repository.cashClosings, repository.currentUser) { list, user ->
         repository.filterVisibleCashClosings(list, user)
@@ -483,6 +484,18 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         _userFeedbackMessage.value = "Updated custom bottle price"
     }
 
+    fun findCustomerRate(
+        customerId: String,
+        bottleSizeId: String,
+        assignedOnly: Boolean = false
+    ): CustomerRate? {
+        return repository.findCustomerRate(customerId, bottleSizeId, assignedOnly)
+    }
+
+    fun recordTransactionViewed(type: String, recordId: String) {
+        repository.recordTransactionViewed(type, recordId)
+    }
+
     // Customer Operations
     fun addCustomer(customer: Customer): String {
         val newId = repository.addCustomer(customer)
@@ -548,10 +561,19 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         deliveryCharges: Double = 0.0,
         immediatePaymentAmount: Double = 0.0,
         paymentMethod: PaymentMethod = PaymentMethod.CASH,
-        deliveryDate: String? = null
+        deliveryDate: String? = null,
+        discount: Double = 0.0
     ) {
         val delNum = repository.recordDelivery(
-            customerId, items, assignedStaffName, notes, deliveryCharges, immediatePaymentAmount, paymentMethod, deliveryDate
+            customerId = customerId,
+            items = items,
+            assignedStaffName = assignedStaffName,
+            notes = notes,
+            deliveryCharges = deliveryCharges,
+            immediatePaymentAmount = immediatePaymentAmount,
+            paymentMethod = paymentMethod,
+            deliveryDate = deliveryDate,
+            discount = discount
         )
         _userFeedbackMessage.value = "Delivery $delNum recorded! Invoice generated."
     }
@@ -574,9 +596,17 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         amount: Double,
         method: PaymentMethod,
         allocations: Map<String, Double>?,
-        notes: String
+        notes: String,
+        paymentDate: String? = null
     ): Payment {
-        val payment = repository.recordPayment(customerId, amount, method, allocations, notes)
+        val payment = repository.recordPayment(
+            customerId = customerId,
+            amount = amount,
+            method = method,
+            manualAllocations = allocations,
+            notes = notes,
+            paymentDate = paymentDate
+        )
         _userFeedbackMessage.value = "Receipt ${payment.receiptNumber} generated! Allocated across invoices."
         return payment
     }
@@ -1050,7 +1080,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
     fun generateCustomerStatement(customer: Customer): String {
         val unpaidInvs = repository.getUnpaidInvoicesForCustomer(customer.id)
         val allocations = repository.getCustomerBottleAllocations(customer.id)
-        val adminPhone = repository.getPrimaryAdminPhone()
         val sb = StringBuilder()
         sb.appendLine("AAB E BARAAN RO PLANT")
         sb.appendLine("Customer Statement")
@@ -1071,7 +1100,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
             }
             sb.appendLine("--------------------------------")
         }
-        sb.appendLine("Contact: $adminPhone")
         sb.appendLine("JazakAllah Khair!")
         return sb.toString()
     }
@@ -1083,7 +1111,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         periodDeliveries: List<Delivery>,
         periodPayments: List<Payment>
     ): String {
-        val adminPhone = repository.getPrimaryAdminPhone()
         val s = minOf(startDate, endDate)
         val e = maxOf(startDate, endDate)
         val rangeLabel = if (s == e) s else "$s to $e"
@@ -1094,7 +1121,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         sb.appendLine("Customer Ledger — $rangeLabel")
         sb.appendLine("================================")
         sb.appendLine("Customer: ${customer.name} (${customer.customerCode})")
-        if (customer.phone.isNotBlank()) sb.appendLine("Phone: ${customer.phone}")
         sb.appendLine("--------------------------------")
         sb.appendLine("DELIVERIES (${periodDeliveries.size}):")
         if (periodDeliveries.isEmpty()) {
@@ -1122,7 +1148,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         sb.appendLine("Period Net (Delivered - Paid): Rs. ${(totalDelivered - totalPaid).toInt()}")
         sb.appendLine("Current Total Balance: Rs. ${customer.currentBalance.toInt()}")
         sb.appendLine("================================")
-        sb.appendLine("Contact: $adminPhone")
         return sb.toString()
     }
 
@@ -1138,7 +1163,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         periodPayments: List<Payment>,
         periodExpenses: List<Expense>
     ): String {
-        val adminPhone = repository.getPrimaryAdminPhone()
         val allDeliveries = deliveries.value
         val periodDeliveryKeys = buildSet {
             periodDeliveries.forEach { d ->
@@ -1276,7 +1300,6 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         }
         sb.appendLine("Total Expenses: Rs. ${totalExpenseAmount.toInt()}")
         sb.appendLine("================================")
-        sb.appendLine("Contact: $adminPhone")
         return sb.toString()
     }
 
@@ -1385,8 +1408,13 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
         return repository.generateCompleteExcelExport()
     }
 
-    fun markDeliveryAsPaid(deliveryId: String, amountPaid: Double? = null, method: PaymentMethod = PaymentMethod.CASH): Boolean {
-        val success = repository.markDeliveryAsPaid(deliveryId, amountPaid, method)
+    fun markDeliveryAsPaid(
+        deliveryId: String,
+        amountPaid: Double? = null,
+        method: PaymentMethod = PaymentMethod.CASH,
+        paymentDate: String? = null
+    ): Boolean {
+        val success = repository.markDeliveryAsPaid(deliveryId, amountPaid, method, paymentDate)
         if (success) {
             _userFeedbackMessage.value = "Payment marked as paid for delivery."
         }
@@ -1838,6 +1866,19 @@ class WaterPlantViewModel(application: Application) : AndroidViewModel(applicati
 
     fun getMonthlyFinancialSummary(month: String): MonthlyFinancialSummary {
         return repository.getMonthlyFinancialSummary(month)
+    }
+
+    fun getMonthlyOperationalCostForMonth(month: String): MonthlyOperationalCostRecord {
+        return repository.getMonthlyOperationalCostForMonth(month)
+    }
+
+    fun saveMonthlyOperationalCost(
+        record: MonthlyOperationalCostRecord,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ) {
+        val (success, message) = repository.saveMonthlyOperationalCost(record)
+        _userFeedbackMessage.value = message
+        onResult?.invoke(success, message)
     }
 
     fun getCostingProfitLossReport(

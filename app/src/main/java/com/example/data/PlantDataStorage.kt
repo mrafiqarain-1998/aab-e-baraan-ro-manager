@@ -150,6 +150,10 @@ class PlantDataStorage(private val context: Context) {
     fun saveMonthlyRecurringExpenses(list: List<MonthlyRecurringExpense>) = saveList("db_monthly_recurring_expenses.json", list, MonthlyRecurringExpense::class.java)
     fun loadMonthlyRecurringExpenses(): List<MonthlyRecurringExpense>? = loadList("db_monthly_recurring_expenses.json", MonthlyRecurringExpense::class.java)
 
+    // 23a. Monthly Operational Costs (Budget vs Actual — Admin Only)
+    fun saveMonthlyOperationalCosts(list: List<MonthlyOperationalCostRecord>) = saveList("db_monthly_operational_costs.json", list, MonthlyOperationalCostRecord::class.java)
+    fun loadMonthlyOperationalCosts(): List<MonthlyOperationalCostRecord>? = loadList("db_monthly_operational_costs.json", MonthlyOperationalCostRecord::class.java)
+
     // 23b. Plant Workers / Staff Management (Payroll & CNIC)
     fun savePlantWorkers(list: List<PlantWorker>) = saveList("db_plant_workers.json", list, PlantWorker::class.java)
     fun loadPlantWorkers(): List<PlantWorker>? = loadList("db_plant_workers.json", PlantWorker::class.java)

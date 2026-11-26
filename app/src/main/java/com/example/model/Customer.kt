@@ -26,6 +26,7 @@ data class Customer(
     val whatsapp: String = "",
     val address: String = "",
     val area: String = "",
+    val distanceKm: Double = 0.0,
     val type: CustomerType = CustomerType.HOME,
     val paymentCycle: PaymentCycle = PaymentCycle.PAY_ON_DELIVERY,
     val registrationDate: String = "",

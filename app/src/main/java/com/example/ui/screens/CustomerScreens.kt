@@ -748,8 +748,8 @@ fun CustomerBottleRateDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(rateOptions, key = { it.rateKey }) { opt ->
-                    val customRate = allCustomerRates.find {
-                        it.customerId == customer.id && it.bottleSizeId == opt.rateKey
+                    val customRate = remember(allCustomerRates, customer.id, opt.rateKey) {
+                        viewModel.findCustomerRate(customer.id, opt.rateKey, assignedOnly = false)
                     }
                     val isAssigned = customRate?.isAssigned == true
 
@@ -1295,6 +1295,14 @@ fun CustomerFormDialog(
     var whatsapp by remember { mutableStateOf(customer?.whatsapp ?: (customer?.phone ?: "")) }
     var address by remember { mutableStateOf(customer?.address ?: "") }
     var area by remember { mutableStateOf(customer?.area ?: "") }
+    var distanceKm by remember {
+        mutableStateOf(
+            if (isEditMode && (customer?.distanceKm ?: 0.0) > 0.0) {
+                val km = customer!!.distanceKm
+                if (km % 1.0 == 0.0) km.toInt().toString() else km.toString()
+            } else ""
+        )
+    }
     var selectedType by remember { mutableStateOf(customer?.type ?: CustomerType.HOME) }
     var selectedCycle by remember { mutableStateOf(customer?.paymentCycle ?: PaymentCycle.PAY_ON_DELIVERY) }
     var securityDeposit by remember {
@@ -1556,18 +1564,48 @@ fun CustomerFormDialog(
                         )
                     }
 
-                    // 4. Complete Address
-                    CompactFormTextField(
-                        value = address,
-                        onValueChange = { address = it },
-                        label = "Complete Address*",
-                        placeholder = "House / Shop #, Street #",
-                        leadingIcon = { Icon(Icons.Default.Home, contentDescription = null, tint = WaterBlueDeep, modifier = Modifier.size(14.dp)) },
-                        height = 38.dp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("customer_form_address")
-                    )
+                    // 4. Complete Address & Distance (KM)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CompactFormTextField(
+                            value = address,
+                            onValueChange = { address = it },
+                            label = "Complete Address*",
+                            placeholder = "House / Shop #, Street #",
+                            leadingIcon = { Icon(Icons.Default.Home, contentDescription = null, tint = WaterBlueDeep, modifier = Modifier.size(14.dp)) },
+                            height = 38.dp,
+                            modifier = Modifier
+                                .weight(1.35f)
+                                .testTag("customer_form_address")
+                        )
+
+                        CompactFormTextField(
+                            value = distanceKm,
+                            onValueChange = { raw ->
+                                val sb = StringBuilder()
+                                var dotSeen = false
+                                for (ch in raw) {
+                                    when {
+                                        ch.isDigit() -> sb.append(ch)
+                                        ch == '.' && !dotSeen -> {
+                                            dotSeen = true
+                                            sb.append(ch)
+                                        }
+                                    }
+                                }
+                                distanceKm = sb.toString()
+                            },
+                            label = "Distance (KM)",
+                            placeholder = "e.g. 5.5",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            height = 38.dp,
+                            modifier = Modifier
+                                .weight(0.65f)
+                                .testTag("customer_form_distance_km")
+                        )
+                    }
 
                     // 5. Security Deposit & Opening Due
                     Row(
@@ -1810,6 +1848,7 @@ fun CustomerFormDialog(
                                 whatsapp = if (whatsapp.isNotEmpty()) whatsapp.trim() else cleanPhone,
                                 address = address.trim(),
                                 area = area.trim(),
+                                distanceKm = (distanceKm.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0),
                                 type = selectedType,
                                 paymentCycle = selectedCycle,
                                 registrationDate = customer?.registrationDate?.takeIf { it.isNotEmpty() } ?: todayStr,

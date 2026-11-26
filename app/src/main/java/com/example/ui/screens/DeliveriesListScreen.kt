@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.AdminSeenEyeBadge
 import com.example.ui.components.CompactFormTextField
 import com.example.ui.components.EditMetadataBadge
 import com.example.ui.components.EditableDateField
@@ -43,6 +44,8 @@ import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.StatusBadge
+import com.example.ui.components.TransactionViewersDialog
+import com.example.ui.components.formatDateAndExactTime
 import com.example.ui.theme.*
 import com.example.util.PdfGenerator
 import com.example.viewmodel.WaterPlantViewModel
@@ -76,6 +79,7 @@ fun DeliveriesListScreen(
     val canDeleteDelivery = viewModel.hasPermission(AppModule.DELIVERIES, PermissionAction.DELETE)
     val canReceivePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)
     val canApprovePayment = viewModel.hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.APPROVE)
+    val isAdminUser = currentUser.role == UserRole.ADMIN || currentUser.isSuperAdmin
     val isViewOnly = !canAddDelivery && !canEditDelivery
     val context = LocalContext.current
 
@@ -525,6 +529,19 @@ fun DeliveriesListScreen(
     }
     if (selectedDelivery != null) {
         val del = selectedDelivery
+        LaunchedEffect(del.id) {
+            viewModel.recordTransactionViewed("delivery", del.id)
+        }
+        var showDeliveryViewers by remember(del.id) { mutableStateOf(false) }
+
+        if (showDeliveryViewers && isAdminUser) {
+            TransactionViewersDialog(
+                title = "Delivery ${del.deliveryNumber} • ${del.customerName}",
+                viewedBy = del.viewedBy,
+                onDismiss = { showDeliveryViewers = false }
+            )
+        }
+
         val relatedPayments = remember(del, payments) {
             PdfGenerator.findRelatedPaymentsForDelivery(del, payments)
         }
@@ -535,10 +552,11 @@ fun DeliveriesListScreen(
         val totalPaid = del.paymentCollected.coerceIn(0.0, del.totalAmount)
         val outstandingBal = (del.totalAmount - totalPaid).coerceAtLeast(0.0)
         val hasPaymentRecordMismatch = kotlin.math.abs(allocatedTotal - totalPaid) > 1.0
+        val exactDateTimeStr = formatDateAndExactTime(del.date, del.createdAt, del.time)
 
         MobileFormDialog(
             title = "Delivery ${del.deliveryNumber}",
-            subtitle = "${del.date} • ${del.time}",
+            subtitle = exactDateTimeStr,
             hasUnsavedChanges = false,
             onDismiss = { selectedDeliveryId = null },
             footerContent = {
@@ -574,14 +592,16 @@ fun DeliveriesListScreen(
                                 } else {
                                     "Credit / Unpaid"
                                 }
+                                val chargesLine = if (del.deliveryCharges > 0.0) "\nDelivery Charges: Rs. ${del.deliveryCharges.toInt()}" else ""
+                                val discountLine = if (del.discount > 0.0) "\nDiscount: - Rs. ${del.discount.toInt()}" else ""
                                 val msg = """
                                     *AAB E BARAAN RO PLANT*
                                     Voucher: ${del.deliveryNumber}
                                     Customer: ${del.customerName}
-                                    Date: ${del.date} ${del.time}
+                                    Date & Time: $exactDateTimeStr
                                     
                                     *Items:*
-                                    $itemsStr
+                                    $itemsStr$chargesLine$discountLine
                                     
                                     Total Bill: Rs. ${del.totalAmount.toInt()}
                                     Paid: Rs. ${totalPaid.toInt()}
@@ -721,26 +741,37 @@ fun DeliveriesListScreen(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                StatusBadge(
-                    text = when {
-                        del.totalAmount <= 0 -> "N/A"
-                        outstandingBal <= 0 -> "Paid"
-                        totalPaid > 0 -> "Partial Credit"
-                        else -> "Credit"
-                    },
-                    backgroundColor = when {
-                        del.totalAmount <= 0 -> Color(0xFFF1F5F9)
-                        outstandingBal <= 0 -> SuccessGreenLight
-                        totalPaid > 0 -> WarningOrangeLight
-                        else -> ErrorRedLight
-                    },
-                    textColor = when {
-                        del.totalAmount <= 0 -> TextMuted
-                        outstandingBal <= 0 -> SuccessGreen
-                        totalPaid > 0 -> WarningOrange
-                        else -> ErrorRed
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (isAdminUser) {
+                        AdminSeenEyeBadge(
+                            viewedBy = del.viewedBy,
+                            onClick = { showDeliveryViewers = true }
+                        )
                     }
-                )
+                    StatusBadge(
+                        text = when {
+                            del.totalAmount <= 0 -> "N/A"
+                            outstandingBal <= 0 -> "Paid"
+                            totalPaid > 0 -> "Partial Credit"
+                            else -> "Credit"
+                        },
+                        backgroundColor = when {
+                            del.totalAmount <= 0 -> Color(0xFFF1F5F9)
+                            outstandingBal <= 0 -> SuccessGreenLight
+                            totalPaid > 0 -> WarningOrangeLight
+                            else -> ErrorRedLight
+                        },
+                        textColor = when {
+                            del.totalAmount <= 0 -> TextMuted
+                            outstandingBal <= 0 -> SuccessGreen
+                            totalPaid > 0 -> WarningOrange
+                            else -> ErrorRed
+                        }
+                    )
+                }
             }
 
             Surface(
@@ -749,6 +780,12 @@ fun DeliveriesListScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Added: $exactDateTimeStr",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WaterNavyPrimary
+                    )
                     Text(
                         text = "Area: ${del.customerArea} • Phone: ${del.customerPhone.ifBlank { "N/A" }}",
                         fontSize = 10.sp,
@@ -796,6 +833,12 @@ fun DeliveriesListScreen(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Delivery Charges:", fontSize = 10.sp, color = TextSecondaryDark)
                     Text("Rs. ${del.deliveryCharges.toInt()}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            if (del.discount > 0.0) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Discount:", fontSize = 10.sp, color = SuccessGreen, fontWeight = FontWeight.SemiBold)
+                    Text("- Rs. ${del.discount.toInt()}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = SuccessGreen)
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -890,7 +933,7 @@ fun DeliveriesListScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${idx + 1}. ${p.receiptNumber} (${p.date})",
+                            text = "${idx + 1}. ${p.receiptNumber} (${formatDateAndExactTime(p.date, p.createdAt)})",
                             fontSize = 9.5.sp,
                             color = TextSecondaryDark,
                             maxLines = 1,
@@ -1024,14 +1067,14 @@ fun DeliveriesListScreen(
         )
     }
 
-    // Pay Now Dialog for Credit / Partial Credit Deliveries (supports partial installments or full payment)
+    // Pay Now Dialog for Credit / Partial Credit Deliveries (supports partial installments, full payment & manual payment date)
     if (deliveryForDirectPayment != null) {
         val targetDel = deliveryForDirectPayment!!
         DirectReceivePaymentDialog(
             delivery = targetDel,
             onDismiss = { deliveryForDirectPayment = null },
-            onConfirm = { amount, method ->
-                viewModel.markDeliveryAsPaid(targetDel.id, amount, method)
+            onConfirm = { amount, method, paymentDate ->
+                viewModel.markDeliveryAsPaid(targetDel.id, amount, method, paymentDate)
                 deliveryForDirectPayment = null
             }
         )
@@ -1077,6 +1120,7 @@ fun EditDeliveryDialog(
         buildDeliverySelectableOptions(bottleSizes, inventory)
     }
     var deliveryChargesText by remember { mutableStateOf(delivery.deliveryCharges.toInt().toString()) }
+    var discountText by remember { mutableStateOf(delivery.discount.toInt().toString()) }
     var paymentCollectedText by remember { mutableStateOf(delivery.paymentCollected.toInt().toString()) }
     var isOnlineMode by remember {
         mutableStateOf(
@@ -1092,8 +1136,9 @@ fun EditDeliveryDialog(
 
     val subtotal = remember(items) { items.sumOf { it.lineTotal } }
     val rawCharges = deliveryChargesText.toDoubleOrNull() ?: 0.0
+    val rawDiscount = (discountText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, subtotal + rawCharges)
     val rawPaid = paymentCollectedText.toDoubleOrNull() ?: 0.0
-    val currentTotal = remember(subtotal, rawCharges) { subtotal + rawCharges }
+    val currentTotal = remember(subtotal, rawCharges, rawDiscount) { (subtotal + rawCharges - rawDiscount).coerceAtLeast(0.0) }
     val totalDeliveredQty = remember(items) { items.sumOf { it.quantity } }
     val totalReturnedEmpty = remember(items, bottleSizes) {
         items.sumOf { item ->
@@ -1244,6 +1289,7 @@ fun EditDeliveryDialog(
                         totalFullDelivered = totalDeliveredQty,
                         totalEmptyCollected = totalReturnedEmpty,
                         deliveryCharges = rawCharges,
+                        discount = rawDiscount,
                         subtotal = subtotal,
                         totalAmount = currentTotal,
                         paymentCollected = rawPaid,
@@ -1442,14 +1488,25 @@ fun EditDeliveryDialog(
                 modifier = Modifier.weight(1f)
             )
             CompactFormTextField(
-                value = paymentCollectedText,
-                onValueChange = { paymentCollectedText = it.filter { ch -> ch.isDigit() } },
-                label = "Paid Amount",
+                value = discountText,
+                onValueChange = { discountText = it.filter { ch -> ch.isDigit() } },
+                label = "Discount (Rs.)",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 height = 38.dp,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("edit_delivery_discount_input")
             )
         }
+
+        CompactFormTextField(
+            value = paymentCollectedText,
+            onValueChange = { paymentCollectedText = it.filter { ch -> ch.isDigit() } },
+            label = "Paid Amount",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            height = 38.dp,
+            modifier = Modifier.fillMaxWidth()
+        )
 
         // Payment Mode Toggle (Cash / Online)
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1972,17 +2029,19 @@ private fun DetailIconActionButton(
 fun DirectReceivePaymentDialog(
     delivery: Delivery,
     onDismiss: () -> Unit,
-    onConfirm: (amount: Double, method: PaymentMethod) -> Unit
+    onConfirm: (amount: Double, method: PaymentMethod, paymentDate: String) -> Unit
 ) {
     val remainingDue = (delivery.totalAmount - delivery.paymentCollected).coerceAtLeast(0.0)
+    val todayDateStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
+    var paymentDate by remember { mutableStateOf(todayDateStr) }
     var amountText by remember { mutableStateOf(remainingDue.toInt().toString()) }
     var selectedMethod by remember { mutableStateOf(PaymentMethod.CASH) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var isSubmitting by remember { mutableStateOf(false) }
-    var pendingPayConfirm by remember { mutableStateOf<Pair<Double, PaymentMethod>?>(null) }
+    var pendingPayConfirm by remember { mutableStateOf<Triple<Double, PaymentMethod, String>?>(null) }
 
     if (pendingPayConfirm != null) {
-        val (confirmAmt, confirmMethod) = pendingPayConfirm!!
+        val (confirmAmt, confirmMethod, confirmDate) = pendingPayConfirm!!
         AlertDialog(
             onDismissRequest = { pendingPayConfirm = null },
             containerColor = Color.White,
@@ -1990,7 +2049,7 @@ fun DirectReceivePaymentDialog(
             title = { Text("Confirm Payment?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = SuccessGreen) },
             text = {
                 Text(
-                    text = "Receive Rs. ${confirmAmt.toInt()} (${if (confirmMethod == PaymentMethod.CASH) "Cash" else "Online"}) from ${delivery.customerName} for Delivery ${delivery.deliveryNumber}?\n\nکیا آپ واقعی Rs. ${confirmAmt.toInt()} وصولی کی تصدیق کرتے ہیں؟",
+                    text = "Receive Rs. ${confirmAmt.toInt()} (${if (confirmMethod == PaymentMethod.CASH) "Cash" else "Online"}) on $confirmDate from ${delivery.customerName} for Delivery ${delivery.deliveryNumber}?\n\nکیا آپ واقعی تاریخ $confirmDate کو Rs. ${confirmAmt.toInt()} وصولی کی تصدیق کرتے ہیں؟",
                     fontSize = 11.sp,
                     color = TextPrimaryDark
                 )
@@ -2001,7 +2060,7 @@ fun DirectReceivePaymentDialog(
                         if (!isSubmitting) {
                             isSubmitting = true
                             pendingPayConfirm = null
-                            onConfirm(confirmAmt, confirmMethod)
+                            onConfirm(confirmAmt, confirmMethod, confirmDate)
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
@@ -2038,7 +2097,7 @@ fun DirectReceivePaymentDialog(
                     } else if (amt > remainingDue) {
                         errorMsg = "Amount cannot exceed due Rs. ${remainingDue.toInt()}"
                     } else {
-                        pendingPayConfirm = amt to selectedMethod
+                        pendingPayConfirm = Triple(amt, selectedMethod, paymentDate.ifBlank { todayDateStr })
                     }
                 },
                 enabled = !isSubmitting,
@@ -2064,6 +2123,13 @@ fun DirectReceivePaymentDialog(
                 Text("Due: Rs.${remainingDue.toInt()}", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = ErrorRed)
             }
         }
+
+        // Manual Payment Date Selector (defaults to today; tap Calendar icon to pick another date)
+        EditableDateField(
+            label = "Payment Date (وصولی کی تاریخ)*",
+            dateValue = paymentDate,
+            onDateSelected = { paymentDate = it }
+        )
 
         CompactFormTextField(
             value = amountText,

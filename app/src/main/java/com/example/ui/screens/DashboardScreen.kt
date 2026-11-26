@@ -32,6 +32,7 @@ import com.example.model.Delivery
 import com.example.model.PermissionAction
 import com.example.model.SyncQueueStatus
 import com.example.model.UserRole
+import com.example.model.aggregateDeliveredBottlesBySize
 import com.example.ui.components.FromToDateRangeDialog
 import com.example.ui.components.MetricStatCard
 import com.example.ui.components.NewItemBadge
@@ -588,6 +589,9 @@ fun DashboardScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
+                    val breakdownRows = remember(periodDeliveries, bottleSizes) {
+                        aggregateDeliveredBottlesBySize(periodDeliveries, bottleSizes)
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -607,15 +611,25 @@ fun DashboardScreen(
                             )
                         }
 
-                        val totalDeliveredPeriod = remember(periodDeliveries) {
-                            periodDeliveries.sumOf { it.totalFullDelivered }
+                        val totalDeliveredUnits = remember(breakdownRows, periodDeliveries) {
+                            if (breakdownRows.isNotEmpty()) breakdownRows.sumOf { it.quantity }
+                            else periodDeliveries.sumOf { it.totalFullDelivered }
+                        }
+                        val totalHeaderSuffix = remember(breakdownRows, totalDeliveredUnits) {
+                            val distinctUnits = breakdownRows.map { it.unit }.distinct()
+                            if (distinctUnits.size == 1) {
+                                val u = distinctUnits.first()
+                                "Total ${if (totalDeliveredUnits == 1) u.singular else u.plural}"
+                            } else {
+                                "Total Units"
+                            }
                         }
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = WaterSkyLight
                         ) {
                             Text(
-                                text = "$totalDeliveredPeriod Total Bottles",
+                                text = "$totalDeliveredUnits $totalHeaderSuffix",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = WaterNavyPrimary,
@@ -626,18 +640,7 @@ fun DashboardScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    val bottleBreakdown = remember(periodDeliveries) {
-                        val map = linkedMapOf<String, Int>()
-                        periodDeliveries.forEach { del ->
-                            del.items.forEach { item ->
-                                val name = item.bottleName.ifEmpty { "19L Refill" }
-                                map[name] = (map[name] ?: 0) + item.quantity
-                            }
-                        }
-                        map
-                    }
-
-                    if (bottleBreakdown.isEmpty()) {
+                    if (breakdownRows.isEmpty()) {
                         Text(
                             text = "No bottles delivered in this period (اس دورانیہ میں ترسیل موجود نہیں)",
                             fontSize = 10.5.sp,
@@ -646,8 +649,8 @@ fun DashboardScreen(
                         )
                     } else {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            bottleBreakdown.forEach { (sizeName, qty) ->
-                                val unitLabel = if (sizeName.contains("500", ignoreCase = true)) "Packets (پیکٹ)" else "Bottles (بوتلیں)"
+                            breakdownRows.forEach { row ->
+                                val unitLabel = row.unit.labelFor(row.quantity)
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = WaterSkyLight.copy(alpha = 0.5f),
@@ -677,7 +680,7 @@ fun DashboardScreen(
                                             }
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Text(
-                                                text = sizeName,
+                                                text = row.displayLabel,
                                                 fontSize = 10.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = WaterNavyDark
@@ -689,7 +692,7 @@ fun DashboardScreen(
                                             color = WaterNavyPrimary
                                         ) {
                                             Text(
-                                                text = "$qty $unitLabel",
+                                                text = "${row.quantity} $unitLabel",
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color.White,

@@ -3287,7 +3287,8 @@ class WaterPlantBusinessLogicTest {
         assertTrue(reportText.contains("Bilal Traders | DEL-055 | Paid: Rs.400"))
         assertFalse(reportText.contains("Ali Mart | DEL-101 | Paid: Rs.500"))
         assertTrue(reportText.contains("EXPENSES:"))
-        assertTrue(reportText.contains("0321-7654321"))
+        assertFalse(reportText.contains("0321-7654321"))
+        assertFalse(reportText.contains("Contact:"))
         assertFalse(reportText.contains("Pending Admin"))
 
         val cust = Customer(id = "c1", name = "Ali Mart", customerCode = "C-001", phone = "03001112222", currentBalance = 250.0)
@@ -3295,7 +3296,10 @@ class WaterPlantBusinessLogicTest {
         assertTrue(ledgerText.contains("Customer Ledger — 2026-11-01 to 2026-11-21"))
         assertTrue(ledgerText.contains("Total Delivered: Rs. 750"))
         assertTrue(ledgerText.contains("Total Paid: Rs. 500"))
-        assertTrue(ledgerText.contains("0321-7654321"))
+        assertFalse(ledgerText.contains("0321-7654321"))
+        assertFalse(ledgerText.contains("03001112222"))
+        assertFalse(ledgerText.contains("Contact:"))
+        assertFalse(ledgerText.contains("Phone:"))
     }
 
     @Test
@@ -3666,4 +3670,508 @@ class WaterPlantBusinessLogicTest {
         assertTrue(editedExp.lastEditNote.contains("Receipt corrected"))
         assertTrue(editedExp.lastEditNote.contains("Amt: Rs.1500 → Rs.1200"))
     }
+
+    @Test
+    fun testAOneRamzanHotelRateMismatchFixedAcrossAliasesAndHistory() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val hotelId = repository.addCustomer(
+            Customer(name = "A-One Ramzan Hotel", phone = "0300-5551234", area = "Main Bazaar")
+        )
+
+        // 1. Assign Rs. 300 using fallback alias key (size_500ml_carton_24) with a later date
+        repository.setCustomerPrice(
+            customerId = hotelId,
+            bottleSizeId = "size_500ml_carton_24",
+            customPrice = 300.0,
+            bottleSizeName = "500ml Carton",
+            appliedDate = "2026-11-15"
+        )
+        assertEquals(300.0, repository.getCustomerRateForDate(hotelId, "size_500ml_carton_24", "2026-11-20"), 0.01)
+
+        // 2. Update rate to Rs. 320 using variant alias key (size_500ml__24_CARTON) with an earlier/older appliedDate
+        // Previously this left a stale Rs. 300 entry & duplicate alias doc causing Delivery to still pick Rs. 300!
+        repository.setCustomerPrice(
+            customerId = hotelId,
+            bottleSizeId = "size_500ml__24_CARTON",
+            customPrice = 320.0,
+            bottleSizeName = "500ml Carton",
+            appliedDate = "2026-11-10"
+        )
+
+        // Both alias keys MUST now resolve to the single canonical saved rate Rs. 320
+        assertEquals(320.0, repository.getCustomerRateForDate(hotelId, "size_500ml__24_CARTON", "2026-11-26"), 0.01)
+        assertEquals(320.0, repository.getCustomerRateForDate(hotelId, "size_500ml_carton_24", "2026-11-26"), 0.01)
+        assertEquals(320.0, repository.findCustomerRate(hotelId, "size_500ml_carton_24")?.customPrice ?: 0.0, 0.01)
+
+        // Confirm duplicate alias docs were merged cleanly into a single rate entry
+        val hotelCartonRates = repository.customerRates.value.filter { it.customerId == hotelId }
+        assertEquals(1, hotelCartonRates.size)
+
+        // 3. Updating to Rs. 335 effective 2026-11-25 keeps backdated 2026-11-18 delivery at Rs. 320 and 2026-11-26 at Rs. 335
+        repository.setCustomerPrice(
+            customerId = hotelId,
+            bottleSizeId = "size_500ml__24_CARTON",
+            customPrice = 335.0,
+            bottleSizeName = "500ml Carton",
+            appliedDate = "2026-11-25"
+        )
+        assertEquals(320.0, repository.getCustomerRateForDate(hotelId, "size_500ml__24_CARTON", "2026-11-18"), 0.01)
+        assertEquals(335.0, repository.getCustomerRateForDate(hotelId, "size_500ml__24_CARTON", "2026-11-26"), 0.01)
+    }
+
+    @Test
+    fun testDeliveryDiscountLifecycleInvoicesCustomerBalanceAndDelete() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(Customer(name = "Discount Hotel", phone = "0311-1234567"))
+
+        // Record delivery: Subtotal 1000 + Delivery Charges 100 - Discount 150 = Total 950; Paid 450 -> Due 500
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_19l",
+                    bottleName = "19 Liter",
+                    quantity = 10,
+                    unitPrice = 100.0,
+                    emptyCollected = 10,
+                    lineTotal = 1000.0
+                )
+            ),
+            assignedStaffName = "Supervisor",
+            notes = "Special discount",
+            deliveryCharges = 100.0,
+            immediatePaymentAmount = 450.0,
+            paymentMethod = PaymentMethod.CASH,
+            deliveryDate = "2026-11-22",
+            discount = 150.0
+        )
+
+        val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+        val inv = repository.invoices.value.first { it.id == del.invoiceId }
+        val cust = repository.getCustomerById(custId)!!
+
+        assertEquals(1000.0, del.subtotal, 0.01)
+        assertEquals(100.0, del.deliveryCharges, 0.01)
+        assertEquals(150.0, del.discount, 0.01)
+        assertEquals(950.0, del.totalAmount, 0.01)
+        assertEquals(950.0, inv.totalAmount, 0.01)
+        assertEquals(450.0, inv.paidAmount, 0.01)
+        assertEquals(500.0, inv.balanceDue, 0.01)
+        assertEquals(500.0, cust.currentBalance, 0.01)
+        assertEquals(950.0, cust.totalPurchases, 0.01)
+
+        // Edit delivery: reduce discount from 150 to 50 -> Total becomes 1050, Due becomes 600
+        assertTrue(repository.updateDelivery(del.copy(discount = 50.0)))
+        val editedDel = repository.deliveries.value.first { it.id == del.id }
+        val editedInv = repository.invoices.value.first { it.id == del.invoiceId }
+        val editedCust = repository.getCustomerById(custId)!!
+
+        assertEquals(50.0, editedDel.discount, 0.01)
+        assertEquals(1050.0, editedDel.totalAmount, 0.01)
+        assertEquals(600.0, editedInv.balanceDue, 0.01)
+        assertEquals(600.0, editedCust.currentBalance, 0.01)
+        assertTrue(editedDel.lastEditNote.contains("Discount: Rs.150 → Rs.50"))
+
+        // Delete delivery -> completely reverts balance and totalPurchases
+        assertTrue(repository.deleteDelivery(del.id))
+        val revertedCust = repository.getCustomerById(custId)!!
+        assertEquals(0.0, revertedCust.currentBalance, 0.01)
+        assertEquals(0.0, revertedCust.totalPurchases, 0.01)
+    }
+
+    @Test
+    fun testDeliveryAndExpenseSeenStatusTrackingAndPreservation() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(Customer(name = "Seen Test Customer"))
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = listOf(DeliveryItem(bottleSizeId = "size_19l", bottleName = "19L", quantity = 2, unitPrice = 150.0, lineTotal = 300.0)),
+            assignedStaffName = "Rider",
+            notes = "",
+            deliveryDate = "2026-11-23"
+        )
+        val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+        val exp = repository.recordDailyPlantExpense(
+            categoryId = "cat_fuel",
+            categoryName = "Fuel",
+            description = "Petrol",
+            amount = 500.0,
+            date = "2026-11-23"
+        )
+
+        // Admin views both
+        repository.recordTransactionViewed("delivery", del.id)
+        repository.recordTransactionViewed("expense", exp.id)
+        // Re-viewing immediately by same user does not duplicate entry
+        repository.recordTransactionViewed("delivery", del.id)
+        assertEquals(1, repository.deliveries.value.first { it.id == del.id }.viewedBy.size)
+
+        // Create a distinct Staff account and switch into it via real credentials
+        repository.createUserAccount(
+            UserAccount(
+                id = "staff_seen_tester",
+                username = "seen_staff_1",
+                password = "StaffPassword@1",
+                name = "Bilal Supervisor",
+                phone = "0300-2223333",
+                role = UserRole.INCHARGE,
+                active = true
+            )
+        )
+        assertTrue(repository.switchUserByCredentials("seen_staff_1", "StaffPassword@1").first)
+        repository.recordTransactionViewed("delivery", del.id)
+        repository.recordTransactionViewed("expense", exp.id)
+
+        val viewedDel = repository.deliveries.value.first { it.id == del.id }
+        val viewedExp = repository.expenses.value.first { it.id == exp.id }
+        assertEquals(2, viewedDel.viewedBy.size)
+        assertEquals(2, viewedExp.viewedBy.size)
+        assertTrue(viewedDel.viewedBy.any { it.userName == "Bilal Supervisor" })
+        assertTrue(viewedExp.viewedBy.any { it.userName == "Bilal Supervisor" })
+
+        // Editing delivery & expense preserves existing viewedBy list
+        repository.switchUserRole(UserRole.ADMIN)
+        assertTrue(repository.updateDelivery(viewedDel.copy(notes = "Updated note")))
+        assertTrue(repository.updateExpense(viewedExp.copy(notes = "Updated expense note")))
+        assertEquals(2, repository.deliveries.value.first { it.id == del.id }.viewedBy.size)
+        assertEquals(2, repository.expenses.value.first { it.id == exp.id }.viewedBy.size)
+    }
+
+    @Test
+    fun testPendingPaymentManualDateSyncsToCashCollectionAndInvoice() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(Customer(name = "Manual Date Customer"))
+        val deliveryDate = "2026-11-10"
+        val manualPayDate1 = "2026-11-15"
+        val manualPayDate2 = "2026-11-16"
+        val unrelatedDate = "2026-11-24"
+
+        val base15 = repository.getDailyCashSummary(manualPayDate1)
+        val base16 = repository.getDailyCashSummary(manualPayDate2)
+        val base24 = repository.getDailyCashSummary(unrelatedDate)
+
+        val delNum = repository.recordDelivery(
+            customerId = custId,
+            items = listOf(DeliveryItem(bottleSizeId = "size_19l", bottleName = "19L", quantity = 10, unitPrice = 100.0, lineTotal = 1000.0)),
+            assignedStaffName = "Staff",
+            notes = "",
+            immediatePaymentAmount = 0.0,
+            deliveryDate = deliveryDate
+        )
+        val del = repository.deliveries.value.first { it.deliveryNumber == delNum }
+
+        // 1. Pay Rs. 400 via Pay Now (markDeliveryAsPaid) with manual payment date 2026-11-15
+        assertTrue(
+            repository.markDeliveryAsPaid(
+                deliveryId = del.id,
+                amountPaid = 400.0,
+                method = PaymentMethod.CASH,
+                paymentDate = manualPayDate1
+            )
+        )
+
+        // 2. Pay remaining Rs. 600 via Receive Payment (recordPayment) with manual payment date 2026-11-16
+        val pay2 = repository.recordPayment(
+            customerId = custId,
+            amount = 600.0,
+            method = PaymentMethod.BANK_TRANSFER,
+            manualAllocations = mapOf(del.invoiceId to 600.0),
+            notes = "Online clearance",
+            paymentDate = manualPayDate2
+        )
+
+        assertEquals(manualPayDate2, pay2.date)
+        val linkedPayments = com.example.util.PdfGenerator.findRelatedPaymentsForDelivery(
+            repository.deliveries.value.first { it.id == del.id },
+            repository.payments.value
+        )
+        assertEquals(2, linkedPayments.size)
+        assertTrue(linkedPayments.any { it.date == manualPayDate1 && it.amount == 400.0 })
+        assertTrue(linkedPayments.any { it.date == manualPayDate2 && it.amount == 600.0 })
+
+        // Cash Collection summaries reflect ONLY the selected manual dates
+        val sum15 = repository.getDailyCashSummary(manualPayDate1)
+        val sum16 = repository.getDailyCashSummary(manualPayDate2)
+        val sum24 = repository.getDailyCashSummary(unrelatedDate)
+        assertEquals(base15.customerCashCollected + 400.0, sum15.customerCashCollected, 0.01)
+        assertEquals(base16.digitalCollected + 600.0, sum16.digitalCollected, 0.01)
+        assertEquals(base24.totalReceivedAmount, sum24.totalReceivedAmount, 0.01)
+
+        // Invoice is fully PAID
+        val inv = repository.invoices.value.first { it.id == del.invoiceId }
+        assertEquals(InvoiceStatus.PAID, inv.status)
+        assertEquals(0.0, inv.balanceDue, 0.01)
+    }
+
+    @Test
+    fun testRedesignedCostingEngineBottle10FieldsActualOverridesBudgetAutoStaffAndYearPnl() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val testDate = "2027-04-15" // Clean future 30-day month & year with zero seeded clutter
+        val testMonth = "2027-04"
+
+        // Clear any existing workers so auto staff salary calculation is exact
+        repository.plantWorkers.value.forEach { repository.deletePlantWorker(it.id) }
+        repository.bottleCostings.value.forEach { repository.deleteBottleCosting(it.id) }
+
+        // 1. Add 2 active staff (30,000 + 30,000 = 60,000/mo -> 2,000/day in 30-day April) + 1 inactive (excluded)
+        repository.addPlantWorker(PlantWorker(name = "Operator Ali", monthlySalary = 30000.0, active = true))
+        repository.addPlantWorker(PlantWorker(name = "Driver Usman", monthlySalary = 30000.0, active = true))
+        repository.addPlantWorker(PlantWorker(name = "Former Staff", monthlySalary = 50000.0, active = false))
+
+        // 2. Save 10-field Bottle Costing for 500ml Carton (24 bottles)
+        // Per-bottle: bottle(5) + label(1) + seal(0.5) + water(1) + cap(0.5) = 8 * 24 = 192
+        // Per-pack: carton(15) + tape(3) + delivery(5) + labor(3) + misc(2) = 28 -> Auto Calc = 220
+        // Confirm Packet Cost manually adjusted to Rs. 225!
+        val cartonRecord = BottleCostingRecord(
+            bottleSizeId = "size_500ml",
+            bottleSizeName = "500ml Carton",
+            packingType = CostingPackingType.CARTON,
+            packQty = 24,
+            bottlePrice = 5.0,
+            labelPrice = 1.0,
+            sealPrice = 0.5,
+            waterFillingCost = 1.0,
+            capCost = 0.5,
+            cartonCost = 15.0,
+            tapeCost = 3.0,
+            deliveryCost = 5.0,
+            labourCost = 3.0,
+            miscCost = 2.0,
+            confirmedPacketCost = 225.0,
+            usesDetailedCosting = true
+        )
+        assertEquals(220.0, cartonRecord.computeDetailedPackCost(), 0.01)
+        assertEquals(225.0, cartonRecord.effectiveUnitCostForPnl(), 0.01)
+        assertTrue(repository.saveBottleCosting(cartonRecord).first)
+
+        // Save separate 500ml Packet costing (12 bottles, confirmed Rs. 115) — must NOT overwrite Carton!
+        val packetRecord = BottleCostingRecord(
+            bottleSizeId = "size_500ml",
+            bottleSizeName = "500ml Packet",
+            packingType = CostingPackingType.PACKET,
+            packQty = 12,
+            confirmedPacketCost = 115.0,
+            usesDetailedCosting = true
+        )
+        assertTrue(repository.saveBottleCosting(packetRecord).first)
+        assertEquals(2, repository.bottleCostings.value.count { it.bottleSizeId == "size_500ml" })
+
+        // 3. Save Monthly Operational Costs for 2027-04:
+        //    Vehicle Maint: Budget 5000, Actual 4500 -> Actual (4500) MUST override Budget!
+        //    RO Maint:      Budget 4500, Actual 0    -> Uses Budget (4500)
+        //    RO Rent:       Budget 15000, Actual 0   -> Uses Budget (15000)
+        //    Vehicle Rent:  Budget 6000, Actual 0    -> Uses Budget (6000)
+        //    Electricity:   Budget 0, Actual 3000    -> Uses Actual (3000)
+        //    Other Fixed:   Budget 0, Actual 0       -> 0
+        //    Total Effective Monthly Operational Cost = 33,000 => 1,100/day in 30-day April!
+        val opSave = repository.saveMonthlyOperationalCost(
+            MonthlyOperationalCostRecord(
+                month = testMonth,
+                vehicleMaintenance = OperationalCostLine(budgetAmount = 5000.0, actualAmount = 4500.0),
+                roMaintenance = OperationalCostLine(budgetAmount = 4500.0, actualAmount = 0.0),
+                roPlantRent = OperationalCostLine(budgetAmount = 15000.0, actualAmount = 0.0),
+                vehicleMonthlyRent = OperationalCostLine(budgetAmount = 6000.0, actualAmount = 0.0),
+                electricityBill = OperationalCostLine(budgetAmount = 0.0, actualAmount = 3000.0),
+                otherFixedCosts = OperationalCostLine(budgetAmount = 0.0, actualAmount = 0.0)
+            )
+        )
+        assertTrue(opSave.first)
+
+        // 4. Record delivery of 20 x 500ml Cartons @ Rs. 320 = Rs. 6,400 revenue
+        //    Bottle Material Cost = 20 * 225 = Rs. 4,500
+        //    Profit Before Operational Expenses = 6,400 - 4,500 = Rs. 1,900
+        val custId = repository.addCustomer(Customer(name = "Costing Audit Mart"))
+        repository.recordDelivery(
+            customerId = custId,
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_500ml",
+                    variantId = "size_500ml__24_CARTON",
+                    packSize = 24,
+                    bottleName = "500ml (24-Carton)",
+                    quantity = 20,
+                    unitPrice = 320.0,
+                    lineTotal = 6400.0
+                )
+            ),
+            assignedStaffName = "Driver Usman",
+            notes = "",
+            immediatePaymentAmount = 5000.0,
+            deliveryDate = testDate
+        )
+
+        // DAY-WISE P&L:
+        val daily = repository.getCostingProfitLossReport(CostingReportPeriod.DAILY, testDate)
+        assertEquals(6400.0, daily.totalSalesRevenue, 0.01)
+        assertEquals(4500.0, daily.totalBottleAndPackingCost, 0.01)
+        assertEquals(1900.0, daily.profitBeforeOperationalCosts, 0.01)
+        assertEquals(2, daily.activeStaffCount)
+        assertEquals(60000.0, daily.monthlyStaffSalariesTotal, 0.01)
+        assertEquals(2000.0, daily.dailyStaffSalaryRate, 0.01)
+        assertEquals(2000.0, daily.allocatedStaffSalaryCost, 0.01)
+        assertEquals(33000.0, daily.monthlyOperationalCostsTotal, 0.01)
+        assertEquals(1100.0, daily.dailyOperationalCostRate, 0.01)
+        assertEquals(1100.0, daily.allocatedOperationalCost, 0.01)
+        // Final Net Profit = 1900 - (2000 + 1100) = -1200
+        assertEquals(-1200.0, daily.netProfitOrLoss, 0.01)
+        val vehBreakdown = daily.operationalCostBreakdown.first { it.label == "Vehicle Maintenance" }
+        assertTrue(vehBreakdown.isUsingActual)
+        assertEquals(4500.0, vehBreakdown.effectiveMonthlyAmount, 0.01)
+
+        // WEEKLY P&L (7 days): Staff = 14,000, Op = 7,700 -> Net = 1900 - 21700 = -19800
+        val weekly = repository.getCostingProfitLossReport(CostingReportPeriod.WEEKLY, testDate)
+        assertEquals(7, weekly.daysInPeriod)
+        assertEquals(14000.0, weekly.allocatedStaffSalaryCost, 0.01)
+        assertEquals(7700.0, weekly.allocatedOperationalCost, 0.01)
+        assertEquals(-19800.0, weekly.netProfitOrLoss, 0.01)
+
+        // MONTHLY P&L (30 days): Staff = 60,000, Op = 33,000 -> Net = 1900 - 93000 = -91100
+        val monthly = repository.getCostingProfitLossReport(CostingReportPeriod.MONTHLY, testDate)
+        assertEquals(30, monthly.daysInPeriod)
+        assertEquals(60000.0, monthly.allocatedStaffSalaryCost, 0.01)
+        assertEquals(33000.0, monthly.allocatedOperationalCost, 0.01)
+        assertEquals(-91100.0, monthly.netProfitOrLoss, 0.01)
+
+        // YEARLY P&L (2027): 12 months staff = 720,000; 12 months op (April=33,000 + other 11 months carry forward budget 30,500)
+        val yearly = repository.getCostingProfitLossReport(CostingReportPeriod.YEARLY, testDate)
+        assertEquals(CostingReportPeriod.YEARLY, yearly.period)
+        assertEquals(720000.0, yearly.allocatedStaffSalaryCost, 0.01)
+        assertEquals(33000.0 + (11 * 30500.0), yearly.allocatedOperationalCost, 0.01)
+        assertEquals(1900.0 - 720000.0 - (33000.0 + 11 * 30500.0), yearly.netProfitOrLoss, 0.01)
+    }
+
+    @Test
+    fun testDashboardDeliveredBottleBreakdownIdentifiesCartonPacketAndBottleUnits() {
+        val sizes = listOf(
+            BottleSize(id = "size_19l", name = "19 Litre Bottle", capacityLitres = 19.0, packQuantity = 1, deliveryUnit = DeliveryUnit.PER_BOTTLE),
+            BottleSize(id = "size_6l", name = "6 Litre Bottle", capacityLitres = 6.0, packQuantity = 1, deliveryUnit = DeliveryUnit.PER_BOTTLE),
+            BottleSize(id = "size_1_5l", name = "1.5 Litre", capacityLitres = 1.5, packQuantity = 6, deliveryUnit = DeliveryUnit.PER_PACKET),
+            BottleSize(id = "size_500ml", name = "500ml", capacityLitres = 0.5, packQuantity = 12, deliveryUnit = DeliveryUnit.PER_PACKET)
+        )
+
+        val d1 = Delivery(
+            id = "del_pkg_1",
+            date = "2026-11-26",
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_500ml",
+                    variantId = "size_500ml__24_CARTON",
+                    packSize = 24,
+                    bottleName = "500ml Carton",
+                    quantity = 10
+                ),
+                DeliveryItem(
+                    bottleSizeId = "size_500ml",
+                    variantId = "size_500ml__12_PACKET",
+                    packSize = 12,
+                    bottleName = "500ml Packet",
+                    quantity = 7
+                ),
+                DeliveryItem(
+                    bottleSizeId = "size_6l",
+                    variantId = "",
+                    packSize = 1,
+                    bottleName = "6L",
+                    quantity = 4
+                ),
+                DeliveryItem(
+                    bottleSizeId = "size_1_5l",
+                    variantId = "size_1_5l__12_CARTON",
+                    packSize = 12,
+                    bottleName = "1.5L Carton",
+                    quantity = 3
+                ),
+                DeliveryItem(
+                    bottleSizeId = "size_1_5l",
+                    variantId = "size_1_5l__6_PACKET",
+                    packSize = 6,
+                    bottleName = "1.5L Packet",
+                    quantity = 5
+                )
+            ),
+            totalFullDelivered = 29
+        )
+        val d2 = Delivery(
+            id = "del_pkg_2",
+            date = "2026-11-26",
+            items = listOf(
+                DeliveryItem(
+                    bottleSizeId = "size_500ml",
+                    variantId = "size_500ml__24_CARTON",
+                    packSize = 24,
+                    bottleName = "500ml (24-Carton)",
+                    quantity = 2
+                ),
+                DeliveryItem(
+                    bottleSizeId = "size_6l",
+                    variantId = "",
+                    packSize = 1,
+                    bottleName = "6 Litre Bottle",
+                    quantity = 1
+                )
+            ),
+            totalFullDelivered = 3
+        )
+
+        val rows = aggregateDeliveredBottlesBySize(listOf(d1, d2), sizes)
+        val byKey = rows.associateBy { it.key }
+
+        val ctn500 = byKey["500ml__CARTON"]
+        assertNotNull(ctn500)
+        assertEquals(DeliveryPackagingUnit.CARTON, ctn500!!.unit)
+        assertEquals("500ml Carton", ctn500.displayLabel)
+        assertEquals(12, ctn500.quantity)
+        assertEquals("Cartons (کارٹن)", ctn500.unit.labelFor(ctn500.quantity))
+
+        val pkt500 = byKey["500ml__PACKET"]
+        assertNotNull(pkt500)
+        assertEquals(DeliveryPackagingUnit.PACKET, pkt500!!.unit)
+        assertEquals("500ml Packet", pkt500.displayLabel)
+        assertEquals(7, pkt500.quantity)
+        assertEquals("Packets (پیکٹ)", pkt500.unit.labelFor(pkt500.quantity))
+
+        val btl6l = byKey["6l__BOTTLE"]
+        assertNotNull(btl6l)
+        assertEquals(DeliveryPackagingUnit.BOTTLE, btl6l!!.unit)
+        assertEquals("6L Bottle", btl6l.displayLabel)
+        assertEquals(5, btl6l.quantity)
+        assertEquals("Bottles (بوتلیں)", btl6l.unit.labelFor(btl6l.quantity))
+
+        val ctn15 = byKey["1.5l__CARTON"]
+        assertNotNull(ctn15)
+        assertEquals(DeliveryPackagingUnit.CARTON, ctn15!!.unit)
+        assertEquals(3, ctn15.quantity)
+
+        val pkt15 = byKey["1.5l__PACKET"]
+        assertNotNull(pkt15)
+        assertEquals(DeliveryPackagingUnit.PACKET, pkt15!!.unit)
+        assertEquals(5, pkt15.quantity)
+    }
+
+    @Test
+    fun testCustomerDistanceKmDecimalPersistence() {
+        repository.switchUserRole(UserRole.ADMIN)
+        val custId = repository.addCustomer(
+            Customer(
+                name = "Distance Test Hotel",
+                phone = "03009998877",
+                area = "F-8",
+                address = "Main Street 5",
+                distanceKm = 5.5
+            )
+        )
+        assertTrue(custId.isNotBlank())
+        val added = repository.customers.value.first { it.id == custId }
+        assertEquals(5.5, added.distanceKm, 0.0001)
+
+        // Update distance to another decimal value and verify persistence
+        repository.updateCustomer(added.copy(distanceKm = 12.75))
+        val updated = repository.customers.value.first { it.id == custId }
+        assertEquals(12.75, updated.distanceKm, 0.0001)
+
+        // Default distanceKm is 0.0 for backward compatibility
+        val defaultCust = Customer(name = "Default Dist")
+        assertEquals(0.0, defaultCust.distanceKm, 0.0001)
+    }
 }
+

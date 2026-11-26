@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.R
+import com.example.model.RecordViewEntry
 import com.example.model.UserRole
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
@@ -1717,6 +1718,214 @@ fun FromToDateRangeDialog(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(8.dp)
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Formats an epoch timestamp into a clear exact 12-hour clock string (e.g. "02:45 PM").
+ */
+fun formatExactTime(timestampMs: Long, fallbackTime: String = ""): String {
+    if (timestampMs > 0L) {
+        return try {
+            SimpleDateFormat("hh:mm a", Locale.US).format(Date(timestampMs))
+        } catch (_: Exception) {
+            fallbackTime
+        }
+    }
+    return fallbackTime.trim()
+}
+
+/**
+ * Formats a transaction date alongside its exact creation time (e.g. "2026-11-26 • 02:45 PM").
+ */
+fun formatDateAndExactTime(date: String, timestampMs: Long, fallbackTime: String = ""): String {
+    val cleanDate = date.trim()
+    val exactTime = formatExactTime(timestampMs, fallbackTime)
+    return when {
+        cleanDate.isNotBlank() && exactTime.isNotBlank() -> "$cleanDate • $exactTime"
+        cleanDate.isNotBlank() -> cleanDate
+        exactTime.isNotBlank() -> exactTime
+        else -> "-"
+    }
+}
+
+/**
+ * Formats a viewer entry's full date + exact time timestamp (e.g. "2026-11-26 • 02:45 PM").
+ */
+fun formatFullTimestamp(timestampMs: Long): String {
+    if (timestampMs <= 0L) return "-"
+    return try {
+        SimpleDateFormat("yyyy-MM-dd • hh:mm a", Locale.US).format(Date(timestampMs))
+    } catch (_: Exception) {
+        "-"
+    }
+}
+
+/**
+ * Admin-only clickable Eye Icon badge showing how many users have viewed a Delivery or Expense transaction.
+ * Callers MUST only render this component when currentUser is Admin.
+ */
+@Composable
+fun AdminSeenEyeBadge(
+    viewedBy: List<RecordViewEntry>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val count = viewedBy.size
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFFE0F2FE),
+        border = BorderStroke(1.dp, WaterNavyPrimary.copy(alpha = 0.25f)),
+        modifier = modifier
+            .heightIn(min = 34.dp)
+            .clickable(onClick = onClick)
+            .testTag("admin_seen_eye_btn")
+            .semantics { contentDescription = "Seen by $count users. Tap to view list." }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Visibility,
+                contentDescription = "Seen Status",
+                tint = WaterNavyPrimary,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = "$count",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = WaterNavyPrimary
+            )
+        }
+    }
+}
+
+/**
+ * Admin-only dialog listing all users who have viewed a Delivery or Expense transaction.
+ */
+@Composable
+fun TransactionViewersDialog(
+    title: String,
+    viewedBy: List<RecordViewEntry>,
+    onDismiss: () -> Unit
+) {
+    val sortedViewers = remember(viewedBy) {
+        viewedBy.sortedByDescending { it.viewedAt }
+    }
+
+    MobileFormDialog(
+        title = "Seen By (دیکھنے والے صارفین)",
+        subtitle = title,
+        onDismiss = onDismiss,
+        accentColor = WaterNavyPrimary,
+        footerContent = {
+            Button(
+                onClick = onDismiss,
+                colors = waterPrimaryButtonColors(),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.testTag("close_viewers_dialog_btn")
+            ) {
+                Text("Close", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    ) {
+        if (sortedViewers.isEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFFF8FAFC),
+                border = BorderStroke(1.dp, BorderLight),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VisibilityOff,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "No views recorded yet.\nابھی تک کسی صارف نے نہیں دیکھا۔",
+                        fontSize = 11.sp,
+                        color = TextSecondaryDark
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "Viewed by ${sortedViewers.size} user${if (sortedViewers.size == 1) "" else "s"}",
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextSecondaryDark
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                sortedViewers.forEachIndexed { idx, entry ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (idx == 0) WaterSkyLight.copy(alpha = 0.6f) else Color(0xFFF8FAFC),
+                        border = BorderStroke(1.dp, BorderLight),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = WaterNavyPrimary.copy(alpha = 0.12f),
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Person,
+                                            contentDescription = null,
+                                            tint = WaterNavyPrimary,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                                Column {
+                                    Text(
+                                        text = entry.userName.ifBlank { "Staff" },
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = WaterNavyPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = formatFullTimestamp(entry.viewedAt),
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = TextSecondaryDark
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = "Seen",
+                                tint = SuccessGreen,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
     }

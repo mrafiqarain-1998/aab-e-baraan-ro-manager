@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import com.example.model.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import com.example.ui.components.AdminSeenEyeBadge
 import com.example.ui.components.CompactDropdownField
 import com.example.ui.components.CompactFormTextField
 import com.example.ui.components.EditMetadataBadge
@@ -36,6 +37,8 @@ import com.example.ui.components.MobileFormDialog
 import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
+import com.example.ui.components.TransactionViewersDialog
+import com.example.ui.components.formatDateAndExactTime
 import com.example.ui.theme.*
 import com.example.util.PdfGenerator
 import com.example.viewmodel.WaterPlantViewModel
@@ -831,11 +834,16 @@ fun ExpensesScreen(
         }
     }
 
-    // Expense Detail Dialog (with Granular Edit/Delete/Verify Actions & Share PDF)
+    // Expense Detail Dialog (with Granular Edit/Delete/Verify Actions, Seen Status & Share PDF)
     if (selectedExpenseForDetail != null) {
         val currentExp = expenses.find { it.id == selectedExpenseForDetail!!.id } ?: selectedExpenseForDetail!!
+        val isAdminUser = currentUser.role == UserRole.ADMIN || currentUser.isSuperAdmin
+        LaunchedEffect(currentExp.id) {
+            viewModel.recordTransactionViewed("expense", currentExp.id)
+        }
         ExpenseDetailDialog(
             expense = currentExp,
+            isAdmin = isAdminUser,
             canEdit = canEditExpense,
             canDelete = canDeleteExpense,
             canApprove = canApproveExpense,
@@ -1399,6 +1407,7 @@ fun ExpenseItemCard(
 @Composable
 fun ExpenseDetailDialog(
     expense: Expense,
+    isAdmin: Boolean = false,
     canEdit: Boolean,
     canDelete: Boolean,
     canApprove: Boolean,
@@ -1410,10 +1419,20 @@ fun ExpenseDetailDialog(
 ) {
     val sourceLabel = if (expense.paymentSource == PaymentSource.PAY_FROM_INVESTMENT) "Investment Account" else "From Sale"
     val modeLabel = if (expense.paymentMethod.isCash) "Cash" else "Online"
+    val exactDateTimeStr = formatDateAndExactTime(expense.date, expense.createdAt)
+    var showExpenseViewers by remember(expense.id) { mutableStateOf(false) }
+
+    if (showExpenseViewers && isAdmin) {
+        TransactionViewersDialog(
+            title = "Expense #${expense.voucherNumber} • Rs. ${expense.amount.toInt()}",
+            viewedBy = expense.viewedBy,
+            onDismiss = { showExpenseViewers = false }
+        )
+    }
 
     MobileFormDialog(
         title = "Voucher #${expense.voucherNumber}",
-        subtitle = "${expense.date} • ${expense.expenseType.name}",
+        subtitle = "$exactDateTimeStr • ${expense.expenseType.name}",
         onDismiss = onDismiss,
         accentColor = WaterNavyPrimary,
         footerContent = {
@@ -1486,19 +1505,30 @@ fun ExpenseDetailDialog(
                     Text("Total Amount", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = ErrorRed)
                     Text("Rs. ${expense.amount.toInt()}", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = ErrorRed)
                 }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (expense.isAcknowledged) SuccessGreenLight else WarningOrangeLight
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = if (expense.isAcknowledged) "Verified" else "Pending",
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (expense.isAcknowledged) SuccessGreen else WarningOrange,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
+                    if (isAdmin) {
+                        AdminSeenEyeBadge(
+                            viewedBy = expense.viewedBy,
+                            onClick = { showExpenseViewers = true }
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (expense.isAcknowledged) SuccessGreenLight else WarningOrangeLight
+                    ) {
+                        Text(
+                            text = if (expense.isAcknowledged) "Verified" else "Pending",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (expense.isAcknowledged) SuccessGreen else WarningOrange,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1601,6 +1631,7 @@ fun ExpenseDetailDialog(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
+                ExpenseDetailRow("Date & Time", exactDateTimeStr)
                 ExpenseDetailRow("Expense Type", "${expense.expenseType.name} (${if (expense.hasInventoryItems) "Inventory" else "Non-Inventory"})")
                 ExpenseDetailRow("Category", expense.categoryName.ifBlank { "Uncategorized" })
                 if (expense.staffMemberName.isNotBlank()) {

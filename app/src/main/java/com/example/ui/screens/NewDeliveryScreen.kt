@@ -239,6 +239,7 @@ fun NewDeliveryScreen(
 
     // Payment state (Step 2)
     var deliveryChargesText by remember { mutableStateOf("") }
+    var discountText by remember { mutableStateOf("") }
     var isPayNowTab by remember { mutableStateOf(true) } // true = Pay Now, false = Credit
     var paymentMethod by remember { mutableStateOf(PaymentMethod.CASH) } // CASH or BANK_TRANSFER (Online)
     var immediatePaymentText by remember { mutableStateOf("") }
@@ -256,15 +257,15 @@ fun NewDeliveryScreen(
 
     val charges = deliveryChargesText.toDoubleOrNull() ?: 0.0
     val subtotal = deliveryLines.sumOf { it.lineTotal }
-    val grandTotal = subtotal + charges
+    val rawDiscount = discountText.toDoubleOrNull() ?: 0.0
+    val discountVal = rawDiscount.coerceIn(0.0, subtotal + charges)
+    val grandTotal = (subtotal + charges - discountVal).coerceAtLeast(0.0)
     val totalFullDelivered = deliveryLines.sumOf { it.deliveredQty }
     val totalEmptyCollected = deliveryLines.sumOf { it.emptyQty }
     val paidAmount = if (!isPayNowTab) 0.0 else (immediatePaymentText.toDoubleOrNull() ?: grandTotal).coerceAtMost(grandTotal)
 
     fun hasFixedRateForCustomer(customerId: String, rateKey: String): Boolean {
-        return allCustomerRates.any {
-            it.customerId == customerId && it.bottleSizeId == rateKey && it.isAssigned
-        }
+        return viewModel.findCustomerRate(customerId, rateKey, assignedOnly = true) != null
     }
 
     fun addBottleLineForOption(cust: Customer, option: DeliverySelectableOption, explicitRate: Double? = null) {
@@ -1079,7 +1080,9 @@ fun NewDeliveryScreen(
                             onValueChange = { txt ->
                                 deliveryChargesText = txt.filter { it.isDigit() }
                                 if (isPayNowTab) {
-                                    val newGrand = subtotal + (deliveryChargesText.toDoubleOrNull() ?: 0.0)
+                                    val newCharges = deliveryChargesText.toDoubleOrNull() ?: 0.0
+                                    val newDisc = (discountText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, subtotal + newCharges)
+                                    val newGrand = (subtotal + newCharges - newDisc).coerceAtLeast(0.0)
                                     immediatePaymentText = newGrand.toInt().toString()
                                 }
                             },
@@ -1090,6 +1093,27 @@ fun NewDeliveryScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("delivery_charges_input")
+                        )
+
+                        // Discount Field (immediately after Delivery Charges)
+                        CompactFormTextField(
+                            value = discountText,
+                            onValueChange = { txt ->
+                                discountText = txt.filter { it.isDigit() }
+                                if (isPayNowTab) {
+                                    val newCharges = deliveryChargesText.toDoubleOrNull() ?: 0.0
+                                    val newDisc = (discountText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, subtotal + newCharges)
+                                    val newGrand = (subtotal + newCharges - newDisc).coerceAtLeast(0.0)
+                                    immediatePaymentText = newGrand.toInt().toString()
+                                }
+                            },
+                            label = "Discount (ڈسکاؤنٹ Rs.)",
+                            placeholder = "0",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            height = 40.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("delivery_discount_input")
                         )
 
                         // Total Bill Banner
@@ -1329,7 +1353,8 @@ fun NewDeliveryScreen(
                                             deliveryCharges = charges,
                                             immediatePaymentAmount = paidAmount,
                                             paymentMethod = paymentMethod,
-                                            deliveryDate = deliveryDate
+                                            deliveryDate = deliveryDate,
+                                            discount = discountVal
                                         )
                                         onDeliverySaved()
                                     } else {

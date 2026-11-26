@@ -166,6 +166,8 @@ enum class CostingPackingType(val label: String, val shortLabel: String, val urd
 
 /**
  * Costing record per bottle size & packing type (Admin Only)
+ * Supports the 10-field Bottle Costing model + Automatic Pack Calculation + Confirmed Packet Cost override
+ * while remaining 100% backward compatible with previously stored costing records.
  */
 @JsonClass(generateAdapter = true)
 data class BottleCostingRecord(
@@ -174,6 +176,7 @@ data class BottleCostingRecord(
     val bottleSizeName: String = "",
     val packingType: CostingPackingType = CostingPackingType.SINGLE,
     val isMultiTimeUse: Boolean = false,
+    // Legacy fields (kept for full backward compatibility)
     val bottlePurchaseRate: Double = 0.0,
     val fillingRate: Double = 0.0,
     val packingRate: Double = 0.0,
@@ -194,29 +197,132 @@ data class BottleCostingRecord(
     val date: String = "",
     val notes: String = "",
     val updatedBy: String = "Admin",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    // Redesigned 10-field Bottle Costing + Confirmed Packet Cost fields
+    val bottlePrice: Double = 0.0,       // 1. Bottle Price (per bottle)
+    val labelPrice: Double = 0.0,        // 2. Label Price (per bottle)
+    val sealPrice: Double = 0.0,         // 3. Seal Price (per bottle)
+    val waterFillingCost: Double = 0.0,  // 4. Water Filling (per bottle)
+    val cartonCost: Double = 0.0,        // 5. Carton (per pack/carton)
+    val tapeCost: Double = 0.0,          // 6. Tape (per pack/carton)
+    // 7. deliveryCost (per pack/carton), 8. labourCost (per pack/carton)
+    val miscCost: Double = 0.0,          // 9. Miscellaneous Cost (per pack/carton)
+    // 10. capCost (per bottle)
+    val calculatedPackCost: Double = 0.0,
+    val confirmedPacketCost: Double = 0.0,
+    val usesDetailedCosting: Boolean = false
 ) {
     val extraComponentCost: Double
         get() = labelSealCalculatedCost + cartonPolytheneCost + capCost + waterCost + labourCost + electricityCost + deliveryCost
 
+    val perBottleSubtotal: Double
+        get() = bottlePrice + labelPrice + sealPrice + waterFillingCost + capCost
+
+    val perPackFixedSubtotal: Double
+        get() = cartonCost + tapeCost + deliveryCost + labourCost + miscCost
+
+    fun computeDetailedPackCost(): Double {
+        val qty = packQty.coerceAtLeast(1)
+        return (perBottleSubtotal * qty) + perPackFixedSubtotal
+    }
+
     fun effectivePurchaseCostForPnl(forceMultiUse: Boolean = isMultiTimeUse): Double =
         if (forceMultiUse) 0.0 else bottlePurchaseRate
 
-    fun effectiveUnitCostForPnl(forceMultiUse: Boolean = isMultiTimeUse): Double =
-        effectivePurchaseCostForPnl(forceMultiUse) + fillingRate + packingRate + extraComponentCost
+    fun effectiveUnitCostForPnl(forceMultiUse: Boolean = isMultiTimeUse): Double {
+        if (confirmedPacketCost > 0.0) return confirmedPacketCost
+        if (usesDetailedCosting) {
+            val calc = if (calculatedPackCost > 0.0) calculatedPackCost else computeDetailedPackCost()
+            return calc.coerceAtLeast(0.0)
+        }
+        if (totalCostPerPackOrBottle > 0.0 && bottlePrice == 0.0 && labelPrice == 0.0 && sealPrice == 0.0) {
+            return effectivePurchaseCostForPnl(forceMultiUse) + fillingRate + packingRate + extraComponentCost
+        }
+        return (effectivePurchaseCostForPnl(forceMultiUse) + fillingRate + packingRate + extraComponentCost)
+            .coerceAtLeast(0.0)
+    }
 }
 
 /**
- * Period filter for Costing Profit & Loss Dashboard
+ * Budget vs Actual line item for Monthly Operational Costs.
+ * Whenever actualAmount > 0, ALL costing & profit calculations automatically prefer actualAmount.
+ */
+@JsonClass(generateAdapter = true)
+data class OperationalCostLine(
+    val budgetAmount: Double = 0.0,
+    val actualAmount: Double = 0.0
+) {
+    val isUsingActual: Boolean
+        get() = actualAmount > 0.0
+
+    val effectiveAmount: Double
+        get() = if (actualAmount > 0.0) actualAmount else budgetAmount.coerceAtLeast(0.0)
+}
+
+/**
+ * Monthly Operational Cost Record (per YYYY-MM) with 6 fixed operational items.
+ * Staff Salaries are NOT entered here; they are automatically fetched from the Staff module.
+ */
+@JsonClass(generateAdapter = true)
+data class MonthlyOperationalCostRecord(
+    val id: String = "",
+    val month: String = "", // "YYYY-MM"
+    val vehicleMaintenance: OperationalCostLine = OperationalCostLine(),
+    val roMaintenance: OperationalCostLine = OperationalCostLine(),
+    val roPlantRent: OperationalCostLine = OperationalCostLine(),
+    val vehicleMonthlyRent: OperationalCostLine = OperationalCostLine(),
+    val electricityBill: OperationalCostLine = OperationalCostLine(),
+    val otherFixedCosts: OperationalCostLine = OperationalCostLine(),
+    val updatedBy: String = "Admin",
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    val totalBudget: Double
+        get() = vehicleMaintenance.budgetAmount +
+            roMaintenance.budgetAmount +
+            roPlantRent.budgetAmount +
+            vehicleMonthlyRent.budgetAmount +
+            electricityBill.budgetAmount +
+            otherFixedCosts.budgetAmount
+
+    val totalActual: Double
+        get() = vehicleMaintenance.actualAmount +
+            roMaintenance.actualAmount +
+            roPlantRent.actualAmount +
+            vehicleMonthlyRent.actualAmount +
+            electricityBill.actualAmount +
+            otherFixedCosts.actualAmount
+
+    val totalEffectiveCost: Double
+        get() = vehicleMaintenance.effectiveAmount +
+            roMaintenance.effectiveAmount +
+            roPlantRent.effectiveAmount +
+            vehicleMonthlyRent.effectiveAmount +
+            electricityBill.effectiveAmount +
+            otherFixedCosts.effectiveAmount
+}
+
+data class OperationalCostBreakdownItem(
+    val label: String,
+    val urduLabel: String,
+    val budgetAmount: Double,
+    val actualAmount: Double,
+    val effectiveMonthlyAmount: Double,
+    val isUsingActual: Boolean,
+    val allocatedPeriodAmount: Double
+)
+
+/**
+ * Period filter for Unified Profit & Loss Dashboard (Day / Week / Month / Year)
  */
 enum class CostingReportPeriod(val label: String, val urduLabel: String) {
-    DAILY("Daily", "روزانہ"),
-    WEEKLY("Weekly", "ہفتہ وار"),
-    MONTHLY("Monthly", "ماہانہ")
+    DAILY("Day", "روزانہ"),
+    WEEKLY("Week", "ہفتہ وار"),
+    MONTHLY("Month", "ماہانہ"),
+    YEARLY("Year", "سالانہ")
 }
 
 /**
- * Per-bottle sold cost and revenue breakdown inside Costing P&L report
+ * Per-bottle sold cost and revenue breakdown (kept for data/test compatibility)
  */
 data class BottleSaleCostLine(
     val bottleSizeId: String = "",
@@ -236,11 +342,13 @@ data class BottleSaleCostLine(
 )
 
 /**
- * Complete Daily / Weekly / Monthly Profit & Loss Dashboard Report
- * - Excludes bottle purchasing cost for multi-time-use (returnable) bottles
- * - Excludes CAPEX expenses
- * - Includes OPEX expenses (salary, maintenance, fuel, etc.)
- * - Divides monthly fixed/flexible recurring expenses per day and prorates to selected period
+ * Unified Day / Week / Month / Year Profit & Loss Dashboard Report:
+ * 1. Sales Revenue (from deliveries, net of discounts)
+ * 2. Deduct Bottle & Packaging Material Cost (using Confirmed Packet Cost per delivered unit)
+ *    -> Profit Before Operational Expenses
+ * 3. Divide Monthly Staff Salaries (auto-fetched from Staff module) & Monthly Operational Costs
+ *    (Actual if > 0 else Budget) by days in month, then allocate to selected period
+ * 4. Deduct Allocated Staff Salaries + Allocated Monthly Operational Costs -> Final Net Profit
  */
 data class CostingProfitLossReport(
     val period: CostingReportPeriod = CostingReportPeriod.DAILY,
@@ -252,11 +360,23 @@ data class CostingProfitLossReport(
     val totalDeliveries: Int = 0,
     val totalUnitsSold: Int = 0,
     val totalSalesRevenue: Double = 0.0,
+    val receivedPayments: Double = 0.0,
+    val outstandingSalesAmount: Double = 0.0,
     val singleUsePurchaseCost: Double = 0.0,
     val fillingCost: Double = 0.0,
     val packingCost: Double = 0.0,
     val otherBottleUnitCost: Double = 0.0,
     val totalBottleAndPackingCost: Double = 0.0,
+    val profitBeforeOperationalCosts: Double = 0.0,
+    val activeStaffCount: Int = 0,
+    val monthlyStaffSalariesTotal: Double = 0.0,
+    val dailyStaffSalaryRate: Double = 0.0,
+    val allocatedStaffSalaryCost: Double = 0.0,
+    val monthlyOperationalCostsTotal: Double = 0.0,
+    val dailyOperationalCostRate: Double = 0.0,
+    val allocatedOperationalCost: Double = 0.0,
+    val totalOperationalAndStaffCost: Double = 0.0,
+    val operationalCostBreakdown: List<OperationalCostBreakdownItem> = emptyList(),
     val opexExpenses: Double = 0.0,
     val excludedCapexExpenses: Double = 0.0,
     val monthlyRecurringTotal: Double = 0.0,

@@ -223,7 +223,12 @@ fun CustomerDetailScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        Text("Address: ${currentCust.address.ifBlank { "—" }} (${currentCust.area.ifBlank { "—" }})", fontSize = 11.5.sp, color = TextPrimaryDark, fontWeight = FontWeight.Medium)
+                        val distanceSuffix = if (currentCust.distanceKm > 0.0) {
+                            val kmStr = if (currentCust.distanceKm % 1.0 == 0.0) currentCust.distanceKm.toInt().toString()
+                            else String.format(Locale.ENGLISH, "%.2f", currentCust.distanceKm).trimEnd('0').trimEnd('.')
+                            " • Distance: $kmStr km"
+                        } else ""
+                        Text("Address: ${currentCust.address.ifBlank { "—" }} (${currentCust.area.ifBlank { "—" }})$distanceSuffix", fontSize = 11.5.sp, color = TextPrimaryDark, fontWeight = FontWeight.Medium)
                         Text("Payment Cycle: ${currentCust.paymentCycle.label} • Phone: ${currentCust.phone.ifBlank { "—" }}", fontSize = 10.5.sp, color = TextSecondaryDark)
                         Text("Bottles with Customer: ${currentCust.emptyBottlesOwed} bottles", fontSize = 10.5.sp, color = WaterBlueDeep, fontWeight = FontWeight.Bold)
                         if (currentCust.lastEditedAt > 0L && currentCust.lastEditedBy.isNotBlank()) {

@@ -27,6 +27,11 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
+/**
+ * Unified Profit & Loss + Financial Report Dashboard (Section 1 of Costing Module).
+ * Supports Day / Week / Month / Year filters with detailed financial breakdown below.
+ * Note: Sold Bottle Breakdown has been intentionally removed per specification.
+ */
 @Composable
 fun CostingProfitLossDashboard(
     selectedPeriod: CostingReportPeriod,
@@ -38,7 +43,7 @@ fun CostingProfitLossDashboard(
 ) {
     val context = LocalContext.current
     val todayStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
-    var showBreakdown by remember { mutableStateOf(true) }
+    var showOpBreakdown by remember { mutableStateOf(true) }
 
     fun shiftDate(step: Int) {
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -52,6 +57,7 @@ fun CostingProfitLossDashboard(
             CostingReportPeriod.DAILY -> cal.add(Calendar.DAY_OF_YEAR, step)
             CostingReportPeriod.WEEKLY -> cal.add(Calendar.DAY_OF_YEAR, step * 7)
             CostingReportPeriod.MONTHLY -> cal.add(Calendar.MONTH, step)
+            CostingReportPeriod.YEARLY -> cal.add(Calendar.YEAR, step)
         }
         onReferenceDateChanged(sdf.format(cal.time))
     }
@@ -59,6 +65,11 @@ fun CostingProfitLossDashboard(
     val isProfit = report.netProfitOrLoss >= 0.0
     val netAccent = if (isProfit) SuccessGreen else ErrorRed
     val netBg = if (isProfit) SuccessGreenLight else ErrorRedLight
+    val staffAndOpTotal = if (report.totalOperationalAndStaffCost > 0.0 || report.activeStaffCount > 0 || report.monthlyOperationalCostsTotal > 0.0) {
+        report.totalOperationalAndStaffCost
+    } else {
+        report.opexExpenses + report.proratedMonthlyFixedCost
+    }
 
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -80,13 +91,13 @@ fun CostingProfitLossDashboard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Profit & Loss Dashboard",
+                        text = "Profit & Loss Financial Dashboard",
                         fontWeight = FontWeight.ExtraBold,
                         fontSize = 13.5.sp,
                         color = WaterNavyPrimary
                     )
                     Text(
-                        text = "روزانہ، ہفتہ وار اور ماہانہ نفع و نقصان کا مکمل حساب",
+                        text = "روزانہ، ہفتہ وار، ماہانہ اور سالانہ مالیاتی رپورٹ و نفع نقصان",
                         fontSize = 10.sp,
                         color = TextSecondaryDark
                     )
@@ -98,6 +109,7 @@ fun CostingProfitLossDashboard(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { onReferenceDateChanged(todayStr) }
+                            .testTag("pnl_reset_today_btn")
                     ) {
                         Text(
                             text = "Today",
@@ -110,7 +122,7 @@ fun CostingProfitLossDashboard(
                 }
             }
 
-            // Segmented Period Selector (Daily / Weekly / Monthly)
+            // Segmented Period Selector (Day / Week / Month / Year)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -129,7 +141,7 @@ fun CostingProfitLossDashboard(
                             .clickable { onPeriodSelected(period) }
                     ) {
                         Column(
-                            modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+                            modifier = Modifier.padding(vertical = 6.dp, horizontal = 3.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
@@ -137,12 +149,14 @@ fun CostingProfitLossDashboard(
                                 text = period.label,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (selected) Color.White else WaterNavyPrimary
+                                color = if (selected) Color.White else WaterNavyPrimary,
+                                maxLines = 1
                             )
                             Text(
                                 text = period.urduLabel,
-                                fontSize = 9.sp,
-                                color = if (selected) WaterCyanBright else TextSecondaryDark
+                                fontSize = 8.5.sp,
+                                color = if (selected) WaterCyanBright else TextSecondaryDark,
+                                maxLines = 1
                             )
                         }
                     }
@@ -164,7 +178,9 @@ fun CostingProfitLossDashboard(
                 ) {
                     IconButton(
                         onClick = { shiftDate(-1) },
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("pnl_prev_period_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.ChevronLeft,
@@ -175,19 +191,21 @@ fun CostingProfitLossDashboard(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
                             text = report.periodLabel,
-                            fontSize = 11.sp,
+                            fontSize = 11.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = WaterNavyPrimary
                         )
                         Text(
-                            text = "${report.totalDeliveries} deliveries • ${report.totalUnitsSold} units sold",
+                            text = "${report.totalDeliveries} deliveries • ${report.totalUnitsSold} units • ${report.daysInPeriod}d",
                             fontSize = 9.5.sp,
                             color = TextSecondaryDark
                         )
                     }
                     IconButton(
                         onClick = { shiftDate(1) },
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("pnl_next_period_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.ChevronRight,
@@ -198,7 +216,7 @@ fun CostingProfitLossDashboard(
                 }
             }
 
-            // Hero Net Profit / Loss Banner
+            // Hero Final Net Profit / Loss Banner
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = netBg,
@@ -214,15 +232,15 @@ fun CostingProfitLossDashboard(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (isProfit) "NET PROFIT (خالص منافع)" else "NET LOSS (خالص نقصان)",
+                                text = if (isProfit) "FINAL NET PROFIT (خالص منافع)" else "FINAL NET LOSS (خالص نقصان)",
                                 fontSize = 10.5.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = netAccent
                             )
                             Text(
-                                text = "Sales Rs. ${formatPnlAmount(report.totalSalesRevenue)} − Cost Rs. ${formatPnlAmount(report.totalCost)}",
+                                text = "Sales Rs. ${formatPnlAmount(report.totalSalesRevenue)} − Total Cost Rs. ${formatPnlAmount(report.totalCost)}",
                                 fontSize = 9.5.sp,
                                 color = TextSecondaryDark
                             )
@@ -235,34 +253,33 @@ fun CostingProfitLossDashboard(
                         )
                     }
 
-                    // Active Accounting Rules Strip
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        PnlRuleChip("Multi-Use Purchase: Rs. 0")
-                        PnlRuleChip("CAPEX Excluded")
-                        PnlRuleChip("Fixed ÷ ${report.daysInReferenceMonth}d")
+                        PnlRuleChip("Auto Staff: ${report.activeStaffCount}")
+                        PnlRuleChip("Actual > Budget")
+                        PnlRuleChip("Daily Share ÷ ${report.daysInReferenceMonth}d")
                     }
                 }
             }
 
-            // 4 KPI Summary Cards
+            // 4 KPI Summary Cards (2x2 Grid)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FinancialKpiCard(
                     title = "Sales Revenue",
-                    urdu = "کل فروخت",
+                    urdu = "وصول: Rs. ${formatPnlAmount(report.receivedPayments)}",
                     amount = "Rs. ${formatPnlAmount(report.totalSalesRevenue)}",
                     color = WaterBlueDeep,
                     bg = WaterSkyLight,
                     modifier = Modifier.weight(1f)
                 )
                 FinancialKpiCard(
-                    title = "Bottle + Packing",
-                    urdu = "بوتل، فلنگ و پیکنگ",
+                    title = "Bottle Material Cost",
+                    urdu = "پیکٹ / بوتل لاگت",
                     amount = "Rs. ${formatPnlAmount(report.totalBottleAndPackingCost)}",
                     color = WarningOrange,
                     bg = WarningAmberLight,
@@ -274,98 +291,174 @@ fun CostingProfitLossDashboard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val preOpPositive = report.profitBeforeOperationalCosts >= 0.0
                 FinancialKpiCard(
-                    title = "OPEX Expenses",
-                    urdu = "روزمرہ اخراجات (CAPEX نکال کر)",
-                    amount = "Rs. ${formatPnlAmount(report.opexExpenses)}",
-                    color = ErrorRed,
-                    bg = ErrorRedLight,
+                    title = "Profit Before OpEx",
+                    urdu = "مٹیریل لاگت کے بعد منافع",
+                    amount = "${if (preOpPositive) "" else "-"}Rs. ${formatPnlAmount(abs(report.profitBeforeOperationalCosts))}",
+                    color = if (preOpPositive) SuccessGreen else ErrorRed,
+                    bg = if (preOpPositive) SuccessGreenLight else ErrorRedLight,
                     modifier = Modifier.weight(1f)
                 )
                 FinancialKpiCard(
-                    title = "Monthly Fixed Share",
-                    urdu = "Rs. ${formatPnlAmount(report.dailyFixedCostRate)}/دن × ${report.daysInPeriod} دن",
-                    amount = "Rs. ${formatPnlAmount(report.proratedMonthlyFixedCost)}",
+                    title = "Staff + Op Costs",
+                    urdu = "تنخواہیں + ماہانہ اخراجات",
+                    amount = "Rs. ${formatPnlAmount(staffAndOpTotal)}",
                     color = WaterNavyPrimary,
                     bg = Color(0xFFEFF6FF),
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            // Full Transparent Cost Formula Breakdown
+            // Detailed Financial Breakdown Card
             Surface(
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(12.dp),
                 color = Color(0xFFF8FAFC),
+                border = BorderStroke(1.dp, BorderLight),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
                     Text(
-                        text = "Cost & Profit Calculation Breakdown",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
+                        text = "Detailed Financial Breakdown (${selectedPeriod.label})",
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 11.5.sp,
                         color = WaterNavyPrimary
                     )
+
+                    // Sales & Collections Block
                     ReportRow(
                         label = "Sales Revenue (${report.totalDeliveries} deliveries)",
                         value = "Rs. ${formatPnlAmount(report.totalSalesRevenue)}",
                         isPositive = true
                     )
-                    HorizontalDivider(color = Color(0xFFE2E8F0))
                     ReportRow(
-                        label = "Single-Use Bottle Purchase (Multi-Use = Rs. 0)",
-                        value = "- Rs. ${formatPnlAmount(report.singleUsePurchaseCost)}"
+                        label = "Received Payments (Cash & Online)",
+                        value = "Rs. ${formatPnlAmount(report.receivedPayments)}"
                     )
-                    ReportRow(
-                        label = "Bottle Filling Cost",
-                        value = "- Rs. ${formatPnlAmount(report.fillingCost)}"
-                    )
-                    ReportRow(
-                        label = "Packing Cost (Single / Packet / Carton)",
-                        value = "- Rs. ${formatPnlAmount(report.packingCost)}"
-                    )
-                    if (report.otherBottleUnitCost > 0.0) {
+                    if (report.outstandingSalesAmount > 0.0) {
                         ReportRow(
-                            label = "Extra Bottle Costs (Cap/Label/Labour/Delivery)",
-                            value = "- Rs. ${formatPnlAmount(report.otherBottleUnitCost)}"
+                            label = "Pending Receivable Balance",
+                            value = "Rs. ${formatPnlAmount(report.outstandingSalesAmount)}",
+                            isAlert = true
                         )
                     }
+
+                    HorizontalDivider(color = Color(0xFFE2E8F0))
+
+                    // Step 1: Bottle Material Cost -> Profit Before OpEx
                     ReportRow(
-                        label = "OPEX Expenses (Salary, Maintenance, Fuel, etc.)",
-                        value = "- Rs. ${formatPnlAmount(report.opexExpenses)}"
+                        label = "Bottle & Packaging Material Cost",
+                        value = "- Rs. ${formatPnlAmount(report.totalBottleAndPackingCost)}"
                     )
                     ReportRow(
-                        label = "Monthly Fixed Share (Rs. ${formatPnlAmount(report.monthlyRecurringTotal)} ÷ ${report.daysInReferenceMonth} × ${report.daysInPeriod}d)",
-                        value = "- Rs. ${formatPnlAmount(report.proratedMonthlyFixedCost)}"
+                        label = "Profit Before Operational Expenses",
+                        value = "${if (report.profitBeforeOperationalCosts >= 0.0) "" else "-"}Rs. ${formatPnlAmount(abs(report.profitBeforeOperationalCosts))}",
+                        isBold = true,
+                        isPositive = report.profitBeforeOperationalCosts >= 0.0,
+                        isAlert = report.profitBeforeOperationalCosts < 0.0
                     )
-                    if (report.excludedCapexExpenses > 0.0) {
+
+                    HorizontalDivider(color = Color(0xFFE2E8F0))
+
+                    // Step 2: Allocated Staff Salaries & Monthly Operational Costs
+                    ReportRow(
+                        label = "Auto Staff Salaries (${report.activeStaffCount} staff • Rs. ${formatPnlAmount(report.dailyStaffSalaryRate)}/d)",
+                        value = "- Rs. ${formatPnlAmount(report.allocatedStaffSalaryCost)}"
+                    )
+                    ReportRow(
+                        label = "Monthly Operational Costs (Rs. ${formatPnlAmount(report.dailyOperationalCostRate)}/d)",
+                        value = "- Rs. ${formatPnlAmount(report.allocatedOperationalCost)}"
+                    )
+
+                    // 6-Item Operational Cost Breakdown (Actual vs Budget indicator)
+                    if (report.operationalCostBreakdown.isNotEmpty()) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { showOpBreakdown = !showOpBreakdown }
+                                .padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "CAPEX Expenses (Excluded from P&L)",
-                                fontSize = 10.sp,
-                                color = TextMuted
+                                text = "Operational Cost Details (${report.operationalCostBreakdown.size} items)",
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = WaterBlueDeep
                             )
-                            Text(
-                                text = "Rs. ${formatPnlAmount(report.excludedCapexExpenses)} (Excluded)",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextMuted
+                            Icon(
+                                imageVector = if (showOpBreakdown) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = "Toggle operational cost details",
+                                tint = WaterBlueDeep,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
+
+                        if (showOpBreakdown) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                report.operationalCostBreakdown.forEach { item ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text(
+                                                text = "• ${item.label}",
+                                                fontSize = 9.5.sp,
+                                                color = TextSecondaryDark,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (item.effectiveMonthlyAmount > 0.0) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = if (item.isUsingActual) SuccessGreenLight else Color(0xFFE2E8F0)
+                                                ) {
+                                                    Text(
+                                                        text = if (item.isUsingActual) "Actual" else "Budget",
+                                                        fontSize = 7.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (item.isUsingActual) SuccessGreen else TextSecondaryDark,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Text(
+                                            text = "Rs. ${formatPnlAmount(item.allocatedPeriodAmount)}",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = TextPrimaryDark
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
+
                     HorizontalDivider(color = Color(0xFFE2E8F0))
+
                     ReportRow(
                         label = "Total Period Cost",
                         value = "Rs. ${formatPnlAmount(report.totalCost)}",
                         isBold = true
                     )
                     ReportRow(
-                        label = if (isProfit) "Net Profit (${selectedPeriod.label})" else "Net Loss (${selectedPeriod.label})",
+                        label = if (isProfit) "Final Net Profit (${selectedPeriod.label})" else "Final Net Loss (${selectedPeriod.label})",
                         value = "${if (isProfit) "+" else "-"}Rs. ${formatPnlAmount(abs(report.netProfitOrLoss))}",
                         isBold = true,
                         isPositive = isProfit,
@@ -374,186 +467,49 @@ fun CostingProfitLossDashboard(
                 }
             }
 
-            // Sold Bottles Cost Breakdown
-            if (report.bottleBreakdown.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showBreakdown = !showBreakdown },
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Sold Bottles Cost Breakdown (${report.bottleBreakdown.size})",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        color = WaterNavyPrimary
-                    )
-                    Icon(
-                        imageVector = if (showBreakdown) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = "Toggle Breakdown",
-                        tint = WaterNavyPrimary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                if (showBreakdown) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        report.bottleBreakdown.forEach { line ->
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFF8FAFC),
-                                border = BorderStroke(1.dp, BorderLight),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text(
-                                                text = line.bottleName,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = WaterNavyPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Surface(
-                                                shape = RoundedCornerShape(4.dp),
-                                                color = WaterNavyPrimary.copy(alpha = 0.1f)
-                                            ) {
-                                                Text(
-                                                    text = line.packingType.shortLabel,
-                                                    fontSize = 8.5.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = WaterNavyPrimary,
-                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                                )
-                                            }
-                                            if (line.isMultiTimeUse) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(4.dp),
-                                                    color = SuccessGreenLight
-                                                ) {
-                                                    Text(
-                                                        text = "Multi-Use",
-                                                        fontSize = 8.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = SuccessGreen,
-                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        Text(
-                                            text = "${line.unitsSold} sold",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = WaterBlueDeep
-                                        )
-                                    }
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = "Sale: Rs. ${formatPnlAmount(line.revenue)}",
-                                            fontSize = 9.5.sp,
-                                            color = TextSecondaryDark
-                                        )
-                                        Text(
-                                            text = "Cost: Rs. ${formatPnlAmount(line.totalProductionCost)}",
-                                            fontSize = 9.5.sp,
-                                            color = ErrorRed
-                                        )
-                                        Text(
-                                            text = "Margin: Rs. ${formatPnlAmount(line.grossMargin)}",
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (line.grossMargin >= 0) SuccessGreen else ErrorRed
-                                        )
-                                    }
-
-                                    if (!line.hasConfiguredCosting) {
-                                        Text(
-                                            text = "Tip: Add costing rate below for exact ${line.packingType.label.lowercase()} filling & packing cost.",
-                                            fontSize = 8.5.sp,
-                                            color = WarningOrange
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFFF8FAFC),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "No deliveries recorded in ${report.periodLabel}. Fixed & OPEX costs are still reflected above.",
-                        fontSize = 10.sp,
-                        color = TextMuted,
-                        modifier = Modifier.padding(10.dp)
-                    )
-                }
-            }
-
-            // Share P&L Report
-            OutlinedButton(
+            // Share Unified Profit & Loss Report
+            Button(
                 onClick = {
                     val shareText = buildString {
                         appendLine("💧 *Aab-e-Baraan RO Plant - ${selectedPeriod.label} Profit & Loss* 💧")
-                        appendLine("📅 *Period:* ${report.periodLabel}")
+                        appendLine("📅 *Period:* ${report.periodLabel} (${report.daysInPeriod}d)")
                         appendLine("────────────────────────")
                         appendLine("💰 *Sales Revenue:* Rs. ${formatPnlAmount(report.totalSalesRevenue)} (${report.totalDeliveries} deliveries)")
-                        appendLine("🧴 *Single-Use Bottle Purchase:* Rs. ${formatPnlAmount(report.singleUsePurchaseCost)} (Multi-Use Excluded)")
-                        appendLine("🚰 *Filling Cost:* Rs. ${formatPnlAmount(report.fillingCost)}")
-                        appendLine("📦 *Packing Cost:* Rs. ${formatPnlAmount(report.packingCost)}")
-                        if (report.otherBottleUnitCost > 0.0) {
-                            appendLine("🏷️ *Other Bottle Costs:* Rs. ${formatPnlAmount(report.otherBottleUnitCost)}")
+                        appendLine("💵 *Received Payments:* Rs. ${formatPnlAmount(report.receivedPayments)}")
+                        if (report.outstandingSalesAmount > 0.0) {
+                            appendLine("⏳ *Pending Receivable:* Rs. ${formatPnlAmount(report.outstandingSalesAmount)}")
                         }
-                        appendLine("⚙️ *OPEX Expenses:* Rs. ${formatPnlAmount(report.opexExpenses)} (CAPEX Excluded)")
-                        appendLine("🏢 *Monthly Fixed Share:* Rs. ${formatPnlAmount(report.proratedMonthlyFixedCost)} (Rs. ${formatPnlAmount(report.dailyFixedCostRate)}/day × ${report.daysInPeriod}d)")
                         appendLine("────────────────────────")
-                        appendLine("📉 *Total Cost:* Rs. ${formatPnlAmount(report.totalCost)}")
+                        appendLine("📦 *Bottle & Packaging Cost:* -Rs. ${formatPnlAmount(report.totalBottleAndPackingCost)}")
+                        appendLine("📊 *Profit Before OpEx:* Rs. ${formatPnlAmount(report.profitBeforeOperationalCosts)}")
+                        appendLine("👷 *Staff Salaries Share (${report.activeStaffCount} staff):* -Rs. ${formatPnlAmount(report.allocatedStaffSalaryCost)}")
+                        appendLine("🏢 *Monthly Operational Share:* -Rs. ${formatPnlAmount(report.allocatedOperationalCost)}")
+                        appendLine("────────────────────────")
+                        appendLine("📉 *Total Period Cost:* Rs. ${formatPnlAmount(report.totalCost)}")
                         appendLine(
-                            if (isProfit) "📈 *NET PROFIT:* +Rs. ${formatPnlAmount(report.netProfitOrLoss)}"
-                            else "📉 *NET LOSS:* -Rs. ${formatPnlAmount(abs(report.netProfitOrLoss))}"
+                            if (isProfit) "📈 *FINAL NET PROFIT:* +Rs. ${formatPnlAmount(report.netProfitOrLoss)}"
+                            else "📉 *FINAL NET LOSS:* -Rs. ${formatPnlAmount(abs(report.netProfitOrLoss))}"
                         )
                     }
                     val sendIntent = Intent(Intent.ACTION_SEND).apply {
                         putExtra(Intent.EXTRA_TEXT, shareText)
                         type = "text/plain"
                     }
-                    context.startActivity(Intent.createChooser(sendIntent, "Share ${selectedPeriod.label} P&L Report"))
+                    context.startActivity(Intent.createChooser(sendIntent, "Share ${selectedPeriod.label} Profit & Loss"))
                 },
+                colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen, contentColor = Color.White),
                 shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(1.dp, WaterNavyPrimary.copy(alpha = 0.35f)),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .defaultMinSize(minHeight = 44.dp)
+                    .defaultMinSize(minHeight = 46.dp)
+                    .testTag("share_pnl_report_btn")
             ) {
-                Icon(Icons.Default.Share, contentDescription = null, tint = WaterNavyPrimary, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Share ${selectedPeriod.label} Profit & Loss Report",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = WaterNavyPrimary
+                    text = "Share ${selectedPeriod.label} Financial Report",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -578,7 +534,7 @@ private fun PnlRuleChip(text: String) {
     }
 }
 
-private fun formatPnlAmount(value: Double): String {
+internal fun formatPnlAmount(value: Double): String {
     return if (abs(value - value.toLong().toDouble()) < 0.01) {
         String.format(Locale.ENGLISH, "%,d", value.toLong())
     } else {

@@ -50,6 +50,7 @@ data class PlantBackupData(
     val materialTransactions: List<MaterialTransaction> = emptyList(),
     val bottleCostings: List<BottleCostingRecord> = emptyList(),
     val monthlyRecurringExpenses: List<MonthlyRecurringExpense> = emptyList(),
+    val monthlyOperationalCosts: List<MonthlyOperationalCostRecord> = emptyList(),
     val plantWorkers: List<PlantWorker> = emptyList()
 )
 

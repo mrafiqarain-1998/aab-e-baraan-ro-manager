@@ -194,6 +194,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
     private val _monthlyRecurringExpenses = MutableStateFlow<List<MonthlyRecurringExpense>>(SampleData.initialMonthlyRecurringExpenses)
     val monthlyRecurringExpenses: StateFlow<List<MonthlyRecurringExpense>> = _monthlyRecurringExpenses.asStateFlow()
 
+    private val _monthlyOperationalCosts = MutableStateFlow<List<MonthlyOperationalCostRecord>>(emptyList())
+    val monthlyOperationalCosts: StateFlow<List<MonthlyOperationalCostRecord>> = _monthlyOperationalCosts.asStateFlow()
+
     private val _plantWorkers = MutableStateFlow<List<PlantWorker>>(emptyList())
     val plantWorkers: StateFlow<List<PlantWorker>> = _plantWorkers.asStateFlow()
 
@@ -735,6 +738,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
             _materialTransactions.value = emptyList()
             _bottleCostings.value = emptyList()
             _monthlyRecurringExpenses.value = emptyList()
+            _monthlyOperationalCosts.value = emptyList()
+            storage.saveMonthlyOperationalCosts(emptyList())
             storage.saveDeliveries(emptyList())
             storage.saveExpenses(emptyList())
             storage.saveInvoices(emptyList())
@@ -2110,8 +2115,68 @@ class WaterPlantRepository private constructor(private val context: Context) {
         return _customerRates.value.filter { it.customerId == customerId && it.isAssigned }
     }
 
+    /**
+     * Normalizes any bottle size or pack variant rate key into a canonical (baseSizeId|CONTAINER) signature
+     * so equivalent keys like "size_500ml_carton_24" and "size_500ml__24_CARTON" ALWAYS map to the same rate.
+     */
+    private fun canonicalRateSignature(rawKey: String, displayName: String = ""): String {
+        val trimmed = rawKey.trim()
+        if (trimmed.isBlank()) return ""
+        val lowerKey = trimmed.lowercase(Locale.ENGLISH)
+        val lowerAll = "$lowerKey ${displayName.lowercase(Locale.ENGLISH)}"
+
+        val container = when {
+            lowerAll.contains("carton") -> "CARTON"
+            lowerAll.contains("packet") -> "PACKET"
+            else -> "SINGLE"
+        }
+
+        // Match longest active/known bottle size ID prefix first
+        val matchedSizeId = _bottleSizes.value
+            .map { it.id }
+            .filter { it.isNotBlank() && (trimmed == it || trimmed.startsWith("${it}_")) }
+            .maxByOrNull { it.length }
+
+        val baseSizeId = when {
+            matchedSizeId != null -> matchedSizeId
+            trimmed.contains("__") -> trimmed.substringBefore("__")
+            lowerKey.contains("_carton_") -> trimmed.substring(0, lowerKey.indexOf("_carton_"))
+            lowerKey.contains("_packet_") -> trimmed.substring(0, lowerKey.indexOf("_packet_"))
+            lowerKey.contains("_single_") -> trimmed.substring(0, lowerKey.indexOf("_single_"))
+            else -> trimmed
+        }
+        return "$baseSizeId|$container"
+    }
+
+    /**
+     * Authoritative lookup for a customer's rate for a given bottle size / pack variant.
+     * Matches both exact rateKey AND canonical aliases (e.g., size_500ml_carton_24 <-> size_500ml__24_CARTON),
+     * always preferring the most recently updated record if duplicate documents exist.
+     */
+    fun findCustomerRate(
+        customerId: String,
+        bottleSizeId: String,
+        assignedOnly: Boolean = false
+    ): CustomerRate? {
+        val targetSig = canonicalRateSignature(bottleSizeId)
+        val candidates = _customerRates.value.filter { r ->
+            r.customerId == customerId &&
+                (!assignedOnly || r.isAssigned) &&
+                (r.bottleSizeId == bottleSizeId ||
+                    (targetSig.isNotBlank() && canonicalRateSignature(r.bottleSizeId, r.bottleSizeName) == targetSig))
+        }
+        if (candidates.isEmpty()) return null
+        if (candidates.size == 1) return candidates.first()
+
+        return candidates.maxWithOrNull(
+            compareBy<CustomerRate> { it.rateHistory.maxOfOrNull { h -> h.timestamp } ?: 0L }
+                .thenBy { it.appliedDate }
+                .thenBy { if (it.bottleSizeId == bottleSizeId) 1 else 0 }
+        )
+    }
+
     fun getCustomerPrice(customerId: String, bottleSizeId: String): Double {
-        val customRate = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId && it.isAssigned }
+        val customRate = findCustomerRate(customerId, bottleSizeId, assignedOnly = true)
         if (customRate != null) {
             return customRate.customPrice.coerceAtLeast(0.0)
         }
@@ -2132,12 +2197,22 @@ class WaterPlantRepository private constructor(private val context: Context) {
             return
         }
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-        val effectiveDate = if (!appliedDate.isNullOrBlank()) appliedDate else todayStr
+        val effectiveDate = if (!appliedDate.isNullOrBlank()) appliedDate.trim() else todayStr
         val name = normalizeLegacyBottleName(
             bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
         )
-        val existingRate = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
-        val otherRates = _customerRates.value.filterNot { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
+        val targetSig = canonicalRateSignature(bottleSizeId, name)
+
+        // Match ALL existing exact & alias records for this customer + bottle/variant so stale duplicates are merged & purged
+        val matchingRates = _customerRates.value.filter { r ->
+            r.customerId == customerId &&
+                (r.bottleSizeId == bottleSizeId ||
+                    (targetSig.isNotBlank() && canonicalRateSignature(r.bottleSizeId, r.bottleSizeName) == targetSig))
+        }
+        val existingRate = matchingRates.find { it.bottleSizeId == bottleSizeId }
+            ?: matchingRates.maxByOrNull { it.rateHistory.maxOfOrNull { h -> h.timestamp } ?: 0L }
+        val duplicateRatesToDelete = matchingRates.filter { existingRate == null || it.id != existingRate.id }
+        val otherRates = _customerRates.value.filterNot { r -> matchingRates.any { it.id == r.id } }
 
         val newHistoryEntry = RateHistoryEntry(
             id = nextRecordId("rh"),
@@ -2150,15 +2225,17 @@ class WaterPlantRepository private constructor(private val context: Context) {
             timestamp = System.currentTimeMillis()
         )
 
-        // Deduplicate: If same-day rate change occurs, update the existing entry for today instead of creating duplicate logs
-        val oldHistory = existingRate?.rateHistory ?: emptyList()
-        val sameDayIndex = oldHistory.indexOfLast { it.appliedFromDate == effectiveDate }
+        // Prune any stale/future rateHistory entries strictly after effectiveDate so an older/outdated entry can NEVER override the new rate,
+        // and replace any existing entry on the same effectiveDate.
+        val cleanedOldHistory = (existingRate?.rateHistory ?: emptyList())
+            .filter { it.appliedFromDate.isNotBlank() && it.appliedFromDate <= effectiveDate }
+        val sameDayIndex = cleanedOldHistory.indexOfLast { it.appliedFromDate == effectiveDate }
         val updatedHistory = if (sameDayIndex >= 0) {
-            oldHistory.toMutableList().apply {
-                this[sameDayIndex] = newHistoryEntry.copy(id = oldHistory[sameDayIndex].id)
+            cleanedOldHistory.toMutableList().apply {
+                this[sameDayIndex] = newHistoryEntry.copy(id = cleanedOldHistory[sameDayIndex].id)
             }
         } else {
-            oldHistory + newHistoryEntry
+            cleanedOldHistory + newHistoryEntry
         }
 
         val newRate = CustomerRate(
@@ -2173,6 +2250,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
         )
         _customerRates.value = otherRates + newRate
         storage.saveCustomerRates(_customerRates.value)
+        duplicateRatesToDelete.forEach { dup ->
+            if (dup.id.isNotBlank()) deleteDocument("customerRates", dup.id)
+        }
         syncDocument("customerRates", newRate.id, newRate)
         addNotification("Rate Assigned", "Rate for $name set to Rs. $customPrice for customer (Applied: $effectiveDate).", NotificationSeverity.INFO)
     }
@@ -2182,10 +2262,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
             addNotification("Rate Change Restricted", "Admin has restricted changing customer rates.", NotificationSeverity.WARNING)
             return
         }
-        val existing = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
+        val targetSig = canonicalRateSignature(bottleSizeId)
+        val existing = findCustomerRate(customerId, bottleSizeId, assignedOnly = false)
         val sizeName = existing?.bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
         _customerRates.value = _customerRates.value.map {
-            if (it.customerId == customerId && it.bottleSizeId == bottleSizeId) {
+            val matches = it.customerId == customerId &&
+                (it.bottleSizeId == bottleSizeId ||
+                    (targetSig.isNotBlank() && canonicalRateSignature(it.bottleSizeId, it.bottleSizeName) == targetSig))
+            if (matches) {
                 val updated = it.copy(isAssigned = false)
                 syncDocument("customerRates", updated.id, updated)
                 updated
@@ -2200,10 +2284,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
             addNotification("Rate Change Restricted", "Admin has restricted changing customer rates.", NotificationSeverity.WARNING)
             return
         }
-        val existing = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
+        val targetSig = canonicalRateSignature(bottleSizeId)
+        val existing = findCustomerRate(customerId, bottleSizeId, assignedOnly = false)
         val sizeName = existing?.bottleSizeName ?: (_bottleSizes.value.find { it.id == bottleSizeId }?.name ?: "Bottle")
         _customerRates.value = _customerRates.value.map {
-            if (it.customerId == customerId && it.bottleSizeId == bottleSizeId) {
+            val matches = it.customerId == customerId &&
+                (it.bottleSizeId == bottleSizeId ||
+                    (targetSig.isNotBlank() && canonicalRateSignature(it.bottleSizeId, it.bottleSizeName) == targetSig))
+            if (matches) {
                 val updated = it.copy(isAssigned = true)
                 syncDocument("customerRates", updated.id, updated)
                 updated
@@ -2214,18 +2302,27 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     fun getCustomerRateForDate(customerId: String, bottleSizeId: String, deliveryDate: String): Double {
-        val customRate = _customerRates.value.find { it.customerId == customerId && it.bottleSizeId == bottleSizeId }
-        if (customRate != null && customRate.isAssigned) {
-            // Check effective-dated rate history for latest rate with appliedFromDate <= deliveryDate
-            val applicableHistory = customRate.rateHistory
-                .filter { it.appliedFromDate.isNotBlank() && it.appliedFromDate <= deliveryDate }
-                .maxByOrNull { it.appliedFromDate }
-            if (applicableHistory != null) {
-                return applicableHistory.rate.coerceAtLeast(0.0)
-            }
+        val customRate = findCustomerRate(customerId, bottleSizeId, assignedOnly = true) ?: return 0.0
+        val cleanDeliveryDate = deliveryDate.trim()
+        val cleanAppliedDate = customRate.appliedDate.trim()
+
+        // For current/on-or-after deliveries, the saved customPrice is ALWAYS authoritative —
+        // outdated or stale rateHistory entries can NEVER override the customer's saved rate.
+        if (cleanDeliveryDate.isBlank() || cleanAppliedDate.isBlank() || cleanDeliveryDate >= cleanAppliedDate) {
             return customRate.customPrice.coerceAtLeast(0.0)
         }
-        return 0.0
+
+        // Only for backdated deliveries (strictly before customRate.appliedDate), resolve historical rate
+        val applicableHistory = customRate.rateHistory
+            .filter { it.appliedFromDate.isNotBlank() && it.appliedFromDate <= cleanDeliveryDate }
+            .maxWithOrNull(
+                compareBy<RateHistoryEntry> { it.appliedFromDate }
+                    .thenBy { it.timestamp }
+            )
+        if (applicableHistory != null) {
+            return applicableHistory.rate.coerceAtLeast(0.0)
+        }
+        return customRate.customPrice.coerceAtLeast(0.0)
     }
 
     // Security Deposit Management
@@ -2586,7 +2683,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
         deliveryCharges: Double = 0.0,
         immediatePaymentAmount: Double = 0.0,
         paymentMethod: PaymentMethod = PaymentMethod.CASH,
-        deliveryDate: String? = null
+        deliveryDate: String? = null,
+        discount: Double = 0.0
     ): String {
         if (!hasPermission(AppModule.DELIVERIES, PermissionAction.ADD)) {
             return if (_currentUser.value.role == UserRole.VIEW_ONLY) {
@@ -2615,7 +2713,9 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
 
             val subtotal = sanitizedItems.sumOf { it.lineTotal }
-            val totalAmount = subtotal + deliveryCharges
+            val cleanCharges = deliveryCharges.coerceAtLeast(0.0)
+            val cleanDiscount = discount.coerceIn(0.0, subtotal + cleanCharges)
+            val totalAmount = (subtotal + cleanCharges - cleanDiscount).coerceAtLeast(0.0)
             val fullCount = sanitizedItems.sumOf { it.quantity }
             val emptyCount = sanitizedItems.sumOf { it.emptyCollected }
 
@@ -2641,7 +2741,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 assignedStaffId = "staff_incharge",
                 staffName = assignedStaffName.ifEmpty { "Supervisor" },
                 status = DeliveryStatus.DELIVERED,
-                deliveryCharges = deliveryCharges,
+                deliveryCharges = cleanCharges,
+                discount = cleanDiscount,
                 subtotal = subtotal,
                 totalAmount = totalAmount,
                 paymentCollected = immediatePaymentAmount,
@@ -2837,12 +2938,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
         method: PaymentMethod,
         manualAllocations: Map<String, Double>? = null,
         notes: String = "",
-        receivedBy: String = _currentUser.value.name
+        receivedBy: String = _currentUser.value.name,
+        paymentDate: String? = null
     ): Payment {
         if (!hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)) throw IllegalStateException("Account cannot record payments")
         synchronized(mutationLock) {
             val customer = getCustomerById(customerId) ?: throw IllegalArgumentException("Customer not found")
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            val effectivePaymentDate = paymentDate?.trim()?.takeIf { it.isNotBlank() } ?: todayStr
             val receiptNumber = "RCT-${_payments.value.size + 101}"
             val paymentId = nextRecordId("pay")
 
@@ -2962,7 +3065,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 allocations = finalAllocations,
                 advanceCredited = advanceCredited,
                 notes = notes,
-                date = todayStr,
+                date = effectivePaymentDate,
                 receivedBy = receivedBy,
                 receivedByRole = _currentUser.value.role,
                 isAcknowledged = isAdmin, // Admin auto-cleared; Staff/Supervisor starts Unsettle until Admin clears
@@ -3019,7 +3122,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
     fun markDeliveryAsPaid(
         deliveryId: String,
         amountPaid: Double? = null,
-        method: PaymentMethod = PaymentMethod.CASH
+        method: PaymentMethod = PaymentMethod.CASH,
+        paymentDate: String? = null
     ): Boolean {
         if (!hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.ADD)) return false
         synchronized(mutationLock) {
@@ -3034,9 +3138,55 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 amount = payAmount,
                 method = method,
                 manualAllocations = mapOf(key to payAmount),
-                notes = "Direct payment for delivery ${del.deliveryNumber}"
+                notes = "Direct payment for delivery ${del.deliveryNumber}",
+                paymentDate = paymentDate
             )
             return true
+        }
+    }
+
+    /**
+     * Records that the currently logged-in user viewed a Delivery or Expense transaction in detail.
+     * Persisted locally and synced to cloud so Admin can inspect the Seen By list across devices.
+     */
+    fun recordTransactionViewed(type: String, recordId: String) {
+        if (recordId.isBlank()) return
+        val user = _currentUser.value
+        val uid = user.id.ifBlank { user.uid }.ifBlank { user.username }.trim()
+        val displayName = user.name.ifBlank { user.username }.ifBlank { "User" }.trim()
+        if (uid.isBlank()) return
+
+        val now = System.currentTimeMillis()
+        synchronized(mutationLock) {
+            when (type.lowercase(Locale.ENGLISH)) {
+                "delivery" -> {
+                    val existing = _deliveries.value.find { it.id == recordId } ?: return
+                    val prevEntry = existing.viewedBy.find { it.userId == uid }
+                    // Avoid duplicate rapid writes within 30s if already recorded for this user
+                    if (prevEntry != null && (now - prevEntry.viewedAt) < 30_000L && prevEntry.userName == displayName) {
+                        return
+                    }
+                    val updatedList = existing.viewedBy.filterNot { it.userId == uid } +
+                        RecordViewEntry(userId = uid, userName = displayName, viewedAt = now)
+                    val updatedDel = existing.copy(viewedBy = updatedList)
+                    _deliveries.value = _deliveries.value.map { if (it.id == recordId) updatedDel else it }
+                    storage.saveDeliveries(_deliveries.value)
+                    syncDocument("deliveries", recordId, updatedDel)
+                }
+                "expense" -> {
+                    val existing = _expenses.value.find { it.id == recordId } ?: return
+                    val prevEntry = existing.viewedBy.find { it.userId == uid }
+                    if (prevEntry != null && (now - prevEntry.viewedAt) < 30_000L && prevEntry.userName == displayName) {
+                        return
+                    }
+                    val updatedList = existing.viewedBy.filterNot { it.userId == uid } +
+                        RecordViewEntry(userId = uid, userName = displayName, viewedAt = now)
+                    val updatedExp = existing.copy(viewedBy = updatedList)
+                    _expenses.value = _expenses.value.map { if (it.id == recordId) updatedExp else it }
+                    storage.saveExpenses(_expenses.value)
+                    syncDocument("expenses", recordId, updatedExp)
+                }
+            }
         }
     }
 
@@ -6066,10 +6216,20 @@ class WaterPlantRepository private constructor(private val context: Context) {
             ?: return Pair(false, "Bottle size not found")
 
         val isMultiUse = size.usageType == BottleUsageType.MULTIPLE_TIME || size.isReturnableBottle
-        val totalPieces = record.labelSealTotalPieces.coerceAtLeast(1)
-        val calculatedLabelCost = (record.labelSealPacketPrice / totalPieces) * record.labelSealPiecesUsedPerPack
-        val effectivePurchaseCost = if (isMultiUse) 0.0 else record.bottlePurchaseRate
-        val totalCost = effectivePurchaseCost +
+        val effectivePackQty = record.packQty.coerceAtLeast(1)
+
+        val calculatedLabelCost: Double
+        val calculatedTotal: Double
+        val effectiveConfirmedCost: Double
+        if (record.usesDetailedCosting) {
+            calculatedLabelCost = (record.labelPrice + record.sealPrice) * effectivePackQty
+            calculatedTotal = record.copy(packQty = effectivePackQty).computeDetailedPackCost()
+            effectiveConfirmedCost = if (record.confirmedPacketCost > 0.0) record.confirmedPacketCost else calculatedTotal
+        } else {
+            val totalPieces = record.labelSealTotalPieces.coerceAtLeast(1)
+            calculatedLabelCost = (record.labelSealPacketPrice / totalPieces) * record.labelSealPiecesUsedPerPack
+            val effectivePurchaseCost = if (isMultiUse) 0.0 else record.bottlePurchaseRate
+            calculatedTotal = effectivePurchaseCost +
                 record.fillingRate +
                 record.packingRate +
                 calculatedLabelCost +
@@ -6079,23 +6239,34 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 record.labourCost +
                 record.electricityCost +
                 record.deliveryCost
-        val profit = record.salePrice - totalCost
+            effectiveConfirmedCost = if (record.confirmedPacketCost > 0.0) record.confirmedPacketCost else calculatedTotal
+        }
 
-        val costingId = if (record.id.isNotBlank()) record.id else nextRecordId("cost")
+        val profit = if (record.salePrice > 0.0) record.salePrice - effectiveConfirmedCost else 0.0
+        val existingMatch = _bottleCostings.value.find {
+            (record.id.isNotBlank() && it.id == record.id) ||
+                (it.bottleSizeId == record.bottleSizeId && it.packingType == record.packingType)
+        }
+        val costingId = existingMatch?.id?.takeIf { it.isNotBlank() }
+            ?: record.id.ifBlank { nextRecordId("cost") }
+
         return withSyncAction("Bottle Costing • ${size.name} (${record.packingType.shortLabel})") {
             val finalRecord = record.copy(
                 id = costingId,
                 bottleSizeName = size.name,
                 isMultiTimeUse = isMultiUse,
+                packQty = effectivePackQty,
                 labelSealCalculatedCost = calculatedLabelCost,
-                totalCostPerPackOrBottle = totalCost,
+                calculatedPackCost = calculatedTotal,
+                confirmedPacketCost = if (record.usesDetailedCosting || record.confirmedPacketCost > 0.0) effectiveConfirmedCost else 0.0,
+                totalCostPerPackOrBottle = effectiveConfirmedCost,
                 profitPerPackOrBottle = profit,
                 date = record.date.ifBlank { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) },
-                updatedBy = _currentUser.value.name,
+                updatedBy = _currentUser.value.name.ifBlank { "Admin" },
                 timestamp = System.currentTimeMillis()
             )
 
-            // Replace matching entry by ID or (bottleSizeId + packingType) so Single, Packet, and Carton coexist!
+            // Replace matching entry by ID or (bottleSizeId + packingType) so Single, Packet, and Carton coexist separately!
             val existingIndex = _bottleCostings.value.indexOfFirst {
                 it.id == costingId || (it.bottleSizeId == record.bottleSizeId && it.packingType == record.packingType)
             }
@@ -6113,7 +6284,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             val updatedSize = size.copy(
                 purchaseCost = if (record.bottlePurchaseRate > 0.0) record.bottlePurchaseRate else size.purchaseCost,
                 latestPurchaseRate = if (record.bottlePurchaseRate > 0.0) record.bottlePurchaseRate else size.latestPurchaseRate,
-                refillCost = if (isPrimaryPack) totalCost else size.refillCost,
+                refillCost = if (isPrimaryPack) effectiveConfirmedCost else size.refillCost,
                 deliveryCost = if (isPrimaryPack && record.deliveryCost > 0.0) record.deliveryCost else size.deliveryCost,
                 defaultRefillPrice = if (isPrimaryPack && record.salePrice > 0.0) record.salePrice else size.defaultRefillPrice
             )
@@ -6123,7 +6294,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
 
             addNotification(
                 "Costing Saved",
-                "Saved ${size.name} (${record.packingType.label}): Cost Rs. ${String.format(Locale.ENGLISH, "%.2f", totalCost)}, Profit Rs. ${String.format(Locale.ENGLISH, "%.2f", profit)}.",
+                "Saved ${size.name} (${record.packingType.label}): Confirmed Cost Rs. ${String.format(Locale.ENGLISH, "%.2f", effectiveConfirmedCost)}.",
                 NotificationSeverity.SUCCESS
             )
             Pair(true, "Bottle costing saved successfully (لاگت کا تخمینہ محفوظ کر لیا گیا)")
@@ -6138,6 +6309,65 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveBottleCostings(_bottleCostings.value)
         deleteDocument("bottleCostings", costingId)
         return Pair(true, "Costing record deleted.")
+    }
+
+    /**
+     * Fetches the Monthly Operational Cost record for [month] ("YYYY-MM").
+     * If no explicit record exists for [month], carries forward Budget Amounts from the most recent
+     * saved month while keeping Actual Expenses at 0 until entered at month-end.
+     */
+    fun getMonthlyOperationalCostForMonth(month: String): MonthlyOperationalCostRecord {
+        val cleanMonth = month.ifBlank { SimpleDateFormat("yyyy-MM", Locale.US).format(Date()) }
+        val exact = _monthlyOperationalCosts.value.find { it.month == cleanMonth }
+        if (exact != null) return exact
+
+        val template = _monthlyOperationalCosts.value
+            .sortedByDescending { it.month }
+            .firstOrNull { it.month <= cleanMonth }
+            ?: _monthlyOperationalCosts.value.maxByOrNull { it.timestamp }
+
+        return if (template != null) {
+            MonthlyOperationalCostRecord(
+                id = "moc_$cleanMonth",
+                month = cleanMonth,
+                vehicleMaintenance = OperationalCostLine(budgetAmount = template.vehicleMaintenance.budgetAmount, actualAmount = 0.0),
+                roMaintenance = OperationalCostLine(budgetAmount = template.roMaintenance.budgetAmount, actualAmount = 0.0),
+                roPlantRent = OperationalCostLine(budgetAmount = template.roPlantRent.budgetAmount, actualAmount = 0.0),
+                vehicleMonthlyRent = OperationalCostLine(budgetAmount = template.vehicleMonthlyRent.budgetAmount, actualAmount = 0.0),
+                electricityBill = OperationalCostLine(budgetAmount = template.electricityBill.budgetAmount, actualAmount = 0.0),
+                otherFixedCosts = OperationalCostLine(budgetAmount = template.otherFixedCosts.budgetAmount, actualAmount = 0.0)
+            )
+        } else {
+            MonthlyOperationalCostRecord(id = "moc_$cleanMonth", month = cleanMonth)
+        }
+    }
+
+    fun saveMonthlyOperationalCost(record: MonthlyOperationalCostRecord): Pair<Boolean, String> {
+        if (!hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.EDIT) &&
+            !hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.ADD)
+        ) {
+            return Pair(false, "Security Error: Admin permission required to update Monthly Operational Costs")
+        }
+        val cleanMonth = record.month.ifBlank { SimpleDateFormat("yyyy-MM", Locale.US).format(Date()) }
+        val docId = "moc_$cleanMonth"
+        return withSyncAction("Monthly Operational Costs • $cleanMonth") {
+            val finalRecord = record.copy(
+                id = docId,
+                month = cleanMonth,
+                updatedBy = _currentUser.value.name.ifBlank { "Admin" },
+                timestamp = System.currentTimeMillis()
+            )
+            _monthlyOperationalCosts.value =
+                _monthlyOperationalCosts.value.filterNot { it.month == cleanMonth || it.id == docId } + finalRecord
+            storage.saveMonthlyOperationalCosts(_monthlyOperationalCosts.value)
+            syncDocument("monthlyOperationalCosts", docId, finalRecord)
+            addNotification(
+                "Monthly Operational Costs Saved",
+                "Saved operational costs for $cleanMonth (Effective: Rs. ${finalRecord.totalEffectiveCost.toInt()}).",
+                NotificationSeverity.SUCCESS
+            )
+            Pair(true, "Monthly operational costs saved for $cleanMonth")
+        }
     }
 
     fun addMonthlyRecurringExpense(expense: MonthlyRecurringExpense): Pair<Boolean, String> {
@@ -6177,11 +6407,14 @@ class WaterPlantRepository private constructor(private val context: Context) {
     }
 
     /**
-     * Calculates Daily / Weekly / Monthly Profit & Loss Dashboard inside Costing tab:
-     * - Bottle Purchase Cost: INCLUDED ONLY for one-time-use bottles; EXCLUDED (Rs. 0) for multi-time-use returnable bottles.
-     * - Filling & Packing Cost: Calculated per bottle/packet/carton from configured BottleCostingRecord.
-     * - Period Expenses: Includes ONLY OPEX (salary, maintenance, fuel, etc.); strictly EXCLUDES CAPEX.
-     * - Monthly Fixed/Flexible Recurring Costs: Divided by days in month and prorated (x1 Daily, x7 Weekly, full Monthly).
+     * Unified Day / Week / Month / Year Profit & Loss Dashboard Engine:
+     * 1. Deducts Bottle & Packaging Material Cost (Confirmed Packet Cost per delivered unit) from Sales Revenue
+     *    first -> Profit Before Other Operational Expenses.
+     * 2. Automatically fetches active Monthly Staff Salaries from Staff Module (_plantWorkers).
+     * 3. Fetches Monthly Operational Costs (6 categories), ALWAYS using Actual Expense when > 0 else Budget.
+     * 4. Divides monthly staff salaries & operational costs by days in month to allocate exact period share
+     *    (Day = ÷ daysInMonth, Week = × 7/daysInMonth, Month = full month, Year = sum of all 12 months).
+     * 5. Deducts period's allocated Staff Salaries + Monthly Operational Costs -> Final Net Profit.
      */
     fun getCostingProfitLossReport(
         period: CostingReportPeriod,
@@ -6213,20 +6446,28 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 startDate = d
                 endDate = d
                 daysInPeriod = 1
-                periodLabel = "Daily • $d"
+                periodLabel = "Day • $d"
             }
             CostingReportPeriod.WEEKLY -> {
                 endDate = sdf.format(cal.time)
                 val startCal = (cal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -6) }
                 startDate = sdf.format(startCal.time)
                 daysInPeriod = 7
-                periodLabel = "Weekly • $startDate to $endDate"
+                periodLabel = "Week • $startDate to $endDate"
             }
             CostingReportPeriod.MONTHLY -> {
                 startDate = "$monthKey-01"
                 endDate = String.format(Locale.US, "%s-%02d", monthKey, daysInMonth)
                 daysInPeriod = daysInMonth
-                periodLabel = "Monthly • $monthKey ($daysInMonth days)"
+                periodLabel = "Month • $monthKey ($daysInMonth days)"
+            }
+            CostingReportPeriod.YEARLY -> {
+                val yearCal = Calendar.getInstance().apply { set(Calendar.YEAR, refYear) }
+                val daysInYear = yearCal.getActualMaximum(Calendar.DAY_OF_YEAR).coerceAtLeast(365)
+                startDate = String.format(Locale.US, "%04d-01-01", refYear)
+                endDate = String.format(Locale.US, "%04d-12-31", refYear)
+                daysInPeriod = daysInYear
+                periodLabel = "Year • $refYear ($daysInYear days)"
             }
         }
 
@@ -6239,6 +6480,10 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 it.date >= startDate &&
                 it.date <= endDate
         }
+        val periodPayments = _payments.value.filter {
+            it.date.isNotBlank() && it.date >= startDate && it.date <= endDate
+        }
+        val receivedPayments = periodPayments.sumOf { it.amount }
 
         var totalUnitsSold = 0
         var totalSalesRevenue = 0.0
@@ -6246,6 +6491,8 @@ class WaterPlantRepository private constructor(private val context: Context) {
         var totalFilling = 0.0
         var totalPacking = 0.0
         var totalOtherUnitCost = 0.0
+        var totalBottleMaterialCost = 0.0
+        var usedDetailedCosting = false
 
         data class MutableLineAcc(
             val bottleSizeId: String,
@@ -6259,80 +6506,88 @@ class WaterPlantRepository private constructor(private val context: Context) {
             var fillingCostTotal: Double = 0.0,
             var packingCostTotal: Double = 0.0,
             var otherUnitCostTotal: Double = 0.0,
+            var totalProdCost: Double = 0.0,
             var hasConfiguredCosting: Boolean = true
         )
 
         val lineMap = linkedMapOf<String, MutableLineAcc>()
 
         periodDeliveries.forEach { delivery ->
-            if (delivery.items.isEmpty()) {
-                totalSalesRevenue += delivery.totalAmount
-            } else {
-                var deliveryItemsRevenue = 0.0
-                delivery.items.forEach { item ->
-                    if (item.quantity <= 0) return@forEach
-                    val packingType = resolveItemPackingType(item)
-                    val size = sizesById[item.bottleSizeId]
-                    val isMultiUse = size?.let {
-                        it.usageType == BottleUsageType.MULTIPLE_TIME || it.isReturnableBottle
-                    } ?: false
+            // Net delivery revenue ALWAYS honors delivery.totalAmount (subtotal + deliveryCharges - discount)
+            totalSalesRevenue += delivery.totalAmount
+            delivery.items.forEach { item ->
+                if (item.quantity <= 0) return@forEach
+                val packingType = resolveItemPackingType(item)
+                val size = sizesById[item.bottleSizeId]
+                val isMultiUse = size?.let {
+                    it.usageType == BottleUsageType.MULTIPLE_TIME || it.isReturnableBottle
+                } ?: false
 
-                    val matchedCosting = costings.find {
-                        it.bottleSizeId == item.bottleSizeId && it.packingType == packingType
-                    } ?: costings.find { it.bottleSizeId == item.bottleSizeId }
+                val matchedCosting = costings.find {
+                    it.bottleSizeId == item.bottleSizeId && it.packingType == packingType
+                } ?: costings.find { it.bottleSizeId == item.bottleSizeId }
 
-                    val hasCosting = matchedCosting != null
-                    val unitPurchase = if (isMultiUse) {
-                        0.0
-                    } else {
-                        matchedCosting?.bottlePurchaseRate ?: 0.0
-                    }
+                val hasCosting = matchedCosting != null
+                val qty = item.quantity
+                val lineRev = if (item.lineTotal > 0.0) item.lineTotal else (qty * item.unitPrice)
+
+                val linePurchase: Double
+                val lineFilling: Double
+                val linePacking: Double
+                val lineOther: Double
+                val lineProdCost: Double
+
+                if (matchedCosting != null && (matchedCosting.usesDetailedCosting || matchedCosting.confirmedPacketCost > 0.0)) {
+                    usedDetailedCosting = true
+                    val confirmedUnit = matchedCosting.effectiveUnitCostForPnl(isMultiUse)
+                    lineProdCost = confirmedUnit * qty
+                    linePurchase = if (isMultiUse) 0.0 else (matchedCosting.bottlePrice * matchedCosting.packQty.coerceAtLeast(1) * qty)
+                    lineFilling = matchedCosting.waterFillingCost * matchedCosting.packQty.coerceAtLeast(1) * qty
+                    linePacking = (matchedCosting.cartonCost + matchedCosting.tapeCost) * qty
+                    lineOther = (lineProdCost - linePurchase - lineFilling - linePacking).coerceAtLeast(0.0)
+                } else {
+                    val unitPurchase = if (isMultiUse) 0.0 else (matchedCosting?.bottlePurchaseRate ?: 0.0)
                     val unitFilling = matchedCosting?.fillingRate ?: (size?.refillCost ?: 0.0)
                     val unitPacking = matchedCosting?.packingRate ?: 0.0
                     val unitOther = matchedCosting?.extraComponentCost ?: 0.0
-
-                    val qty = item.quantity
-                    val lineRev = if (item.lineTotal > 0.0) item.lineTotal else (qty * item.unitPrice)
-                    val linePurchase = unitPurchase * qty
-                    val lineFilling = unitFilling * qty
-                    val linePacking = unitPacking * qty
-                    val lineOther = unitOther * qty
-
-                    deliveryItemsRevenue += lineRev
-                    totalUnitsSold += qty
-                    totalSingleUsePurchase += linePurchase
-                    totalFilling += lineFilling
-                    totalPacking += linePacking
-                    totalOtherUnitCost += lineOther
-
-                    val groupKey = "${item.bottleSizeId}__${packingType.name}"
-                    val displayName = item.bottleName.ifBlank { size?.name ?: item.bottleSizeId }
-                    val acc = lineMap.getOrPut(groupKey) {
-                        MutableLineAcc(
-                            bottleSizeId = item.bottleSizeId,
-                            bottleName = displayName,
-                            packingType = packingType,
-                            isMultiTimeUse = isMultiUse,
-                            hasConfiguredCosting = hasCosting
-                        )
-                    }
-                    acc.unitsSold += qty
-                    acc.totalBottlesSold += qty * item.packSize.coerceAtLeast(1)
-                    acc.revenue += lineRev
-                    acc.purchaseCostTotal += linePurchase
-                    acc.fillingCostTotal += lineFilling
-                    acc.packingCostTotal += linePacking
-                    acc.otherUnitCostTotal += lineOther
-                    if (!hasCosting) acc.hasConfiguredCosting = false
+                    linePurchase = unitPurchase * qty
+                    lineFilling = unitFilling * qty
+                    linePacking = unitPacking * qty
+                    lineOther = unitOther * qty
+                    lineProdCost = linePurchase + lineFilling + linePacking + lineOther
                 }
-                // Include delivery charges if billed on top of items
-                val extraCharges = (delivery.totalAmount - deliveryItemsRevenue).coerceAtLeast(0.0)
-                totalSalesRevenue += deliveryItemsRevenue + extraCharges
+
+                totalUnitsSold += qty
+                totalSingleUsePurchase += linePurchase
+                totalFilling += lineFilling
+                totalPacking += linePacking
+                totalOtherUnitCost += lineOther
+                totalBottleMaterialCost += lineProdCost
+
+                val groupKey = "${item.bottleSizeId}__${packingType.name}"
+                val displayName = item.bottleName.ifBlank { size?.name ?: item.bottleSizeId }
+                val acc = lineMap.getOrPut(groupKey) {
+                    MutableLineAcc(
+                        bottleSizeId = item.bottleSizeId,
+                        bottleName = displayName,
+                        packingType = packingType,
+                        isMultiTimeUse = isMultiUse,
+                        hasConfiguredCosting = hasCosting
+                    )
+                }
+                acc.unitsSold += qty
+                acc.totalBottlesSold += qty * item.packSize.coerceAtLeast(1)
+                acc.revenue += lineRev
+                acc.purchaseCostTotal += linePurchase
+                acc.fillingCostTotal += lineFilling
+                acc.packingCostTotal += linePacking
+                acc.otherUnitCostTotal += lineOther
+                acc.totalProdCost += lineProdCost
+                if (!hasCosting) acc.hasConfiguredCosting = false
             }
         }
 
         val breakdownLines = lineMap.values.map { acc ->
-            val prodCost = acc.purchaseCostTotal + acc.fillingCostTotal + acc.packingCostTotal + acc.otherUnitCostTotal
             BottleSaleCostLine(
                 bottleSizeId = acc.bottleSizeId,
                 bottleName = acc.bottleName,
@@ -6345,13 +6600,102 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 fillingCostTotal = acc.fillingCostTotal,
                 packingCostTotal = acc.packingCostTotal,
                 otherUnitCostTotal = acc.otherUnitCostTotal,
-                totalProductionCost = prodCost,
-                grossMargin = acc.revenue - prodCost,
+                totalProductionCost = acc.totalProdCost,
+                grossMargin = acc.revenue - acc.totalProdCost,
                 hasConfiguredCosting = acc.hasConfiguredCosting
             )
         }.sortedByDescending { it.revenue }
 
-        // Expenses in period: OPEX included, CAPEX strictly excluded!
+        // Step 2: Profit Before Other Operational Expenses
+        val profitBeforeOperationalCosts = totalSalesRevenue - totalBottleMaterialCost
+
+        // Step 3A: Auto-fetched Active Staff Salaries from Staff Module (_plantWorkers)
+        val activeWorkers = _plantWorkers.value.filter { it.active && it.monthlySalary > 0.0 }
+        val monthlyStaffSalariesTotal = activeWorkers.sumOf { it.monthlySalary }
+        val dailyStaffSalaryRate = monthlyStaffSalariesTotal / daysInMonth.toDouble()
+        val allocatedStaffSalaryCost = when (period) {
+            CostingReportPeriod.DAILY -> dailyStaffSalaryRate
+            CostingReportPeriod.WEEKLY -> dailyStaffSalaryRate * 7.0
+            CostingReportPeriod.MONTHLY -> monthlyStaffSalariesTotal
+            CostingReportPeriod.YEARLY -> monthlyStaffSalariesTotal * 12.0
+        }
+
+        // Step 3B: Monthly Operational Costs (6 categories — Actual Expense overrides Budget when > 0)
+        val opBreakdown: List<OperationalCostBreakdownItem>
+        val monthlyOperationalCostsTotal: Double
+        val dailyOperationalCostRate: Double
+        val allocatedOperationalCost: Double
+
+        if (period == CostingReportPeriod.YEARLY) {
+            val yearRecords = (1..12).map { m ->
+                getMonthlyOperationalCostForMonth(String.format(Locale.US, "%04d-%02d", refYear, m))
+            }
+            fun aggregateLine(
+                label: String,
+                urdu: String,
+                selector: (MonthlyOperationalCostRecord) -> OperationalCostLine
+            ): OperationalCostBreakdownItem {
+                val lines = yearRecords.map(selector)
+                val totalBud = lines.sumOf { it.budgetAmount }
+                val totalAct = lines.sumOf { it.actualAmount }
+                val totalEff = lines.sumOf { it.effectiveAmount }
+                return OperationalCostBreakdownItem(
+                    label = label,
+                    urduLabel = urdu,
+                    budgetAmount = totalBud,
+                    actualAmount = totalAct,
+                    effectiveMonthlyAmount = totalEff / 12.0,
+                    isUsingActual = lines.any { it.isUsingActual },
+                    allocatedPeriodAmount = totalEff
+                )
+            }
+            opBreakdown = listOf(
+                aggregateLine("Vehicle Maintenance", "گاڑی کی مرمت") { it.vehicleMaintenance },
+                aggregateLine("RO Maintenance", "آر او پلانٹ مرمت") { it.roMaintenance },
+                aggregateLine("RO Plant Rent", "آر او پلانٹ کرایہ") { it.roPlantRent },
+                aggregateLine("Vehicle Monthly Rent", "گاڑی کا ماہانہ کرایہ") { it.vehicleMonthlyRent },
+                aggregateLine("Electricity Bill", "بجلی کا بل") { it.electricityBill },
+                aggregateLine("Other Fixed Costs", "دیگر مستقل اخراجات") { it.otherFixedCosts }
+            )
+            allocatedOperationalCost = opBreakdown.sumOf { it.allocatedPeriodAmount }
+            monthlyOperationalCostsTotal = allocatedOperationalCost / 12.0
+            dailyOperationalCostRate = allocatedOperationalCost / daysInPeriod.toDouble()
+        } else {
+            val opRec = getMonthlyOperationalCostForMonth(monthKey)
+            val allocationFactor = when (period) {
+                CostingReportPeriod.DAILY -> 1.0 / daysInMonth.toDouble()
+                CostingReportPeriod.WEEKLY -> 7.0 / daysInMonth.toDouble()
+                CostingReportPeriod.MONTHLY -> 1.0
+                CostingReportPeriod.YEARLY -> 12.0
+            }
+            fun makeItem(label: String, urdu: String, line: OperationalCostLine): OperationalCostBreakdownItem {
+                val eff = line.effectiveAmount
+                return OperationalCostBreakdownItem(
+                    label = label,
+                    urduLabel = urdu,
+                    budgetAmount = line.budgetAmount,
+                    actualAmount = line.actualAmount,
+                    effectiveMonthlyAmount = eff,
+                    isUsingActual = line.isUsingActual,
+                    allocatedPeriodAmount = eff * allocationFactor
+                )
+            }
+            opBreakdown = listOf(
+                makeItem("Vehicle Maintenance", "گاڑی کی مرمت", opRec.vehicleMaintenance),
+                makeItem("RO Maintenance", "آر او پلانٹ مرمت", opRec.roMaintenance),
+                makeItem("RO Plant Rent", "آر او پلانٹ کرایہ", opRec.roPlantRent),
+                makeItem("Vehicle Monthly Rent", "گاڑی کا ماہانہ کرایہ", opRec.vehicleMonthlyRent),
+                makeItem("Electricity Bill", "بجلی کا بل", opRec.electricityBill),
+                makeItem("Other Fixed Costs", "دیگر مستقل اخراجات", opRec.otherFixedCosts)
+            )
+            monthlyOperationalCostsTotal = opRec.totalEffectiveCost
+            dailyOperationalCostRate = monthlyOperationalCostsTotal / daysInMonth.toDouble()
+            allocatedOperationalCost = monthlyOperationalCostsTotal * allocationFactor
+        }
+
+        val totalOperationalAndStaffCost = allocatedStaffSalaryCost + allocatedOperationalCost
+
+        // Legacy OPEX/CAPEX/MonthlyRecurring tracking (for informational display & backward-compat fallback)
         val periodExpenses = _expenses.value.filter {
             it.date.isNotBlank() && it.date >= startDate && it.date <= endDate
         }
@@ -6362,20 +6706,54 @@ class WaterPlantRepository private constructor(private val context: Context) {
             .filter { it.expenseType == ExpenseType.CAPEX }
             .sumOf { it.amount }
 
-        // Monthly fixed / flexible recurring expenses divided per day
-        val monthlyRecurringTotal = _monthlyRecurringExpenses.value
-            .filter { it.month == monthKey || it.date.startsWith(monthKey) }
-            .sumOf { it.amount }
-        val dailyFixedRate = monthlyRecurringTotal / daysInMonth.toDouble()
-        val proratedFixed = when (period) {
-            CostingReportPeriod.DAILY -> dailyFixedRate
-            CostingReportPeriod.WEEKLY -> dailyFixedRate * 7.0
-            CostingReportPeriod.MONTHLY -> monthlyRecurringTotal
+        val legacyMonthlyRecurringTotal = if (period == CostingReportPeriod.YEARLY) {
+            val yearPrefix = String.format(Locale.US, "%04d-", refYear)
+            _monthlyRecurringExpenses.value
+                .filter { it.month.startsWith(yearPrefix) || it.date.startsWith(yearPrefix) }
+                .sumOf { it.amount }
+        } else {
+            _monthlyRecurringExpenses.value
+                .filter { it.month == monthKey || it.date.startsWith(monthKey) }
+                .sumOf { it.amount }
+        }
+        val legacyDailyFixedRate = if (period == CostingReportPeriod.YEARLY) {
+            legacyMonthlyRecurringTotal / daysInPeriod.toDouble()
+        } else {
+            legacyMonthlyRecurringTotal / daysInMonth.toDouble()
+        }
+        val legacyProratedFixed = when (period) {
+            CostingReportPeriod.DAILY -> legacyDailyFixedRate
+            CostingReportPeriod.WEEKLY -> legacyDailyFixedRate * 7.0
+            CostingReportPeriod.MONTHLY -> legacyMonthlyRecurringTotal
+            CostingReportPeriod.YEARLY -> legacyMonthlyRecurringTotal
         }
 
-        val totalBottleAndPacking = totalSingleUsePurchase + totalFilling + totalPacking + totalOtherUnitCost
-        val totalCost = totalBottleAndPacking + opexExpenses + proratedFixed
-        val netProfitOrLoss = totalSalesRevenue - totalCost
+        // Use Redesigned Section 4 formula whenever any new costing data (10-field bottle costing, staff salaries,
+        // or 6-item monthly operational costs) is active, or when no legacy monthlyRecurringExpenses exist.
+        val usesLegacyOnlyFormula = !usedDetailedCosting &&
+            monthlyStaffSalariesTotal <= 0.0 &&
+            monthlyOperationalCostsTotal <= 0.0 &&
+            legacyMonthlyRecurringTotal > 0.0
+
+        val totalCost: Double
+        val netProfitOrLoss: Double
+        val effectiveDailyFixedRate: Double
+        val effectiveProratedFixed: Double
+        val effectiveMonthlyFixedTotal: Double
+
+        if (usesLegacyOnlyFormula) {
+            totalCost = totalBottleMaterialCost + opexExpenses + legacyProratedFixed
+            netProfitOrLoss = totalSalesRevenue - totalCost
+            effectiveDailyFixedRate = legacyDailyFixedRate
+            effectiveProratedFixed = legacyProratedFixed
+            effectiveMonthlyFixedTotal = legacyMonthlyRecurringTotal
+        } else {
+            totalCost = totalBottleMaterialCost + totalOperationalAndStaffCost
+            netProfitOrLoss = profitBeforeOperationalCosts - totalOperationalAndStaffCost
+            effectiveDailyFixedRate = dailyStaffSalaryRate + dailyOperationalCostRate
+            effectiveProratedFixed = totalOperationalAndStaffCost
+            effectiveMonthlyFixedTotal = monthlyStaffSalariesTotal + monthlyOperationalCostsTotal
+        }
 
         return CostingProfitLossReport(
             period = period,
@@ -6387,16 +6765,28 @@ class WaterPlantRepository private constructor(private val context: Context) {
             totalDeliveries = periodDeliveries.size,
             totalUnitsSold = totalUnitsSold,
             totalSalesRevenue = totalSalesRevenue,
+            receivedPayments = receivedPayments,
+            outstandingSalesAmount = (totalSalesRevenue - receivedPayments).coerceAtLeast(0.0),
             singleUsePurchaseCost = totalSingleUsePurchase,
             fillingCost = totalFilling,
             packingCost = totalPacking,
             otherBottleUnitCost = totalOtherUnitCost,
-            totalBottleAndPackingCost = totalBottleAndPacking,
+            totalBottleAndPackingCost = totalBottleMaterialCost,
+            profitBeforeOperationalCosts = profitBeforeOperationalCosts,
+            activeStaffCount = activeWorkers.size,
+            monthlyStaffSalariesTotal = monthlyStaffSalariesTotal,
+            dailyStaffSalaryRate = dailyStaffSalaryRate,
+            allocatedStaffSalaryCost = allocatedStaffSalaryCost,
+            monthlyOperationalCostsTotal = monthlyOperationalCostsTotal,
+            dailyOperationalCostRate = dailyOperationalCostRate,
+            allocatedOperationalCost = allocatedOperationalCost,
+            totalOperationalAndStaffCost = totalOperationalAndStaffCost,
+            operationalCostBreakdown = opBreakdown,
             opexExpenses = opexExpenses,
             excludedCapexExpenses = excludedCapex,
-            monthlyRecurringTotal = monthlyRecurringTotal,
-            dailyFixedCostRate = dailyFixedRate,
-            proratedMonthlyFixedCost = proratedFixed,
+            monthlyRecurringTotal = effectiveMonthlyFixedTotal,
+            dailyFixedCostRate = effectiveDailyFixedRate,
+            proratedMonthlyFixedCost = effectiveProratedFixed,
             totalCost = totalCost,
             netProfitOrLoss = netProfitOrLoss,
             bottleBreakdown = breakdownLines
@@ -6659,8 +7049,18 @@ class WaterPlantRepository private constructor(private val context: Context) {
         val computedTotalFull = sanitizedNewItems.sumOf { it.quantity }
         val computedTotalEmpty = sanitizedNewItems.sumOf { it.emptyCollected }
         if (computedTotalFull <= 0 && updatedDelivery.items.isNotEmpty()) return@synchronized false
-        if (updatedDelivery.totalAmount < 0.0 || updatedDelivery.paymentCollected < 0.0) return@synchronized false
-        if (updatedDelivery.paymentCollected > updatedDelivery.totalAmount + 0.01) return@synchronized false
+
+        val cleanSubtotal = if (sanitizedNewItems.isNotEmpty()) sanitizedNewItems.sumOf { it.lineTotal } else updatedDelivery.subtotal
+        val cleanCharges = updatedDelivery.deliveryCharges.coerceAtLeast(0.0)
+        val cleanDiscount = updatedDelivery.discount.coerceIn(0.0, cleanSubtotal + cleanCharges)
+        val computedTotalAmount = if (sanitizedNewItems.isNotEmpty()) {
+            (cleanSubtotal + cleanCharges - cleanDiscount).coerceAtLeast(0.0)
+        } else {
+            updatedDelivery.totalAmount.coerceAtLeast(0.0)
+        }
+
+        if (computedTotalAmount < 0.0 || updatedDelivery.paymentCollected < 0.0) return@synchronized false
+        if (updatedDelivery.paymentCollected > computedTotalAmount + 0.01) return@synchronized false
 
         val diffParts = mutableListOf<String>()
         if (old.date != updatedDelivery.date && updatedDelivery.date.isNotBlank()) {
@@ -6672,8 +7072,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
         if (old.totalEmptyCollected != computedTotalEmpty) {
             diffParts.add("Empty Ret: ${old.totalEmptyCollected} → $computedTotalEmpty")
         }
-        if (kotlin.math.abs(old.totalAmount - updatedDelivery.totalAmount) > 0.01) {
-            diffParts.add("Bill: Rs.${old.totalAmount.toInt()} → Rs.${updatedDelivery.totalAmount.toInt()}")
+        if (kotlin.math.abs(old.discount - cleanDiscount) > 0.01) {
+            diffParts.add("Discount: Rs.${old.discount.toInt()} → Rs.${cleanDiscount.toInt()}")
+        }
+        if (kotlin.math.abs(old.totalAmount - computedTotalAmount) > 0.01) {
+            diffParts.add("Bill: Rs.${old.totalAmount.toInt()} → Rs.${computedTotalAmount.toInt()}")
         }
         if (kotlin.math.abs(old.paymentCollected - updatedDelivery.paymentCollected) > 0.01) {
             diffParts.add("Paid: Rs.${old.paymentCollected.toInt()} → Rs.${updatedDelivery.paymentCollected.toInt()}")
@@ -6695,6 +7098,11 @@ class WaterPlantRepository private constructor(private val context: Context) {
             items = sanitizedNewItems,
             totalFullDelivered = computedTotalFull,
             totalEmptyCollected = computedTotalEmpty,
+            subtotal = cleanSubtotal,
+            deliveryCharges = cleanCharges,
+            discount = cleanDiscount,
+            totalAmount = computedTotalAmount,
+            viewedBy = old.viewedBy,
             lastEditedAt = System.currentTimeMillis(),
             lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username },
             lastEditNote = combinedEditNote
@@ -6878,23 +7286,23 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.saveBottleIssueSales(_bottleIssueSales.value)
 
         // 3. Update Invoice if linked
-        if (updatedDelivery.invoiceId.isNotEmpty()) {
-            val oldInv = _invoices.value.find { it.id == updatedDelivery.invoiceId }
+        if (normalizedUpdatedDelivery.invoiceId.isNotEmpty()) {
+            val oldInv = _invoices.value.find { it.id == normalizedUpdatedDelivery.invoiceId }
             if (oldInv != null) {
-                val invoicePaid = kotlin.math.min(updatedDelivery.paymentCollected, updatedDelivery.totalAmount)
-                val invoiceBalance = (updatedDelivery.totalAmount - invoicePaid).coerceAtLeast(0.0)
+                val invoicePaid = kotlin.math.min(normalizedUpdatedDelivery.paymentCollected, normalizedUpdatedDelivery.totalAmount)
+                val invoiceBalance = (normalizedUpdatedDelivery.totalAmount - invoicePaid).coerceAtLeast(0.0)
                 val invoiceStatus = when {
                     invoiceBalance <= 0.0 -> InvoiceStatus.PAID
                     invoicePaid > 0.0 -> InvoiceStatus.PARTIALLY_PAID
                     else -> InvoiceStatus.UNPAID
                 }
-                val itemsSummary = updatedDelivery.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
+                val itemsSummary = normalizedUpdatedDelivery.items.joinToString(", ") { "${it.quantity}x ${it.bottleName}" }
                 val updatedInv = oldInv.copy(
-                    customerId = updatedDelivery.customerId,
-                    customerName = updatedDelivery.customerName,
-                    date = updatedDelivery.date,
-                    dueDate = updatedDelivery.date,
-                    totalAmount = updatedDelivery.totalAmount,
+                    customerId = normalizedUpdatedDelivery.customerId,
+                    customerName = normalizedUpdatedDelivery.customerName,
+                    date = normalizedUpdatedDelivery.date,
+                    dueDate = normalizedUpdatedDelivery.date,
+                    totalAmount = normalizedUpdatedDelivery.totalAmount,
                     paidAmount = invoicePaid,
                     balanceDue = invoiceBalance,
                     status = invoiceStatus,
@@ -7252,6 +7660,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             }
 
             val finalExpense = baseExpense.copy(
+                viewedBy = old.viewedBy,
                 lastEditedAt = System.currentTimeMillis(),
                 lastEditedBy = _currentUser.value.name.ifBlank { _currentUser.value.username },
                 lastEditNote = combinedExpEditNote
@@ -7698,6 +8107,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
         storage.loadMaterialTransactions()?.let { _materialTransactions.value = it } ?: storage.saveMaterialTransactions(_materialTransactions.value)
         storage.loadBottleCostings()?.let { _bottleCostings.value = it } ?: storage.saveBottleCostings(_bottleCostings.value)
         storage.loadMonthlyRecurringExpenses()?.let { _monthlyRecurringExpenses.value = it } ?: storage.saveMonthlyRecurringExpenses(_monthlyRecurringExpenses.value)
+        storage.loadMonthlyOperationalCosts()?.let { _monthlyOperationalCosts.value = it } ?: storage.saveMonthlyOperationalCosts(_monthlyOperationalCosts.value)
         storage.loadPlantWorkers()?.let { _plantWorkers.value = it } ?: storage.savePlantWorkers(_plantWorkers.value)
         storage.loadCurrentProfile()?.let { _currentUser.value = it }
         refreshSeenRecordsForCurrentUser()
@@ -8632,6 +9042,23 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     )
                 }
 
+                if (hasPermission(AppModule.BOTTLE_STOCK, PermissionAction.VIEW) ||
+                    hasPermission(AppModule.REPORTS, PermissionAction.VIEW)
+                ) {
+                    attachCollectionListener(
+                        db = db,
+                        collection = "monthlyOperationalCosts",
+                        clazz = MonthlyOperationalCostRecord::class.java,
+                        currentLocalProvider = { _monthlyOperationalCosts.value },
+                        idExtractor = { it.id },
+                        onApplyList = { list ->
+                            _monthlyOperationalCosts.value = list
+                            storage.saveMonthlyOperationalCosts(list)
+                        },
+                        markConnectedOnSuccess = true
+                    )
+                }
+
                 if (hasPermission(AppModule.PAYMENTS_BALANCES, PermissionAction.VIEW) ||
                     hasPermission(AppModule.REPORTS, PermissionAction.VIEW)
                 ) {
@@ -9096,6 +9523,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     _materialTransactions.value.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
                     _bottleCostings.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
                     _monthlyRecurringExpenses.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
+                    _monthlyOperationalCosts.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyOperationalCosts", it.id, it) }
                     _plantWorkers.value.forEach { if (it.id.isNotBlank()) syncDocument("plantWorkers", it.id, it) }
                     _cashClosings.value.forEach { if (it.id.isNotBlank()) syncDocument("cashClosings", it.id, it) }
                     _expenseCategories.value.forEach { if (it.id.isNotBlank()) syncDocument("expenseCategories", it.id, it) }
@@ -9292,6 +9720,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                     _bottleMovements.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleMovements", it.id, it) }
                     _bottlePurchases.value.forEach { if (it.id.isNotBlank()) syncDocument("bottlePurchases", it.id, it) }
                     _bottleCostings.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
+                    _monthlyOperationalCosts.value.forEach { if (it.id.isNotBlank()) syncDocument("monthlyOperationalCosts", it.id, it) }
                 }
                 if (hasPermission(AppModule.REFILL_BATCHES, PermissionAction.ADD)) {
                     _bottleRefills.value.forEach { if (it.id.isNotBlank()) syncDocument("bottleRefills", it.id, it) }
@@ -9522,6 +9951,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
             materialTransactions = _materialTransactions.value,
             bottleCostings = _bottleCostings.value,
             monthlyRecurringExpenses = _monthlyRecurringExpenses.value,
+            monthlyOperationalCosts = _monthlyOperationalCosts.value,
             plantWorkers = _plantWorkers.value
         )
 
@@ -9843,6 +10273,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 if (backupData.materialTransactions.isNotEmpty()) _materialTransactions.value = backupData.materialTransactions
                 if (backupData.bottleCostings.isNotEmpty()) _bottleCostings.value = backupData.bottleCostings
                 if (backupData.monthlyRecurringExpenses.isNotEmpty()) _monthlyRecurringExpenses.value = backupData.monthlyRecurringExpenses
+                if (backupData.monthlyOperationalCosts.isNotEmpty()) _monthlyOperationalCosts.value = backupData.monthlyOperationalCosts
                 if (backupData.plantWorkers.isNotEmpty()) _plantWorkers.value = backupData.plantWorkers
 
                 // 3. Persist All Restored Collections to Local Storage
@@ -9869,6 +10300,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                 if (backupData.materialTransactions.isNotEmpty()) storage.saveMaterialTransactions(backupData.materialTransactions)
                 if (backupData.bottleCostings.isNotEmpty()) storage.saveBottleCostings(backupData.bottleCostings)
                 if (backupData.monthlyRecurringExpenses.isNotEmpty()) storage.saveMonthlyRecurringExpenses(backupData.monthlyRecurringExpenses)
+                if (backupData.monthlyOperationalCosts.isNotEmpty()) storage.saveMonthlyOperationalCosts(backupData.monthlyOperationalCosts)
                 if (backupData.plantWorkers.isNotEmpty()) storage.savePlantWorkers(backupData.plantWorkers)
 
                 // 4. Synchronize ALL Restored Collections to Firebase Realtime Database
@@ -9904,6 +10336,7 @@ class WaterPlantRepository private constructor(private val context: Context) {
                             backupData.materialTransactions.forEach { if (it.id.isNotBlank()) syncDocument("materialTransactions", it.id, it) }
                             backupData.bottleCostings.forEach { if (it.id.isNotBlank()) syncDocument("bottleCostings", it.id, it) }
                             backupData.monthlyRecurringExpenses.forEach { if (it.id.isNotBlank()) syncDocument("monthlyRecurringExpenses", it.id, it) }
+                            backupData.monthlyOperationalCosts.forEach { if (it.id.isNotBlank()) syncDocument("monthlyOperationalCosts", it.id, it) }
                             backupData.plantWorkers.forEach { if (it.id.isNotBlank()) syncDocument("plantWorkers", it.id, it) }
                         }
                     } catch (e: Exception) {

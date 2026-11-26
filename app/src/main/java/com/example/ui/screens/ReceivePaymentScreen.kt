@@ -34,9 +34,13 @@ import com.example.ui.components.NewItemBadge
 import com.example.ui.components.PdfPreviewDialog
 import com.example.ui.components.PdfPreviewRequest
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.formatDateAndExactTime
 import com.example.ui.theme.*
 import com.example.util.PdfGenerator
 import com.example.viewmodel.WaterPlantViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,6 +62,8 @@ fun ReceivePaymentScreen(
     var customerSearchQuery by remember { mutableStateOf("") }
     var showOnlyDueFilter by remember { mutableStateOf(true) }
 
+    val todayDateStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
+    var paymentDate by remember { mutableStateOf(todayDateStr) }
     var paymentAmountText by remember { mutableStateOf("") }
     var paymentMethod by remember { mutableStateOf(PaymentMethod.CASH) }
     var notes by remember { mutableStateOf("") }
@@ -599,6 +605,13 @@ fun ReceivePaymentScreen(
                                 }
                             }
                         }
+
+                        // Manual Payment Date Selector (defaults to today; Calendar icon allows changing date)
+                        EditableDateField(
+                            label = "Payment Date (وصولی کی تاریخ)*",
+                            dateValue = paymentDate,
+                            onDateSelected = { paymentDate = it }
+                        )
                     }
                 }
             }
@@ -845,7 +858,7 @@ fun ReceivePaymentScreen(
                                 },
                                 text = {
                                     Text(
-                                        text = "Record payment of Rs. ${totalEnteredAmount.toInt()} (${paymentMethod.label}) from ${targetCustomer?.name.orEmpty()}?\n\nکیا آپ واقعی Rs. ${totalEnteredAmount.toInt()} کی وصولی محفوظ کرنا چاہتے ہیں؟",
+                                        text = "Record payment of Rs. ${totalEnteredAmount.toInt()} (${paymentMethod.label}) on $paymentDate from ${targetCustomer?.name.orEmpty()}?\n\nکیا آپ واقعی تاریخ $paymentDate کو Rs. ${totalEnteredAmount.toInt()} کی وصولی محفوظ کرنا چاہتے ہیں؟",
                                         fontSize = 11.sp,
                                         color = TextPrimaryDark
                                     )
@@ -862,7 +875,8 @@ fun ReceivePaymentScreen(
                                                     amount = totalEnteredAmount,
                                                     method = paymentMethod,
                                                     allocations = allocations.toMap(),
-                                                    notes = notes
+                                                    notes = notes,
+                                                    paymentDate = paymentDate.ifBlank { todayDateStr }
                                                 )
                                                 if (withSlip) {
                                                     receiptToShare = payment
@@ -1451,12 +1465,13 @@ fun ReceivePaymentScreen(
         )
     }
 
-    // Payment Detail Dialog (shows internal Edit Metadata — never on PDFs/invoices)
+    // Payment Detail Dialog (shows exact Date & Time + internal Edit Metadata — never on PDFs/invoices)
     if (selectedPaymentForDetail != null) {
         val livePayment = allPayments.find { it.id == selectedPaymentForDetail!!.id } ?: selectedPaymentForDetail!!
+        val exactDateTimeStr = formatDateAndExactTime(livePayment.date, livePayment.createdAt)
         MobileFormDialog(
             title = "Payment ${livePayment.receiptNumber}",
-            subtitle = "${livePayment.date} • ${livePayment.customerName}",
+            subtitle = "$exactDateTimeStr • ${livePayment.customerName}",
             onDismiss = { selectedPaymentForDetail = null },
             footerContent = {
                 Row(
@@ -1525,7 +1540,7 @@ fun ReceivePaymentScreen(
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Customer: ${livePayment.customerName}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = WaterNavyDark)
-                    Text("Date: ${livePayment.date} • Mode: ${livePayment.paymentMethod.label}", fontSize = 10.sp, color = TextSecondaryDark)
+                    Text("Date & Time: $exactDateTimeStr • Mode: ${livePayment.paymentMethod.label}", fontSize = 10.sp, color = TextSecondaryDark)
                     Text("Received By: ${livePayment.receivedBy}", fontSize = 10.sp, color = TextSecondaryDark)
                     if (livePayment.notes.isNotBlank()) {
                         Text("Notes: ${livePayment.notes}", fontSize = 10.sp, color = TextPrimaryDark)

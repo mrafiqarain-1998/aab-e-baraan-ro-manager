@@ -362,7 +362,12 @@ object PdfGenerator {
             val totalPaid = delivery.paymentCollected.coerceIn(0.0, delivery.totalAmount)
             val outstandingBal = (delivery.totalAmount - totalPaid).coerceAtLeast(0.0)
 
-            val boxHeight = if (delivery.deliveryCharges > 0.0) 118f else 84f
+            val hasCharges = delivery.deliveryCharges > 0.0
+            val hasDiscount = delivery.discount > 0.0
+            val extraRows = (if (hasCharges || hasDiscount) 1 else 0) +
+                (if (hasCharges) 1 else 0) +
+                (if (hasDiscount) 1 else 0)
+            val boxHeight = 84f + (extraRows * 18f)
             ensureSpace(boxHeight + 40f)
 
             paint.color = Color.rgb(248, 250, 252)
@@ -375,7 +380,7 @@ object PdfGenerator {
             paint.style = Paint.Style.FILL
 
             var boxY = y + 22f
-            if (delivery.deliveryCharges > 0.0) {
+            if (hasCharges || hasDiscount) {
                 paint.textSize = 10.5f
                 paint.isFakeBoldText = false
                 paint.color = Color.rgb(71, 85, 105)
@@ -383,9 +388,18 @@ object PdfGenerator {
                 canvas.drawText("Rs. ${delivery.subtotal.toInt()}", 468f, boxY, paint)
                 boxY += 18f
 
-                canvas.drawText("Delivery Charges:", 306f, boxY, paint)
-                canvas.drawText("Rs. ${delivery.deliveryCharges.toInt()}", 468f, boxY, paint)
-                boxY += 18f
+                if (hasCharges) {
+                    canvas.drawText("Delivery Charges:", 306f, boxY, paint)
+                    canvas.drawText("Rs. ${delivery.deliveryCharges.toInt()}", 468f, boxY, paint)
+                    boxY += 18f
+                }
+
+                if (hasDiscount) {
+                    paint.color = Color.rgb(22, 101, 52)
+                    canvas.drawText("Discount:", 306f, boxY, paint)
+                    canvas.drawText("- Rs. ${delivery.discount.toInt()}", 468f, boxY, paint)
+                    boxY += 18f
+                }
             }
 
             paint.textSize = 11f
@@ -701,7 +715,7 @@ object PdfGenerator {
         paint.textSize = 10f
         paint.color = Color.rgb(148, 163, 184)
         paint.isFakeBoldText = false
-        canvas.drawText("Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 40f, y, paint)
+        canvas.drawText("Aab-e-Baraan RO Drinking Water Plant", 40f, y, paint)
 
         document.finishPage(page)
 
@@ -1173,7 +1187,7 @@ object PdfGenerator {
                 paint.color = Color.rgb(100, 116, 139)
                 paint.textSize = 8f
                 paint.isFakeBoldText = false
-                c.drawText("Aab-e-Baraan RO Plant • Contact: ${resolvedAdminPhone()} • $periodLabel Statement", 30f, 828f, paint)
+                c.drawText("Aab-e-Baraan RO Plant • $periodLabel Statement", 30f, 828f, paint)
                 c.drawText("Page $currentPage", 528f, 828f, paint)
             }
 
@@ -1868,7 +1882,7 @@ object PdfGenerator {
                 paint.textSize = 8.6f
                 paint.isFakeBoldText = false
                 paint.color = Color.rgb(224, 242, 254)
-                c.drawText("Contact: ${resolvedAdminPhone()}  |  Page $pNum", 30f, 71f, paint)
+                c.drawText("Page $pNum", 30f, 71f, paint)
             }
 
             fun drawFooter(c: Canvas, pNum: Int) {
@@ -1877,7 +1891,7 @@ object PdfGenerator {
                 paint.color = Color.rgb(100, 116, 139)
                 paint.textSize = 8f
                 paint.isFakeBoldText = false
-                c.drawText("Aab-e-Baraan RO Drinking Water Plant • Contact: ${resolvedAdminPhone()}", 30f, 828f, paint)
+                c.drawText("Aab-e-Baraan RO Drinking Water Plant", 30f, 828f, paint)
                 c.drawText("Page $pNum", 528f, 828f, paint)
             }
 
@@ -1920,7 +1934,7 @@ object PdfGenerator {
             paint.isFakeBoldText = false
             paint.textSize = 9.8f
             paint.color = Color.rgb(51, 65, 85)
-            canvas.drawText("Phone: ${customer.phone.ifBlank { "N/A" }}   |   Area: ${customer.area.ifBlank { "-" }}", 44f, y + 39f, paint)
+            canvas.drawText("Area: ${customer.area.ifBlank { "-" }}   |   Code: ${customer.customerCode.ifBlank { "-" }}", 44f, y + 39f, paint)
             paint.isFakeBoldText = true
             paint.color = if (customer.currentBalance > 0) Color.rgb(185, 28, 28) else Color.rgb(22, 101, 52)
             canvas.drawText("Current Balance: Rs. ${customer.currentBalance.toInt()}", 380f, y + 22f, paint)
